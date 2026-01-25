@@ -1,0 +1,10 @@
+[package]
+name = "preen-core"
+version = "0.1.0"
+edition = "2024"
+description = "Core logic and data models for the Preen system cleaner and optimizer."
+license = "MIT"
+repository = "https://github.com/Preen-rs/preen.git"
+readme = "README.md"
+
+[dependencies]

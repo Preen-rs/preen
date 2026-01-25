@@ -1,0 +1,19 @@
+[package]
+name = "preen"
+version = "0.1.0"
+edition = "2024"
+description = "The ultimate system cleaner and optimizer for macOS and Linux."
+license = "MIT"
+repository = "https://github.com/Preen-rs/preen.git"
+readme = "README.md"
+
+[dependencies]
+
+[workspace]
+members = [
+    "preen-core",
+    "preen-os",
+    "preen-tui",
+    "preen-gui",
+]
+resolver = "2"

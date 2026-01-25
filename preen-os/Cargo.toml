@@ -1,0 +1,11 @@
+[package]
+name = "preen-os"
+version = "0.1.0"
+edition = "2024"
+description = "Operating System abstraction layer for Preen, implementing platform-specific logic."
+license = "MIT"
+repository = "https://github.com/Preen-rs/preen.git"
+readme = "README.md"
+
+[dependencies]
+preen-core = { path = "../preen-core" }

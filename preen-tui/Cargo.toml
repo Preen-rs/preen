@@ -1,0 +1,11 @@
+[package]
+name = "preen-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal User Interface (TUI) for the Preen system cleaner."
+license = "MIT"
+repository = "https://github.com/Preen-rs/preen.git"
+readme = "README.md"
+
+[dependencies]
+preen-core = { path = "../preen-core" }
