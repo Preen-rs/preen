@@ -8,4 +8,4 @@ repository = "https://github.com/Preen-rs/preen.git"
 readme = "README.md"
 
 [dependencies]
-preen-core = { path = "../preen-core" }
+preen-core = "0.1.0"
