@@ -15,5 +15,6 @@ members = [
     "preen-os",
     "preen-tui",
     "preen-gui",
+    "preen-cli",
 ]
 resolver = "2"

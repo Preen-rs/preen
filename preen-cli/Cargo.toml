@@ -1,0 +1,21 @@
+[package]
+name = "preen-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI for managing Preen rule packs"
+license = "MIT"
+repository = "https://github.com/Preen-rs/preen.git"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+preen-core = { path = "../preen-core" }
+dirs = "5.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+tempfile = "3.10"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+thiserror = "1.0"
+time = { version = "0.3", features = ["parsing", "formatting"] }

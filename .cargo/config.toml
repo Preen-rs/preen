@@ -1,0 +1,2 @@
+[alias]
+i18n-contract = "test -p preen-core --test i18n_contract"

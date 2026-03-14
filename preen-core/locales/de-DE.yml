@@ -1,0 +1,58 @@
+_version: 1
+
+plugin:
+  checks:
+    version_matches_lock: "Version stimmt mit Lock ueberein"
+    signature_verified: "Signatur verifiziert"
+    trust_verified: "Vertrauen verifiziert"
+    core_compat_verified: "Core-Kompatibilitaet"
+    action_api_verified: "Action-API"
+    os_target_verified: "OS-Ziel"
+  hints:
+    trust_or_signature_failed: "Signatur oder Vertrauenskette ist fehlgeschlagen."
+    core_compat_failed: "Plugin ist nicht mit der aktuellen Core-Version kompatibel."
+    action_api_unsupported: "Plugin verwendet eine nicht unterstuetzte Action-API-Version."
+    os_target_failed: "Plugin unterstuetzt dieses Betriebssystem nicht."
+    source_checkout_failed: "Git-Checkout fehlgeschlagen. URL oder Pin-Revision pruefen."
+    pack_load_failed: "Plugin-Paket konnte nicht geladen werden. Manifest/Regeln pruefen."
+    invalid_spec: "Ungueltiges Plugin-Spec-Format. Erwartet URL@tag-oder-commit."
+    aggregate_failed: "Mindestens ein Plugin ist fehlgeschlagen. Einzelne Fehler pruefen."
+    resolved_rev_drift: "Installierter Commit stimmt nicht mit dem gepinnten Commit ueberein."
+    manifest_hash_drift: "Manifest-Hash weicht vom Lockfile ab."
+    signature_hash_drift: "Signatur-Hash weicht vom Lockfile ab."
+    version_drift: "Installierte Version stimmt nicht mit dem Lockfile ueberein."
+    unknown_failure: "Unbekannter Fehler. Logs sammeln und erneut versuchen."
+  errors:
+    kind_labels:
+      validation: "Validierung"
+      not_found: "Nicht gefunden"
+      trust: "Vertrauen"
+      verification: "Verifizierung"
+      io: "Ein-/Ausgabe"
+      network: "Netzwerk"
+      unsupported: "Nicht unterstuetzt"
+      internal: "Intern"
+    detail:
+      preflight_spec_invalid: "Ungueltiges Plugin-Spec-Format. Erwartet URL@tag-oder-commit."
+      preflight_clone_failed: "Git-Checkout fehlgeschlagen. URL oder Pin-Revision pruefen."
+      install_clone_failed: "Git-Checkout fehlgeschlagen. URL oder Pin-Revision pruefen."
+      preflight_pack_load_failed: "Plugin-Paket konnte nicht geladen werden. Manifest/Regeln pruefen."
+      preflight_os_target_failed: "Plugin unterstuetzt dieses Betriebssystem nicht."
+      preflight_core_compat_failed: "Plugin ist nicht mit der aktuellen Core-Version kompatibel."
+      preflight_action_api_unsupported: "Plugin verwendet eine nicht unterstuetzte Action-API-Version."
+      preflight_signature_or_trust_failed: "Signatur oder Vertrauenskette ist fehlgeschlagen."
+      test_all_failed: "Mindestens ein Plugin-Test ist fehlgeschlagen."
+      preflight_all_failed: "Mindestens ein Plugin-Preflight ist fehlgeschlagen."
+    message:
+      plugin_not_found: "Plugin nicht gefunden."
+      unsupported_action_api: "Nicht unterstuetzte Action-API-Version."
+      identity_not_allowed: "Identitaet ist nicht erlaubt."
+      target_required_unless_all: "Target ist erforderlich, ausser --all ist gesetzt."
+      spec_required_unless_all: "Spec ist erforderlich, ausser --all ist gesetzt."
+
+undo:
+  ambiguous: "Mehrere passende Eintraege im Papierkorb gefunden. Bitte manuell pruefen."
+  not_found: "Undo-Ziel wurde im Papierkorb nicht gefunden."
+  restore_failed: "Undo-Wiederherstellung fehlgeschlagen. Das Ziel existiert moeglicherweise bereits."
+  info_missing: "Undo-Metadaten fehlen fuer dieses Element."
+  generic: "Undo fehlgeschlagen. Bitte erneut versuchen."

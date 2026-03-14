@@ -1,0 +1,58 @@
+_version: 1
+
+plugin:
+  checks:
+    version_matches_lock: "Version matches lock"
+    signature_verified: "Signature verified"
+    trust_verified: "Trust verified"
+    core_compat_verified: "Core compatibility"
+    action_api_verified: "Action API"
+    os_target_verified: "OS target"
+  hints:
+    trust_or_signature_failed: "Signature or trust chain verification failed."
+    core_compat_failed: "Plugin is incompatible with current core version."
+    action_api_unsupported: "Plugin uses an unsupported action API version."
+    os_target_failed: "Plugin does not support the current operating system."
+    source_checkout_failed: "Git checkout failed. Validate URL and pinned revision."
+    pack_load_failed: "Plugin pack failed to load. Validate manifest and rule files."
+    invalid_spec: "Invalid plugin spec format. Expected URL@tag-or-commit."
+    aggregate_failed: "One or more plugins failed. Inspect individual failures."
+    resolved_rev_drift: "Installed commit differs from the pinned commit in lockfile."
+    manifest_hash_drift: "Manifest hash differs from lockfile."
+    signature_hash_drift: "Signature hash differs from lockfile."
+    version_drift: "Installed plugin version differs from lockfile."
+    unknown_failure: "Unknown failure. Collect logs and retry."
+  errors:
+    kind_labels:
+      validation: "Validation"
+      not_found: "Not found"
+      trust: "Trust"
+      verification: "Verification"
+      io: "IO"
+      network: "Network"
+      unsupported: "Unsupported"
+      internal: "Internal"
+    detail:
+      preflight_spec_invalid: "Invalid plugin spec format. Expected URL@tag-or-commit."
+      preflight_clone_failed: "Git checkout failed. Validate URL and pinned revision."
+      install_clone_failed: "Git checkout failed. Validate URL and pinned revision."
+      preflight_pack_load_failed: "Plugin pack failed to load. Validate manifest and rule files."
+      preflight_os_target_failed: "Plugin does not support the current operating system."
+      preflight_core_compat_failed: "Plugin is incompatible with current core version."
+      preflight_action_api_unsupported: "Plugin uses an unsupported action API version."
+      preflight_signature_or_trust_failed: "Signature or trust chain verification failed."
+      test_all_failed: "One or more plugin tests failed."
+      preflight_all_failed: "One or more plugin preflight checks failed."
+    message:
+      plugin_not_found: "Plugin not found."
+      unsupported_action_api: "Unsupported action API version."
+      identity_not_allowed: "Identity is not allowed."
+      target_required_unless_all: "Target is required unless --all is set."
+      spec_required_unless_all: "Spec is required unless --all is set."
+
+undo:
+  ambiguous: "Multiple matching trash entries found. Please review manually."
+  not_found: "Undo target is not found in trash."
+  restore_failed: "Undo restore failed. The target path may already exist."
+  info_missing: "Undo metadata is missing for this item."
+  generic: "Undo failed. Please try again."

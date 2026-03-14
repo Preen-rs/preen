@@ -1,0 +1,12 @@
+schema_version = 1
+
+[[plugins]]
+pack_id = "preen-rs.homebrew"
+source = "registry"
+url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
+rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
+resolved_rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
+version = "1.0.7"
+manifest_hash = "sha256:0a3bb4042c659c630cf519551c48f050d13c1329bc990f5dd229ef6bcbb0a763"
+signature = "sha256:ae5e8c1ee0b552ab8b5acf1a386f355ec09e7b0ece19bd38dc81c109c57dcf41"
+trusted_identity = "https://github.com/Preen-rs/preen-rulepack-homebrew/.github/workflows/release-manual.yml@refs/heads/main"

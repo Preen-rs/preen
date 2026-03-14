@@ -1,0 +1,95 @@
+use preen_core::plugin::{
+    PluginCheckId, PluginCheckStatus, PluginTestDrift, plugin_check_label, plugin_error_kind_label,
+    plugin_failure_hint_from_detail_code, plugin_failure_hint_message,
+    plugin_localized_error_message, plugin_primary_failure_hint_from_drifts,
+};
+
+#[test]
+fn plugin_check_id_serializes_as_stable_snake_case() {
+    let row = PluginCheckStatus::new(PluginCheckId::CoreCompatVerified, true);
+    let encoded = serde_json::to_string(&row).unwrap();
+    assert!(encoded.contains("\"check\":\"core_compat_verified\""));
+    assert!(encoded.contains("\"passed\":true"));
+}
+
+#[test]
+fn plugin_check_label_supports_en_de_and_fallback() {
+    assert_eq!(
+        plugin_check_label(PluginCheckId::TrustVerified, "en"),
+        "Trust verified"
+    );
+    assert_eq!(
+        plugin_check_label(PluginCheckId::TrustVerified, "de"),
+        "Vertrauen verifiziert"
+    );
+    assert_eq!(
+        plugin_check_label(PluginCheckId::TrustVerified, "fr"),
+        "Trust verified"
+    );
+}
+
+#[test]
+fn plugin_failure_hint_supports_mapping_and_locale_message() {
+    let hint = plugin_failure_hint_from_detail_code("preflight_action_api_unsupported");
+    assert_eq!(hint.code, "action_api_unsupported");
+    assert_eq!(hint.priority, 1);
+
+    let de = plugin_failure_hint_message(hint.code, "de-DE");
+    assert!(de.contains("Action-API"));
+    let en = plugin_failure_hint_message(hint.code, "en-US");
+    assert!(en.contains("action API"));
+
+    let verify_hint = plugin_failure_hint_from_detail_code("verify_manifest_hash_drift");
+    assert_eq!(verify_hint.code, "manifest_hash_drift");
+    assert_eq!(verify_hint.priority, 2);
+
+    let test_hint = plugin_failure_hint_from_detail_code("test_signature_or_trust_failed");
+    assert_eq!(test_hint.code, "trust_or_signature_failed");
+    assert_eq!(test_hint.priority, 0);
+
+    let load_hint = plugin_failure_hint_from_detail_code("verify_pack_load_failed");
+    assert_eq!(load_hint.code, "pack_load_failed");
+    assert_eq!(load_hint.priority, 2);
+}
+
+#[test]
+fn plugin_primary_failure_hint_uses_highest_priority() {
+    let drifts = vec![
+        PluginTestDrift {
+            field: "version".to_string(),
+            expected: "1.0.0".to_string(),
+            actual: "2.0.0".to_string(),
+        },
+        PluginTestDrift {
+            field: "signature_or_trust".to_string(),
+            expected: "verified".to_string(),
+            actual: "invalid".to_string(),
+        },
+    ];
+    let hint = plugin_primary_failure_hint_from_drifts(&drifts).unwrap();
+    assert_eq!(hint.code, "trust_or_signature_failed");
+    assert_eq!(hint.priority, 0);
+}
+
+#[test]
+fn plugin_localized_error_message_uses_detail_code_and_fallback() {
+    let de = plugin_localized_error_message(
+        Some("preflight_os_target_failed"),
+        "unsupported os target",
+        "de-DE",
+    );
+    assert!(de.contains("Betriebssystem"));
+
+    let en = plugin_localized_error_message(None, "plugin not found", "en-US");
+    assert!(en.contains("Plugin not found"));
+
+    let passthrough = plugin_localized_error_message(None, "custom failure", "de-DE");
+    assert_eq!(passthrough, "custom failure");
+}
+
+#[test]
+fn plugin_error_kind_label_supports_en_de_and_fallback() {
+    assert_eq!(plugin_error_kind_label("trust", "en-US"), "Trust");
+    assert_eq!(plugin_error_kind_label("trust", "de-DE"), "Vertrauen");
+    assert_eq!(plugin_error_kind_label("unknown-kind", "en-US"), "Internal");
+}
