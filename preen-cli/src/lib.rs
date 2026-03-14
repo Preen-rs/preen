@@ -193,7 +193,7 @@ fn run_plugin(cmd: &PluginCommand, verifier: &dyn SignatureVerifier) -> Result<(
             pack_id,
             lockfile,
             json,
-        } => update_plugin(pack_id, lockfile.clone(), *json),
+        } => update_plugin(pack_id, lockfile.clone(), *json, verifier),
         PluginCommand::Remove {
             pack_id,
             lockfile,
@@ -445,10 +445,6 @@ fn print_preflight_output(out: &PluginPreflightOutput) {
     println!("duration_ms: {}", out.duration_ms);
     let language = cli_language();
     print_check_rows(&out.checks, &language);
-}
-
-fn install_plugin_internal(spec: &str, lockfile: Option<PathBuf>) -> Result<LockedPlugin, String> {
-    install_plugin_internal_with_verifier(spec, lockfile, &SigstoreVerifier)
 }
 
 fn install_plugin_internal_with_verifier(
@@ -1278,7 +1274,12 @@ fn plugin_test_report_in_dir(
     })
 }
 
-fn update_plugin(pack_id: &str, lockfile: Option<PathBuf>, json: bool) -> Result<(), String> {
+fn update_plugin(
+    pack_id: &str,
+    lockfile: Option<PathBuf>,
+    json: bool,
+    verifier: &dyn SignatureVerifier,
+) -> Result<(), String> {
     let lock = load_lockfile(lockfile.as_deref())?;
     let existing = lock
         .plugins
@@ -1286,7 +1287,11 @@ fn update_plugin(pack_id: &str, lockfile: Option<PathBuf>, json: bool) -> Result
         .find(|p| p.pack_id == pack_id)
         .ok_or_else(|| err(CliErrorKind::NotFound, "plugin not found"))?
         .clone();
-    let locked = install_plugin_internal(&format!("{}@{}", existing.url, existing.rev), lockfile)?;
+    let locked = install_plugin_internal_with_verifier(
+        &format!("{}@{}", existing.url, existing.rev),
+        lockfile,
+        verifier,
+    )?;
     if json {
         println!(
             "{}",
@@ -2337,11 +2342,11 @@ pub fn save_lockfile_at(path: &Path, lock: &PluginLockfile) -> Result<(), String
             format!("lockfile serialize error: {e:?}"),
         )
     })?;
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|e| err_with(CliErrorKind::Io, "lockfile dir create failed", e))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| err_with(CliErrorKind::Io, "lockfile dir create failed", e))?;
     }
     fs::write(path, content).map_err(|e| err_with(CliErrorKind::Io, "lockfile write failed", e))
 }

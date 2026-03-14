@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -58,6 +59,49 @@ fn run_git(args: &[&str]) {
         args,
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn plugin_install_base_dir_from_env() -> PathBuf {
+    match std::env::consts::OS {
+        "macos" => PathBuf::from(std::env::var("HOME").unwrap())
+            .join("Library")
+            .join("Application Support")
+            .join("Preen")
+            .join("plugins"),
+        "linux" => PathBuf::from(std::env::var("XDG_CONFIG_HOME").unwrap())
+            .join("preen")
+            .join("plugins"),
+        other => panic!("unsupported os in test: {other}"),
+    }
+}
+
+fn with_temp_user_env<T>(f: impl FnOnce() -> T) -> T {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let xdg = tmp.path().join("xdg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&xdg).unwrap();
+
+    let old_home: Option<OsString> = std::env::var_os("HOME");
+    let old_xdg: Option<OsString> = std::env::var_os("XDG_CONFIG_HOME");
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::set_var("XDG_CONFIG_HOME", &xdg);
+    }
+    let out = f();
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        match old_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+    out
 }
 
 fn check_passed_from_json(data: &Value, check_id: &str) -> Option<bool> {
@@ -1002,6 +1046,143 @@ fn run_typed_returns_not_found_for_missing_plugin_test() {
     let err = run_typed(cli).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::NotFound);
     assert_eq!(err.message, "plugin not found");
+}
+
+#[test]
+fn install_verify_remove_lifecycle_with_temp_user_state_dirs() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{rev}", repo.to_string_lossy());
+        let lockfile = tmp.path().join("plugins.lock");
+
+        let install = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "install",
+            &spec,
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(install, &AlwaysOkVerifier).unwrap();
+
+        let base_dir = plugin_install_base_dir_from_env();
+        let pack_dir = base_dir.join("test.pack");
+        assert!(pack_dir.exists(), "installed plugin dir missing");
+
+        let verify = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "verify",
+            "test.pack",
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(verify, &AlwaysOkVerifier).unwrap();
+
+        let remove = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "remove",
+            "test.pack",
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(remove, &AlwaysOkVerifier).unwrap();
+
+        let lock = load_lockfile_at(&lockfile).unwrap();
+        assert!(
+            lock.plugins.is_empty(),
+            "lockfile must be empty after remove"
+        );
+        assert!(!pack_dir.exists(), "plugin dir must be removed");
+
+        let verify_after_remove = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "verify",
+            "test.pack",
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        let err =
+            run_typed_with_verifier_for_test(verify_after_remove, &AlwaysOkVerifier).unwrap_err();
+        assert_eq!(err.kind, CliErrorKind::NotFound);
+    });
+}
+
+#[test]
+fn update_plugin_rewrites_tampered_lock_hashes() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{rev}", repo.to_string_lossy());
+        let lockfile = tmp.path().join("plugins.lock");
+
+        let install = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "install",
+            &spec,
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(install, &AlwaysOkVerifier).unwrap();
+
+        let mut lock = load_lockfile_at(&lockfile).unwrap();
+        lock.plugins[0].manifest_hash = "sha256:tampered".to_string();
+        lock.plugins[0].signature = "sha256:tampered".to_string();
+        save_lockfile_at(&lockfile, &lock).unwrap();
+
+        let update = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "update",
+            "test.pack",
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(update, &AlwaysOkVerifier).unwrap();
+
+        let repaired = load_lockfile_at(&lockfile).unwrap();
+        assert_ne!(repaired.plugins[0].manifest_hash, "sha256:tampered");
+        assert_ne!(repaired.plugins[0].signature, "sha256:tampered");
+    });
+}
+
+#[test]
+fn update_plugin_not_found_returns_not_found_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lockfile = tmp.path().join("plugins.lock");
+    save_lockfile_at(
+        &lockfile,
+        &PluginLockfile {
+            schema_version: PluginLockfile::SCHEMA_V1,
+            plugins: Vec::new(),
+        },
+    )
+    .unwrap();
+    let cli = Cli::try_parse_from([
+        "preen",
+        "plugin",
+        "update",
+        "missing.pack",
+        "--lockfile",
+        lockfile.to_str().unwrap(),
+    ])
+    .unwrap();
+    let err = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::NotFound);
 }
 
 #[test]
