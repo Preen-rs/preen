@@ -1,29 +1,141 @@
-name: Release
+name: Release Binaries (Signed)
 
 on:
-  # push:
-  #   branches:
-  #     - main
-  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Release to Crates.io
+  prepare:
+    name: Validate tag metadata
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-release
-        run: cargo install cargo-release
-
-      - name: Configure Git
+      - name: Parse and validate release tag
+        id: meta
+        shell: bash
         run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          TAG="${GITHUB_REF_NAME}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid release tag: $TAG"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Run Release
-        run: cargo release --workspace --execute --no-confirm --token ${{ secrets.CRATES_IO_TOKEN }}
+  ensure-release:
+    name: Ensure GitHub release exists
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Create release if missing
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release already exists: $TAG"
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --title "Preen $VERSION" \
+            --notes "Signed preen-cli binaries for version $VERSION."
+
+  build-sign-upload:
+    name: Build and sign (${{ matrix.target }})
+    needs: [prepare, ensure-release]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build preen-cli
+        run: cargo build --release -p preen-cli
+
+      - name: Package release artifact
+        id: package
+        shell: bash
+        run: |
+          ASSET_BASENAME="preen-cli-${VERSION}-${TARGET}"
+          ASSET="${ASSET_BASENAME}.tar.gz"
+          tar -czf "$ASSET" -C target/release preen-cli
+          python3 - "$ASSET" <<'PY'
+          import hashlib
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          path.with_suffix(path.suffix + ".sha256").write_text(f"{digest}  {path.name}\n", encoding="utf-8")
+          PY
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
+
+      - name: Sign artifacts (keyless)
+        run: |
+          ASSET="${{ steps.package.outputs.asset }}"
+          cosign sign-blob --yes \
+            --bundle "${ASSET}.sigstore.json" \
+            "$ASSET"
+          cosign sign-blob --yes \
+            --bundle "${ASSET}.sha256.sigstore.json" \
+            "${ASSET}.sha256"
+
+      - name: Verify just-generated signatures
+        run: |
+          ASSET="${{ steps.package.outputs.asset }}"
+          IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          ISSUER="https://token.actions.githubusercontent.com"
+          cosign verify-blob \
+            --bundle "${ASSET}.sigstore.json" \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer "$ISSUER" \
+            "$ASSET"
+          cosign verify-blob \
+            --bundle "${ASSET}.sha256.sigstore.json" \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer "$ISSUER" \
+            "${ASSET}.sha256"
+
+      - name: Upload signed assets to release
+        run: |
+          ASSET="${{ steps.package.outputs.asset }}"
+          gh release upload "$TAG" \
+            "$ASSET" \
+            "${ASSET}.sha256" \
+            "${ASSET}.sigstore.json" \
+            "${ASSET}.sha256.sigstore.json" \
+            --clobber
