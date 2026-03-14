@@ -15,10 +15,10 @@ use preen_cli::{
     plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
     plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
     plugin_update_json_for_test, plugin_verify_for_test, plugin_verify_json_for_test,
-    plugin_verify_text_for_test, preflight_failure_row_for_test,
-    primary_hint_for_drift_fields_for_test, registry_backup_path_for_test,
-    registry_update_json_for_test, resolve_registry_for_test, run_typed,
-    run_typed_with_verifier_for_test, save_lockfile_at, search_registry_for_test,
+    plugin_verify_text_for_test, preferred_lockfile_read_path_for_test,
+    preflight_failure_row_for_test, primary_hint_for_drift_fields_for_test,
+    registry_backup_path_for_test, registry_update_json_for_test, resolve_registry_for_test,
+    run_typed, run_typed_with_verifier_for_test, save_lockfile_at, search_registry_for_test,
     search_registry_json_for_test, test_failure_row_for_test, trust_policy_from_str,
     validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
@@ -2658,6 +2658,40 @@ trusted_identity = "https://github.com/Preen-rs/test"
     fs::write(&path, content).unwrap();
     let err = load_lockfile_at(&path).unwrap_err();
     assert!(err.contains("DuplicatePackId"));
+}
+
+#[test]
+fn preferred_lockfile_read_path_uses_default_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    let default_path = tmp.path().join("state").join("plugins.lock");
+    let legacy_path = tmp.path().join("preen-plugins.lock");
+    fs::create_dir_all(default_path.parent().unwrap()).unwrap();
+    fs::write(&default_path, "schema_version = 1\n").unwrap();
+    fs::write(&legacy_path, "schema_version = 1\n").unwrap();
+
+    let selected = preferred_lockfile_read_path_for_test(&default_path, &legacy_path);
+    assert_eq!(selected, default_path);
+}
+
+#[test]
+fn preferred_lockfile_read_path_falls_back_to_legacy_when_default_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let default_path = tmp.path().join("state").join("plugins.lock");
+    let legacy_path = tmp.path().join("preen-plugins.lock");
+    fs::write(&legacy_path, "schema_version = 1\n").unwrap();
+
+    let selected = preferred_lockfile_read_path_for_test(&default_path, &legacy_path);
+    assert_eq!(selected, legacy_path);
+}
+
+#[test]
+fn preferred_lockfile_read_path_prefers_default_path_when_both_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let default_path = tmp.path().join("state").join("plugins.lock");
+    let legacy_path = tmp.path().join("preen-plugins.lock");
+
+    let selected = preferred_lockfile_read_path_for_test(&default_path, &legacy_path);
+    assert_eq!(selected, default_path);
 }
 
 #[test]

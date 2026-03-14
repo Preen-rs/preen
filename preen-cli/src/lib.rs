@@ -2266,33 +2266,12 @@ fn registry_index_path() -> Result<PathBuf, String> {
             return Ok(path);
         }
     }
-    match std::env::consts::OS {
-        "macos" => {
-            let dir = dirs::home_dir().ok_or_else(|| err(CliErrorKind::Io, "missing home dir"))?;
-            Ok(dir
-                .join("Library")
-                .join("Application Support")
-                .join("Preen")
-                .join("registry-index.toml"))
-        }
-        "linux" => {
-            let dir =
-                dirs::config_dir().ok_or_else(|| err(CliErrorKind::Io, "missing config dir"))?;
-            Ok(dir.join("preen").join("registry-index.toml"))
-        }
-        other => Err(err(
-            CliErrorKind::Unsupported,
-            format!("unsupported OS: {other}"),
-        )),
-    }
+    Ok(preen_state_dir()?.join("registry-index.toml"))
 }
 
 fn load_lockfile(path: Option<&Path>) -> Result<PluginLockfile, String> {
-    let path = match path {
-        Some(path) => path,
-        None => default_lockfile_path(),
-    };
-    load_lockfile_at(path)
+    let path = resolve_lockfile_read_path(path)?;
+    load_lockfile_at(&path)
 }
 
 pub fn load_lockfile_at(path: &Path) -> Result<PluginLockfile, String> {
@@ -2312,16 +2291,43 @@ pub fn load_lockfile_at(path: &Path) -> Result<PluginLockfile, String> {
     })
 }
 
-fn default_lockfile_path() -> &'static Path {
+fn resolve_lockfile_read_path(path: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(path) = path {
+        return Ok(path.to_path_buf());
+    }
+    let default = default_lockfile_path()?;
+    let legacy = legacy_lockfile_path();
+    Ok(preferred_lockfile_read_path(&default, legacy))
+}
+
+fn preferred_lockfile_read_path(default_path: &Path, legacy_path: &Path) -> PathBuf {
+    if default_path.exists() {
+        return default_path.to_path_buf();
+    }
+    if legacy_path.exists() {
+        return legacy_path.to_path_buf();
+    }
+    default_path.to_path_buf()
+}
+
+pub fn preferred_lockfile_read_path_for_test(default_path: &Path, legacy_path: &Path) -> PathBuf {
+    preferred_lockfile_read_path(default_path, legacy_path)
+}
+
+fn default_lockfile_path() -> Result<PathBuf, String> {
+    Ok(preen_state_dir()?.join("plugins.lock"))
+}
+
+fn legacy_lockfile_path() -> &'static Path {
     Path::new("preen-plugins.lock")
 }
 
 fn save_lockfile(path: Option<&Path>, lock: &PluginLockfile) -> Result<(), String> {
     let path = match path {
-        Some(path) => path,
-        None => default_lockfile_path(),
+        Some(path) => path.to_path_buf(),
+        None => default_lockfile_path()?,
     };
-    save_lockfile_at(path, lock)
+    save_lockfile_at(&path, lock)
 }
 
 pub fn save_lockfile_at(path: &Path, lock: &PluginLockfile) -> Result<(), String> {
@@ -2331,6 +2337,12 @@ pub fn save_lockfile_at(path: &Path, lock: &PluginLockfile) -> Result<(), String
             format!("lockfile serialize error: {e:?}"),
         )
     })?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| err_with(CliErrorKind::Io, "lockfile dir create failed", e))?;
+        }
+    }
     fs::write(path, content).map_err(|e| err_with(CliErrorKind::Io, "lockfile write failed", e))
 }
 
@@ -2378,29 +2390,31 @@ pub fn install_plugin_in_dir_for_test(
 }
 
 fn ensure_install_base_dir() -> Result<PathBuf, String> {
-    let base = match std::env::consts::OS {
+    let base = preen_state_dir()?.join("plugins");
+    fs::create_dir_all(&base)
+        .map_err(|e| err_with(CliErrorKind::Io, "plugin base dir create failed", e))?;
+    Ok(base)
+}
+
+fn preen_state_dir() -> Result<PathBuf, String> {
+    match std::env::consts::OS {
         "macos" => {
             let dir = dirs::home_dir().ok_or_else(|| err(CliErrorKind::Io, "missing home dir"))?;
-            dir.join("Library")
+            Ok(dir
+                .join("Library")
                 .join("Application Support")
-                .join("Preen")
-                .join("plugins")
+                .join("Preen"))
         }
         "linux" => {
             let dir =
                 dirs::config_dir().ok_or_else(|| err(CliErrorKind::Io, "missing config dir"))?;
-            dir.join("preen").join("plugins")
+            Ok(dir.join("preen"))
         }
-        other => {
-            return Err(err(
-                CliErrorKind::Unsupported,
-                format!("unsupported OS: {other}"),
-            ));
-        }
-    };
-    fs::create_dir_all(&base)
-        .map_err(|e| err_with(CliErrorKind::Io, "plugin base dir create failed", e))?;
-    Ok(base)
+        other => Err(err(
+            CliErrorKind::Unsupported,
+            format!("unsupported OS: {other}"),
+        )),
+    }
 }
 
 fn git_clone_at(url: &str, rev: &str, dest: &Path) -> Result<String, String> {
