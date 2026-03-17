@@ -7,25 +7,29 @@ use std::sync::Mutex;
 
 use clap::Parser;
 use preen_cli::{
-    Cli, CliError, CliErrorKind, check_registry_freshness_for_test, cli_label_for_test,
-    clone_rule_pack_for_test, default_signature_source_for_test, error_json_for_test,
-    hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
-    load_lockfile_at, parse_install_spec, parse_plugin_spec, plugin_info_json_for_test,
-    plugin_install_json_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
-    plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
-    plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
-    plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
-    plugin_update_json_for_test, plugin_verify_for_test, plugin_verify_json_for_test,
-    plugin_verify_text_for_test, preferred_lockfile_read_path_for_test,
-    preflight_failure_row_for_test, primary_hint_for_drift_fields_for_test,
-    registry_backup_path_for_test, registry_update_json_for_test, resolve_registry_for_test,
-    run_typed, run_typed_with_verifier_for_test, save_lockfile_at, search_registry_for_test,
+    Cli, CliError, CliErrorKind, check_registry_freshness_for_test,
+    clean_selection_summary_for_test, cli_label_for_test, clone_rule_pack_for_test,
+    default_signature_source_for_test, enforce_clean_scope_for_test, error_json_for_test,
+    format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
+    install_plugin_in_dir_for_test, load_lockfile_at, parse_install_spec, parse_plugin_spec,
+    plugin_info_json_for_test, plugin_install_json_for_test, plugin_list_json_for_test,
+    plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
+    plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
+    plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
+    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_verify_for_test,
+    plugin_verify_json_for_test, plugin_verify_text_for_test,
+    preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
+    primary_hint_for_drift_fields_for_test, registry_backup_path_for_test,
+    registry_update_json_for_test, resolve_registry_for_test, run_typed,
+    run_typed_with_verifier_for_test, save_lockfile_at, search_registry_for_test,
     search_registry_json_for_test, test_failure_row_for_test, trust_policy_from_str,
     validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
 };
 use preen_core::plugin::{SignatureVerifier, VerificationInput, VerificationOutcome, VerifyError};
 use preen_core::plugin_lock::{LockedPlugin, PluginLockfile};
+use preen_core::rules::ScanRule;
+use preen_core::{CleanableItem, ItemCategory, ScanResult};
 use serde_json::Value;
 use time::Duration as TimeDuration;
 use time::OffsetDateTime;
@@ -801,6 +805,10 @@ fn error_json_for_test_tagged_kinds() {
 fn wants_json_output_detects_flag() {
     let cli = Cli::try_parse_from(["preen", "plugin", "search", "--json"]).unwrap();
     assert!(cli.wants_json_output());
+    let cli = Cli::try_parse_from(["preen", "clean", "--json"]).unwrap();
+    assert!(cli.wants_json_output());
+    let cli = Cli::try_parse_from(["preen", "status", "--json"]).unwrap();
+    assert!(cli.wants_json_output());
     let cli = Cli::try_parse_from(["preen", "plugin", "registry-update", "--json"]).unwrap();
     assert!(cli.wants_json_output());
     let cli =
@@ -814,6 +822,389 @@ fn wants_json_output_detects_flag() {
     assert!(cli.wants_json_output());
     let cli = Cli::try_parse_from(["preen", "plugin", "list"]).unwrap();
     assert!(!cli.wants_json_output());
+}
+
+#[test]
+fn top_level_system_commands_are_phase2_placeholders() {
+    let cases = [
+        ["preen", "uninstall"],
+        ["preen", "optimize"],
+        ["preen", "analyze"],
+        ["preen", "status"],
+        ["preen", "purge"],
+        ["preen", "installer"],
+        ["preen", "check"],
+        ["preen", "touchid"],
+        ["preen", "completion"],
+        ["preen", "update"],
+        ["preen", "remove"],
+    ];
+
+    for args in cases {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let err = run_typed(cli).unwrap_err();
+        assert_eq!(err.kind, CliErrorKind::Unsupported);
+        assert_eq!(err.detail_code.as_deref(), Some("command_not_implemented"));
+    }
+}
+
+#[test]
+fn top_level_system_commands_emit_json_errors() {
+    let cli = Cli::try_parse_from(["preen", "uninstall", "--json"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    let out = cli.format_error(&err);
+    let parsed: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["kind"].as_str().unwrap(), "error");
+    assert_eq!(
+        parsed["data"]["error_kind"].as_str().unwrap(),
+        "unsupported"
+    );
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "command_not_implemented"
+    );
+}
+
+#[test]
+fn all_top_level_system_commands_emit_json_errors() {
+    let cases = [
+        ["preen", "uninstall", "--json"],
+        ["preen", "optimize", "--json"],
+        ["preen", "analyze", "--json"],
+        ["preen", "status", "--json"],
+        ["preen", "purge", "--json"],
+        ["preen", "installer", "--json"],
+        ["preen", "check", "--json"],
+        ["preen", "touchid", "--json"],
+        ["preen", "completion", "--json"],
+        ["preen", "update", "--json"],
+        ["preen", "remove", "--json"],
+    ];
+
+    for args in cases {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let err = run_typed(cli.clone()).unwrap_err();
+        let out = cli.format_error(&err);
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["kind"].as_str().unwrap(), "error");
+        assert_eq!(
+            parsed["data"]["error_kind"].as_str().unwrap(),
+            "unsupported"
+        );
+        assert_eq!(
+            parsed["data"]["detail_code"].as_str().unwrap(),
+            "command_not_implemented"
+        );
+    }
+}
+
+#[test]
+fn top_level_system_commands_text_errors_include_command_name() {
+    let cases = [
+        ("uninstall", "uninstall command is not implemented yet"),
+        ("optimize", "optimize command is not implemented yet"),
+        ("analyze", "analyze command is not implemented yet"),
+        ("status", "status command is not implemented yet"),
+        ("purge", "purge command is not implemented yet"),
+        ("installer", "installer command is not implemented yet"),
+        ("check", "check command is not implemented yet"),
+        ("touchid", "touchid command is not implemented yet"),
+        ("completion", "completion command is not implemented yet"),
+        ("update", "update command is not implemented yet"),
+        ("remove", "remove command is not implemented yet"),
+    ];
+
+    for (cmd, expected_message) in cases {
+        let cli = Cli::try_parse_from(["preen", cmd]).unwrap();
+        let err = run_typed(cli.clone()).unwrap_err();
+        let out = cli.format_error(&err);
+        assert!(out.contains("kind=unsupported"));
+        assert!(out.contains("detail_code=command_not_implemented"));
+        assert!(out.contains(expected_message));
+    }
+}
+
+#[test]
+fn clean_dry_run_executes_with_temp_path_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("a.txt"), b"data").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_CLEAN_PATHS", cache_dir.as_os_str());
+    }
+
+    let cli = Cli::try_parse_from(["preen", "clean", "--dry-run", "--json"]).unwrap();
+    let result = run_typed(cli);
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_CLEAN_PATHS");
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
+fn clean_apply_requires_confirm_flag() {
+    let cli = Cli::try_parse_from(["preen", "clean", "--json"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("clean_confirmation_required")
+    );
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "clean_confirmation_required"
+    );
+}
+
+#[test]
+fn clean_apply_with_confirm_executes_with_temp_path_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let target_file = cache_dir.join("a.txt");
+    fs::write(&target_file, b"data").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_CLEAN_PATHS", cache_dir.as_os_str());
+    }
+
+    let cli = Cli::try_parse_from(["preen", "clean", "--confirm", "--json"]).unwrap();
+    let result = run_typed(cli);
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_CLEAN_PATHS");
+    }
+    assert!(result.is_ok());
+    assert!(cache_dir.exists());
+    assert!(!target_file.exists());
+}
+
+#[test]
+fn clean_apply_with_delete_strategy_executes() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let target_file = cache_dir.join("a.txt");
+    fs::write(&target_file, b"data").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_CLEAN_PATHS", cache_dir.as_os_str());
+    }
+
+    let cli = Cli::try_parse_from([
+        "preen",
+        "clean",
+        "--confirm",
+        "--strategy",
+        "delete",
+        "--json",
+    ])
+    .unwrap();
+    let result = run_typed(cli);
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_CLEAN_PATHS");
+    }
+    assert!(result.is_ok());
+    assert!(!target_file.exists());
+}
+
+#[test]
+fn clean_apply_rejects_symlink_targets() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let outside_file = temp.path().join("outside.txt");
+    fs::write(&outside_file, b"data").unwrap();
+    let symlink_path = cache_dir.join("link.txt");
+    std::os::unix::fs::symlink(&outside_file, &symlink_path).unwrap();
+    let roots = vec![cache_dir.to_string_lossy().to_string()];
+    let selected = vec![symlink_path.to_string_lossy().to_string()];
+    let err = enforce_clean_scope_for_test(&selected, &roots).unwrap_err();
+    assert!(err.contains("clean_symlink_not_allowed"));
+}
+
+#[test]
+fn clean_apply_respects_selection_limit() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let f1 = cache_dir.join("a.txt");
+    let f2 = cache_dir.join("b.txt");
+    fs::write(&f1, b"12345").unwrap();
+    fs::write(&f2, b"1234").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_CLEAN_PATHS", cache_dir.as_os_str());
+        std::env::set_var("PREEN_CLEAN_MAX_ITEMS", "1");
+    }
+
+    let cli = Cli::try_parse_from(["preen", "clean", "--confirm", "--json"]).unwrap();
+    let result = run_typed(cli);
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_CLEAN_MAX_ITEMS");
+        std::env::remove_var("PREEN_CLEAN_PATHS");
+    }
+    assert!(result.is_ok());
+    let remaining = usize::from(f1.exists()) + usize::from(f2.exists());
+    assert_eq!(remaining, 1);
+}
+
+#[test]
+fn clean_selection_summary_prefers_larger_items() {
+    let roots = vec!["/tmp/cache".to_string()];
+    let scan = ScanResult {
+        executed_rules: vec![ScanRule {
+            id: "rule-1".to_string(),
+            name: "Rule".to_string(),
+            category: ItemCategory::Cache,
+            path_pattern: "/tmp/cache".to_string(),
+            strategy: preen_core::rules::ScanStrategy::Recursive,
+            description: "desc".to_string(),
+        }],
+        total_size: 300,
+        items: vec![
+            CleanableItem {
+                rule_id: "rule-1".to_string(),
+                id: "a".to_string(),
+                category: ItemCategory::Cache,
+                path: PathBuf::from("/tmp/cache/a"),
+                size: 100,
+                description: "a".to_string(),
+                can_undo: true,
+                undo_info: None,
+            },
+            CleanableItem {
+                rule_id: "rule-1".to_string(),
+                id: "b".to_string(),
+                category: ItemCategory::Cache,
+                path: PathBuf::from("/tmp/cache/b"),
+                size: 200,
+                description: "b".to_string(),
+                can_undo: true,
+                undo_info: None,
+            },
+        ],
+    };
+
+    let (paths, bytes) = clean_selection_summary_for_test(&scan, &roots, 1);
+    assert_eq!(paths, vec!["/tmp/cache/b".to_string()]);
+    assert_eq!(bytes, 200);
+}
+
+#[test]
+fn format_bytes_for_test_uses_expected_units() {
+    assert_eq!(format_bytes_for_test(12), "12 B");
+    assert_eq!(format_bytes_for_test(2048), "2.00 KiB");
+    assert_eq!(format_bytes_for_test(5 * 1024 * 1024), "5.00 MiB");
+}
+
+#[test]
+fn top_level_system_command_option_matrix_parses() {
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["preen", "clean", "--dry-run", "--json"],
+        vec!["preen", "clean", "--confirm", "--json"],
+        vec![
+            "preen",
+            "clean",
+            "--confirm",
+            "--strategy",
+            "delete",
+            "--json",
+        ],
+        vec![
+            "preen",
+            "clean",
+            "--confirm",
+            "--strategy",
+            "trash",
+            "--json",
+        ],
+        vec!["preen", "uninstall", "--dry-run", "--json"],
+        vec!["preen", "optimize", "--dry-run", "--json"],
+        vec!["preen", "analyze", "/tmp", "--json"],
+        vec!["preen", "status", "--json"],
+        vec!["preen", "purge", "--dry-run", "--paths", "--json"],
+        vec!["preen", "installer", "--dry-run", "--json"],
+        vec!["preen", "check", "--fix", "--json"],
+        vec!["preen", "touchid", "enable", "--dry-run", "--json"],
+        vec!["preen", "completion", "zsh", "--dry-run", "--json"],
+        vec!["preen", "update", "--force", "--nightly", "--json"],
+        vec!["preen", "remove", "--dry-run", "--json"],
+    ];
+    for args in cases {
+        Cli::try_parse_from(args).unwrap();
+    }
+}
+
+#[test]
+fn top_level_system_commands_short_flags_parse() {
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["preen", "clean", "-n"],
+        vec!["preen", "uninstall", "-n"],
+        vec!["preen", "optimize", "-n"],
+        vec!["preen", "purge", "-n"],
+        vec!["preen", "installer", "-n"],
+        vec!["preen", "touchid", "-n"],
+        vec!["preen", "completion", "-n"],
+        vec!["preen", "update", "-f"],
+        vec!["preen", "remove", "-n"],
+    ];
+    for args in cases {
+        Cli::try_parse_from(args).unwrap();
+    }
+}
+
+#[test]
+fn top_level_system_commands_reject_unknown_flags() {
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["preen", "clean", "--unexpected-flag"],
+        vec!["preen", "uninstall", "--unexpected-flag"],
+        vec!["preen", "optimize", "--unexpected-flag"],
+        vec!["preen", "analyze", "--unexpected-flag"],
+        vec!["preen", "status", "--unexpected-flag"],
+        vec!["preen", "purge", "--unexpected-flag"],
+        vec!["preen", "installer", "--unexpected-flag"],
+        vec!["preen", "check", "--unexpected-flag"],
+        vec!["preen", "touchid", "--unexpected-flag"],
+        vec!["preen", "completion", "--unexpected-flag"],
+        vec!["preen", "update", "--unexpected-flag"],
+        vec!["preen", "remove", "--unexpected-flag"],
+    ];
+    for args in cases {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
+fn clean_rejects_dry_run_with_confirm_conflict() {
+    let parsed = Cli::try_parse_from(["preen", "clean", "--dry-run", "--confirm"]);
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn touchid_rejects_invalid_action() {
+    let parsed = Cli::try_parse_from(["preen", "touchid", "invalid-action", "--dry-run"]);
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn completion_rejects_invalid_shell() {
+    let parsed = Cli::try_parse_from(["preen", "completion", "invalid-shell", "--dry-run"]);
+    assert!(parsed.is_err());
 }
 
 #[test]

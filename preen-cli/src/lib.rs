@@ -1,21 +1,32 @@
+use async_trait::async_trait;
 use std::fmt::{Display, Write as FmtWrite};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
+use preen_core::ItemCategory;
+use preen_core::action_runtime::{
+    ActionAuditEvent, ActionAuditSink, DefaultSafetyPolicy, ExecutionMode, RuntimeExecutionError,
+    execute_action_with_audit, execution_error_detail_code, plan_error_detail_code,
+};
+use preen_core::error::CoreError;
+use preen_core::metrics::NoopMetrics;
 use preen_core::plugin::{
-    CliJsonEnvelope, PluginCheckId, PluginCheckStatus, PluginFailureHint,
+    ActionSpec, ActionType, Capability, CliJsonEnvelope, Manifest, MatchMode, MatchSpec, OsTarget,
+    PluginCheckId, PluginCheckStatus, PluginFailureHint,
     PluginPreflightAllReport as PluginPreflightAllOutput,
     PluginPreflightFailure as PluginPreflightFailureOutput,
     PluginPreflightReport as PluginPreflightOutput, PluginTestAllReport as PluginTestAllOutput,
     PluginTestDrift, PluginTestFailure as PluginTestFailureOutput,
-    PluginTestReport as PluginTestOutput, PluginTestSpecReport as PluginTestSpecOutput,
-    SignatureBundle, SignatureVerifier, TrustPolicy, VerificationInput, VerifyError,
-    plugin_check_label, plugin_check_severity, plugin_error_kind_label,
+    PluginTestReport as PluginTestOutput, PluginTestSpecReport as PluginTestSpecOutput, RiskLevel,
+    RuleFile, RuleRef, SignatureBundle, SignatureVerifier, TrustPolicy, VerificationInput,
+    VerifyError, plugin_check_label, plugin_check_severity, plugin_error_kind_label,
     plugin_failure_hint_from_detail_code, plugin_failure_hint_message,
     plugin_localized_error_message, plugin_primary_detail_code_from_drifts,
     plugin_primary_failure_hint_from_drifts,
@@ -23,6 +34,11 @@ use preen_core::plugin::{
 use preen_core::plugin_loader::{LoadedRulePack, load_rule_pack_from_dir};
 use preen_core::plugin_lock::{LockedPlugin, PluginLockfile};
 use preen_core::plugin_registry::{RegistryIndex, ResolvedRegistryPlugin};
+use preen_core::rules::{ScanRule, ScanStrategy};
+use preen_core::store::{ItemRecord, ScanRecord, ScanStorePort};
+use preen_core::{FileSystemPort, ScanResult, config::AppConfig};
+use preen_os::OsFileSystemAdapter;
+use preen_os::action_executor::OsActionExecutor;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -112,6 +128,33 @@ struct PluginInstallOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CleanCommandOutput {
+    mode: String,
+    strategy: String,
+    scanned_items: usize,
+    target_count: usize,
+    estimated_freed_bytes: u64,
+    preview_paths: Vec<String>,
+    affected_items: u64,
+    freed_bytes: u64,
+    risk_summary: CleanRiskSummary,
+    warnings: Vec<String>,
+    audit_events: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CleanRiskSummary {
+    high_targets: usize,
+    requires_confirmation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CleanSelectedItem {
+    path: String,
+    size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PluginRemoveOutput {
     pack_id: String,
     removed: bool,
@@ -149,6 +192,23 @@ pub fn run_typed(cli: Cli) -> Result<(), CliError> {
 fn run_typed_with_verifier(cli: &Cli, verifier: &dyn SignatureVerifier) -> Result<(), CliError> {
     match &cli.command {
         CliCommand::Plugin { cmd } => run_plugin(cmd, verifier).map_err(CliError::from),
+        CliCommand::Clean {
+            dry_run,
+            confirm,
+            strategy,
+            json,
+        } => run_clean(*dry_run, *confirm, *strategy, *json).map_err(CliError::from),
+        CliCommand::Uninstall { .. } => Err(command_not_implemented_error("uninstall")),
+        CliCommand::Optimize { .. } => Err(command_not_implemented_error("optimize")),
+        CliCommand::Analyze { .. } => Err(command_not_implemented_error("analyze")),
+        CliCommand::Status { .. } => Err(command_not_implemented_error("status")),
+        CliCommand::Purge { .. } => Err(command_not_implemented_error("purge")),
+        CliCommand::Installer { .. } => Err(command_not_implemented_error("installer")),
+        CliCommand::Check { .. } => Err(command_not_implemented_error("check")),
+        CliCommand::Touchid { .. } => Err(command_not_implemented_error("touchid")),
+        CliCommand::Completion { .. } => Err(command_not_implemented_error("completion")),
+        CliCommand::Update { .. } => Err(command_not_implemented_error("update")),
+        CliCommand::Remove { .. } => Err(command_not_implemented_error("remove")),
     }
 }
 
@@ -157,6 +217,14 @@ pub fn run_typed_with_verifier_for_test(
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), CliError> {
     run_typed_with_verifier(&cli, verifier)
+}
+
+fn command_not_implemented_error(command: &str) -> CliError {
+    CliError {
+        kind: CliErrorKind::Unsupported,
+        detail_code: Some("command_not_implemented".to_string()),
+        message: format!("{command} command is not implemented yet"),
+    }
 }
 
 fn run_plugin(cmd: &PluginCommand, verifier: &dyn SignatureVerifier) -> Result<(), String> {
@@ -217,6 +285,523 @@ fn run_plugin(cmd: &PluginCommand, verifier: &dyn SignatureVerifier) -> Result<(
             verifier,
         ),
     }
+}
+
+#[derive(Default)]
+struct CollectingAuditSink {
+    events: Mutex<Vec<ActionAuditEvent>>,
+}
+
+impl CollectingAuditSink {
+    fn event_count(&self) -> usize {
+        self.events.lock().unwrap().len()
+    }
+}
+
+impl ActionAuditSink for CollectingAuditSink {
+    fn record(&self, event: ActionAuditEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanStrategy {
+    Delete,
+    Trash,
+}
+
+impl CleanStrategy {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Delete => "delete",
+            Self::Trash => "trash",
+        }
+    }
+
+    const fn action_type(self) -> ActionType {
+        match self {
+            Self::Delete => ActionType::DeletePaths,
+            Self::Trash => ActionType::TrashPaths,
+        }
+    }
+
+    const fn capability(self) -> Capability {
+        match self {
+            Self::Delete => Capability::FsDelete,
+            Self::Trash => Capability::FsTrash,
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum CleanStrategyArg {
+    Delete,
+    Trash,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum TouchIdActionArg {
+    Enable,
+    Disable,
+    Status,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum CompletionShellArg {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+#[derive(Default)]
+struct EphemeralScanStore {
+    items: Mutex<std::collections::HashMap<String, ItemRecord>>,
+}
+
+#[async_trait]
+impl ScanStorePort for EphemeralScanStore {
+    async fn save_scan(&self, _scan_id: &str, _result: &ScanResult) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    async fn load_item(&self, item_id: &str) -> Result<Option<ItemRecord>, CoreError> {
+        Ok(self.items.lock().unwrap().get(item_id).cloned())
+    }
+
+    async fn save_items(&self, items: &[ItemRecord]) -> Result<(), CoreError> {
+        let mut guard = self.items.lock().unwrap();
+        for item in items {
+            guard.insert(item.item_id.clone(), item.clone());
+        }
+        Ok(())
+    }
+
+    async fn list_scans(&self, _limit: usize) -> Result<Vec<ScanRecord>, CoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn purge_scan(&self, _scan_id: &str) -> Result<(), CoreError> {
+        Ok(())
+    }
+}
+
+fn run_clean(
+    dry_run: bool,
+    confirm: bool,
+    strategy_arg: Option<CleanStrategyArg>,
+    json: bool,
+) -> Result<(), String> {
+    let output = run_clean_output(dry_run, confirm, strategy_arg)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&output).map_err(|e| err_with(
+                CliErrorKind::Internal,
+                "clean json serialize failed",
+                e
+            ))?
+        );
+    } else if output.target_count == 0 {
+        println!("clean completed: no cleanable items selected");
+    } else {
+        println!(
+            "clean {} completed: strategy={} scanned={} targets={} estimated_freed_bytes={} affected_items={} freed_bytes={} audit_events={}",
+            output.mode,
+            output.strategy,
+            output.scanned_items,
+            output.target_count,
+            format_bytes(output.estimated_freed_bytes),
+            output.affected_items,
+            format_bytes(output.freed_bytes),
+            output.audit_events
+        );
+        println!(
+            "risk: high_targets={} requires_confirmation={}",
+            output.risk_summary.high_targets, output.risk_summary.requires_confirmation
+        );
+        for preview_item in &output.preview_paths {
+            println!("selected: {preview_item}");
+        }
+        for warning in &output.warnings {
+            println!("warning: {warning}");
+        }
+    }
+
+    Ok(())
+}
+
+fn run_clean_output(
+    dry_run: bool,
+    confirm: bool,
+    strategy_arg: Option<CleanStrategyArg>,
+) -> Result<CleanCommandOutput, String> {
+    if !dry_run && !confirm {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "clean_confirmation_required",
+            "clean apply mode requires --confirm",
+        ));
+    }
+
+    let clean_paths = normalize_clean_paths(resolve_clean_paths());
+    if clean_paths.is_empty() {
+        return Err(err_code(
+            CliErrorKind::Unsupported,
+            "clean_dry_run_unsupported_os",
+            "clean dry-run is not supported on this OS",
+        ));
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| err_with(CliErrorKind::Internal, "tokio runtime init failed", e))?;
+    let scan_result = runtime
+        .block_on(scan_clean_candidates(&clean_paths))
+        .map_err(|e| err_with(CliErrorKind::Internal, "clean scan failed", e))?;
+    let selection = build_clean_selection(&scan_result, &clean_paths, clean_max_items());
+    let selected_paths = selection
+        .iter()
+        .map(|item| item.path.clone())
+        .collect::<Vec<_>>();
+    let estimated_freed_bytes = selection.iter().map(|item| item.size).sum();
+    enforce_clean_scope(&selected_paths, &clean_paths)?;
+    let strategy = resolve_clean_strategy(strategy_arg);
+    let preview = clean_preview_paths(&selected_paths, clean_preview_limit());
+    let risk_summary = CleanRiskSummary {
+        high_targets: selected_paths.len(),
+        requires_confirmation: !dry_run,
+    };
+
+    if selected_paths.is_empty() {
+        return Ok(CleanCommandOutput {
+            mode: if dry_run {
+                "dry_run".to_string()
+            } else {
+                "apply".to_string()
+            },
+            strategy: strategy.as_str().to_string(),
+            scanned_items: scan_result.items.len(),
+            target_count: 0,
+            estimated_freed_bytes: 0,
+            preview_paths: Vec::new(),
+            affected_items: 0,
+            freed_bytes: 0,
+            risk_summary,
+            warnings: vec!["no cleanable items selected".to_string()],
+            audit_events: 0,
+        });
+    }
+
+    let manifest = Manifest {
+        schema_version: 1,
+        pack_id: "preen.builtin.clean".to_string(),
+        name: "Built-in Clean".to_string(),
+        version: "0.1.0".to_string(),
+        description: "Built-in clean dry-run plan".to_string(),
+        author: "Preen".to_string(),
+        license: "MIT".to_string(),
+        homepage: None,
+        core_compat: ">=0.1.0,<2.0.0".to_string(),
+        action_api: 1,
+        os_targets: vec![if cfg!(target_os = "macos") {
+            OsTarget::Macos
+        } else {
+            OsTarget::Linux
+        }],
+        capabilities: vec![Capability::FsRead, strategy.capability()],
+        signing: None,
+        rules: vec![RuleRef {
+            id: "builtin-clean".to_string(),
+            name: "Built-in Clean".to_string(),
+            rule_file: "builtin".to_string(),
+        }],
+    };
+    let rule = RuleFile {
+        schema_version: 1,
+        id: "builtin-clean".to_string(),
+        name: "Built-in Clean".to_string(),
+        category: ItemCategory::Cache,
+        risk: RiskLevel::High,
+        enabled: true,
+        matcher: MatchSpec {
+            mode: MatchMode::Paths,
+            paths: selected_paths.clone(),
+            strategy: Some(ScanStrategy::Recursive),
+            command: Vec::new(),
+            parser: None,
+        },
+        action: ActionSpec {
+            action_type: strategy.action_type(),
+            paths: selected_paths.clone(),
+            command: Vec::new(),
+            mode: None,
+            timeout_sec: Some(300),
+            allow_globs: false,
+            max_items: Some(10_000),
+            package_manager: None,
+            project_types: Vec::new(),
+            params: std::collections::HashMap::new(),
+        },
+    };
+
+    let policy = DefaultSafetyPolicy::default();
+    let sink = CollectingAuditSink::default();
+    let executor = OsActionExecutor;
+    let mode = if dry_run {
+        ExecutionMode::DryRun
+    } else {
+        ExecutionMode::Apply
+    };
+    let result = runtime
+        .block_on(execute_action_with_audit(
+            &manifest,
+            &rule,
+            mode,
+            if confirm { Some("confirmed") } else { None },
+            &policy,
+            &executor,
+            Some(&sink),
+        ))
+        .map_err(map_clean_runtime_error)?;
+
+    Ok(CleanCommandOutput {
+        mode: if dry_run {
+            "dry_run".to_string()
+        } else {
+            "apply".to_string()
+        },
+        strategy: strategy.as_str().to_string(),
+        scanned_items: scan_result.items.len(),
+        target_count: selected_paths.len(),
+        estimated_freed_bytes,
+        preview_paths: preview,
+        affected_items: result.affected_items,
+        freed_bytes: result.freed_bytes,
+        risk_summary,
+        warnings: result.warnings,
+        audit_events: sink.event_count(),
+    })
+}
+
+fn map_clean_runtime_error(error: RuntimeExecutionError) -> String {
+    match error {
+        RuntimeExecutionError::Plan(plan_error) => err_code(
+            CliErrorKind::Validation,
+            &format!("clean_{}", plan_error_detail_code(&plan_error)),
+            plan_error.to_string(),
+        ),
+        RuntimeExecutionError::Execute(execution_error) => err_code(
+            CliErrorKind::Internal,
+            &format!("clean_{}", execution_error_detail_code(&execution_error)),
+            execution_error.to_string(),
+        ),
+    }
+}
+
+fn resolve_clean_paths() -> Vec<String> {
+    if let Some(from_env) = std::env::var_os("PREEN_CLEAN_PATHS") {
+        let out: Vec<String> = from_env
+            .to_string_lossy()
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        if !out.is_empty() {
+            return out;
+        }
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    match std::env::consts::OS {
+        "macos" => vec![
+            home.join("Library")
+                .join("Caches")
+                .to_string_lossy()
+                .to_string(),
+        ],
+        "linux" => vec![home.join(".cache").to_string_lossy().to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn clean_max_items() -> usize {
+    std::env::var("PREEN_CLEAN_MAX_ITEMS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(10_000)
+}
+
+async fn scan_clean_candidates(clean_paths: &[String]) -> Result<ScanResult, CoreError> {
+    let rules = clean_paths
+        .iter()
+        .enumerate()
+        .map(|(idx, path)| ScanRule {
+            id: format!("builtin-clean-{idx}"),
+            name: "Built-in Clean Rule".to_string(),
+            category: ItemCategory::Cache,
+            path_pattern: path.clone(),
+            strategy: ScanStrategy::Recursive,
+            description: "Built-in clean scan rule".to_string(),
+        })
+        .collect::<Vec<_>>();
+    let config = AppConfig {
+        ignore_list: Vec::new(),
+        follow_symlinks: false,
+        max_scan_depth: None,
+        allowlist: clean_paths.to_vec(),
+        max_file_age_days: 30,
+        scan_system_dirs: false,
+        language: "en-US".to_string(),
+    };
+    let store: Arc<dyn ScanStorePort> = Arc::new(EphemeralScanStore::default());
+    let metrics = Arc::new(NoopMetrics);
+    let adapter = OsFileSystemAdapter::with_metrics(store, metrics);
+    adapter.scan_cleanable_items(&rules, &config).await
+}
+
+fn build_clean_selection(
+    scan_result: &ScanResult,
+    roots: &[String],
+    max_items: usize,
+) -> Vec<CleanSelectedItem> {
+    let mut items = scan_result.items.clone();
+    items.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+
+    let root_set = roots
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut selected: Vec<CleanSelectedItem> = Vec::new();
+    for item in items {
+        if selected.len() >= max_items {
+            break;
+        }
+        let path = item.path.to_string_lossy().to_string();
+        if root_set.contains(&path) {
+            continue;
+        }
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        selected.push(CleanSelectedItem {
+            path,
+            size: item.size,
+        });
+    }
+    selected
+}
+
+fn resolve_clean_strategy(strategy_arg: Option<CleanStrategyArg>) -> CleanStrategy {
+    if let Some(arg) = strategy_arg {
+        return match arg {
+            CleanStrategyArg::Delete => CleanStrategy::Delete,
+            CleanStrategyArg::Trash => CleanStrategy::Trash,
+        };
+    }
+    if let Ok(raw) = std::env::var("PREEN_CLEAN_STRATEGY") {
+        return match raw.trim().to_ascii_lowercase().as_str() {
+            "trash" => CleanStrategy::Trash,
+            _ => CleanStrategy::Delete,
+        };
+    }
+    CleanStrategy::Delete
+}
+
+fn clean_preview_limit() -> usize {
+    std::env::var("PREEN_CLEAN_PREVIEW_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(20)
+}
+
+fn clean_preview_paths(selected_paths: &[String], limit: usize) -> Vec<String> {
+    selected_paths.iter().take(limit).cloned().collect()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * KB;
+    const GB: f64 = 1024.0 * MB;
+    let value = bytes as f64;
+    if value >= GB {
+        return format!("{:.2} GiB", value / GB);
+    }
+    if value >= MB {
+        return format!("{:.2} MiB", value / MB);
+    }
+    if value >= KB {
+        return format!("{:.2} KiB", value / KB);
+    }
+    format!("{bytes} B")
+}
+
+fn enforce_clean_scope(selected_paths: &[String], roots: &[String]) -> Result<(), String> {
+    let canonical_roots: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|root| fs::canonicalize(root).ok())
+        .collect();
+    for path in selected_paths {
+        let candidate = PathBuf::from(path);
+        if !candidate.is_absolute() {
+            return Err(err_code(
+                CliErrorKind::Validation,
+                "clean_relative_path",
+                format!("selected clean path must be absolute: {path}"),
+            ));
+        }
+        if candidate == PathBuf::from("/") {
+            return Err(err_code(
+                CliErrorKind::Validation,
+                "clean_path_scope_violation",
+                "selected clean path cannot be root",
+            ));
+        }
+        if let Ok(meta) = fs::symlink_metadata(&candidate)
+            && meta.file_type().is_symlink()
+        {
+            return Err(err_code(
+                CliErrorKind::Validation,
+                "clean_symlink_not_allowed",
+                format!("selected clean path cannot be symlink: {path}"),
+            ));
+        }
+        let Some(canonical) = fs::canonicalize(&candidate).ok() else {
+            continue;
+        };
+        let in_scope = canonical_roots
+            .iter()
+            .any(|root| canonical.starts_with(root));
+        if !in_scope {
+            return Err(err_code(
+                CliErrorKind::Validation,
+                "clean_path_scope_violation",
+                format!("selected clean path is outside configured roots: {path}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_clean_paths(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let candidate = PathBuf::from(&path);
+            if candidate.exists()
+                && let Ok(canonical) = fs::canonicalize(&candidate)
+            {
+                return canonical.to_string_lossy().to_string();
+            }
+            path
+        })
+        .collect()
 }
 
 fn err(kind: CliErrorKind, message: impl Into<String>) -> String {
@@ -2376,6 +2961,49 @@ pub fn hash_file_for_test(path: &Path) -> Result<String, String> {
     hash_file(path)
 }
 
+pub fn clean_selection_summary_for_test(
+    scan_result: &ScanResult,
+    roots: &[String],
+    max_items: usize,
+) -> (Vec<String>, u64) {
+    let selection = build_clean_selection(scan_result, roots, max_items);
+    let paths = selection.iter().map(|item| item.path.clone()).collect();
+    let bytes = selection.iter().map(|item| item.size).sum();
+    (paths, bytes)
+}
+
+pub fn format_bytes_for_test(bytes: u64) -> String {
+    format_bytes(bytes)
+}
+
+pub fn enforce_clean_scope_for_test(
+    selected_paths: &[String],
+    roots: &[String],
+) -> Result<(), String> {
+    enforce_clean_scope(selected_paths, roots)
+}
+
+pub fn clean_output_for_test(
+    dry_run: bool,
+    confirm: bool,
+    strategy: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let strategy_arg = match strategy.map(|item| item.trim().to_ascii_lowercase()) {
+        Some(ref value) if value == "delete" => Some(CleanStrategyArg::Delete),
+        Some(ref value) if value == "trash" => Some(CleanStrategyArg::Trash),
+        Some(other) => {
+            return Err(err(
+                CliErrorKind::Validation,
+                format!("unsupported clean strategy for test: {other}"),
+            ));
+        }
+        None => None,
+    };
+    let output = run_clean_output(dry_run, confirm, strategy_arg)?;
+    serde_json::to_value(output)
+        .map_err(|e| err_with(CliErrorKind::Internal, "clean output serialize failed", e))
+}
+
 pub fn clone_rule_pack_for_test(url: &str, rev: &str, dest: &Path) -> Result<String, String> {
     clone_rule_pack_at(url, rev, dest, "install_clone_failed")
 }
@@ -2904,6 +3532,85 @@ enum CliCommand {
         #[command(subcommand)]
         cmd: PluginCommand,
     },
+    Clean {
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+        #[arg(long, conflicts_with = "dry_run")]
+        confirm: bool,
+        #[arg(long, value_enum)]
+        strategy: Option<CleanStrategyArg>,
+        #[arg(long)]
+        json: bool,
+    },
+    Uninstall {
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Optimize {
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Analyze {
+        path: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Purge {
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+        #[arg(long)]
+        paths: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Installer {
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Check {
+        #[arg(long)]
+        fix: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Touchid {
+        action: Option<TouchIdActionArg>,
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Completion {
+        shell: Option<CompletionShellArg>,
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Update {
+        #[arg(long, short = 'f')]
+        force: bool,
+        #[arg(long)]
+        nightly: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Remove {
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -3003,6 +3710,18 @@ impl Cli {
                 PluginCommand::Search { json, .. } => *json,
                 PluginCommand::RegistryUpdate { json, .. } => *json,
             },
+            CliCommand::Clean { json, .. } => *json,
+            CliCommand::Uninstall { json, .. } => *json,
+            CliCommand::Optimize { json, .. } => *json,
+            CliCommand::Analyze { json, .. } => *json,
+            CliCommand::Status { json, .. } => *json,
+            CliCommand::Purge { json, .. } => *json,
+            CliCommand::Installer { json, .. } => *json,
+            CliCommand::Check { json, .. } => *json,
+            CliCommand::Touchid { json, .. } => *json,
+            CliCommand::Completion { json, .. } => *json,
+            CliCommand::Update { json, .. } => *json,
+            CliCommand::Remove { json, .. } => *json,
         }
     }
 

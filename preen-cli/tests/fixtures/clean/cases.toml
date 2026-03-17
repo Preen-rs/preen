@@ -1,0 +1,29 @@
+schema_version = 1
+
+[[cases]]
+id = "dry_run_json_happy_path"
+description = "Dry-run should produce clean JSON summary with preview and no confirmation requirement."
+
+[[cases]]
+id = "apply_requires_confirm"
+description = "Apply mode without --confirm must fail with clean_confirmation_required."
+
+[[cases]]
+id = "apply_confirm_delete"
+description = "Apply mode with confirm and delete strategy must remove selected files."
+
+[[cases]]
+id = "strategy_trash"
+description = "Trash strategy should execute successfully and report strategy=trash."
+
+[[cases]]
+id = "selection_limit"
+description = "Max item limit should constrain number of selected and affected targets."
+
+[[cases]]
+id = "scope_symlink_safety"
+description = "Symlink targets escaping scope must be rejected."
+
+[[cases]]
+id = "empty_selection"
+description = "Empty roots should return zero targets with no-cleanable-items warning."

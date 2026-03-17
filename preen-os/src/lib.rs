@@ -20,6 +20,7 @@ use trash::{self};
 use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
 
+pub mod action_executor;
 pub mod store;
 #[cfg(all(unix, not(target_os = "macos")))]
 const LINUX_UNDO_PREFIX: &str = "linux-trash";

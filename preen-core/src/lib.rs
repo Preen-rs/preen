@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::error::CoreError;
 rust_i18n::i18n!("locales", fallback = "en-US");
 
+pub mod action_runtime;
 pub mod error;
 pub mod metrics;
 pub mod plugin;
