@@ -288,11 +288,11 @@ async fn run_command_accepts_allowlist_from_env() {
 }
 
 #[tokio::test]
-async fn run_command_allowlist_combines_params_and_env() {
+async fn run_command_params_allowlist_overrides_env_allowlist() {
     let _guard = env_lock();
-    let _env = EnvVarGuard::set("PREEN_RUN_COMMAND_ALLOWLIST", "ls");
+    let _env = EnvVarGuard::set("PREEN_RUN_COMMAND_ALLOWLIST", "echo");
     let mut params = HashMap::new();
-    params.insert("allowlist".to_string(), "echo".to_string());
+    params.insert("allowlist".to_string(), "ls".to_string());
     let plan = sample_plan_with(
         ActionType::RunCommand,
         ExecutionMode::Apply,
@@ -301,8 +301,27 @@ async fn run_command_allowlist_combines_params_and_env() {
         params,
         Some(5),
     );
-    let out = OsActionExecutor.execute(&plan).await.unwrap();
-    assert_eq!(out.affected_items, 1);
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::CommandDenied { .. }));
+}
+
+#[tokio::test]
+async fn run_command_empty_param_allowlist_does_not_fallback_to_env() {
+    let _guard = env_lock();
+    let _env = EnvVarGuard::set("PREEN_RUN_COMMAND_ALLOWLIST", "echo");
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "   ".to_string());
+    let plan = sample_plan_with(
+        ActionType::RunCommand,
+        ExecutionMode::Apply,
+        vec![],
+        vec!["/bin/echo".to_string(), "ok".to_string()],
+        params,
+        Some(5),
+    );
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::Failed { .. }));
+    assert!(err.to_string().contains("allowlist is empty"));
 }
 
 #[tokio::test]

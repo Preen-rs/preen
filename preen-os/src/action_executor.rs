@@ -52,8 +52,10 @@ impl OsActionExecutor {
 
     fn parse_command_allowlist(plan: &ExecutionPlan) -> Vec<String> {
         let mut values = Vec::new();
+        let mut has_param_allowlist = false;
         for key in ["command_allowlist", "allowlist"] {
             if let Some(raw) = plan.request.action.params.get(key) {
+                has_param_allowlist = true;
                 values.extend(
                     raw.split(',')
                         .map(str::trim)
@@ -62,6 +64,11 @@ impl OsActionExecutor {
                 );
             }
         }
+
+        if has_param_allowlist {
+            return values;
+        }
+
         if let Ok(raw) = std::env::var("PREEN_RUN_COMMAND_ALLOWLIST") {
             values.extend(
                 raw.split(',')

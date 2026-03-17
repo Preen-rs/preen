@@ -12,8 +12,9 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use preen_core::ItemCategory;
 use preen_core::action_runtime::{
-    ActionAuditEvent, ActionAuditSink, DefaultSafetyPolicy, ExecutionMode, RuntimeExecutionError,
-    execute_action_with_audit, execution_error_detail_code, plan_error_detail_code,
+    ActionAuditEvent, ActionAuditSink, ActionExecutorPort, DefaultSafetyPolicy, ExecutionMode,
+    RuntimeExecutionError, execute_action_with_audit, execution_error_detail_code,
+    plan_error_detail_code,
 };
 use preen_core::error::CoreError;
 use preen_core::metrics::NoopMetrics;
@@ -189,10 +190,20 @@ pub fn run(cli: Cli) -> Result<(), String> {
 }
 
 pub fn run_typed(cli: Cli) -> Result<(), CliError> {
-    run_typed_with_verifier(&cli, &SigstoreVerifier)
+    let clean_executor = OsActionExecutor;
+    run_typed_with_verifier_and_clean_executor(&cli, &SigstoreVerifier, &clean_executor)
 }
 
 fn run_typed_with_verifier(cli: &Cli, verifier: &dyn SignatureVerifier) -> Result<(), CliError> {
+    let clean_executor = OsActionExecutor;
+    run_typed_with_verifier_and_clean_executor(cli, verifier, &clean_executor)
+}
+
+fn run_typed_with_verifier_and_clean_executor(
+    cli: &Cli,
+    verifier: &dyn SignatureVerifier,
+    clean_executor: &dyn ActionExecutorPort,
+) -> Result<(), CliError> {
     match &cli.command {
         CliCommand::Plugin { cmd } => run_plugin(cmd, verifier).map_err(CliError::from),
         CliCommand::Clean {
@@ -200,7 +211,8 @@ fn run_typed_with_verifier(cli: &Cli, verifier: &dyn SignatureVerifier) -> Resul
             confirm,
             strategy,
             json,
-        } => run_clean(*dry_run, *confirm, *strategy, *json).map_err(CliError::from),
+        } => run_clean_with_executor(*dry_run, *confirm, *strategy, *json, clean_executor)
+            .map_err(CliError::from),
         CliCommand::Uninstall { .. } => Err(command_not_implemented_error("uninstall")),
         CliCommand::Optimize { .. } => Err(command_not_implemented_error("optimize")),
         CliCommand::Analyze { .. } => Err(command_not_implemented_error("analyze")),
@@ -220,6 +232,14 @@ pub fn run_typed_with_verifier_for_test(
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), CliError> {
     run_typed_with_verifier(&cli, verifier)
+}
+
+pub fn run_typed_with_verifier_and_clean_executor_for_test(
+    cli: Cli,
+    verifier: &dyn SignatureVerifier,
+    clean_executor: &dyn ActionExecutorPort,
+) -> Result<(), CliError> {
+    run_typed_with_verifier_and_clean_executor(&cli, verifier, clean_executor)
 }
 
 fn command_not_implemented_error(command: &str) -> CliError {
@@ -388,13 +408,14 @@ impl ScanStorePort for EphemeralScanStore {
     }
 }
 
-fn run_clean(
+fn run_clean_with_executor(
     dry_run: bool,
     confirm: bool,
     strategy_arg: Option<CleanStrategyArg>,
     json: bool,
+    clean_executor: &dyn ActionExecutorPort,
 ) -> Result<(), String> {
-    let output = run_clean_output(dry_run, confirm, strategy_arg)?;
+    let output = run_clean_output_with_executor(dry_run, confirm, strategy_arg, clean_executor)?;
 
     if json {
         println!(
@@ -438,6 +459,16 @@ fn run_clean_output(
     dry_run: bool,
     confirm: bool,
     strategy_arg: Option<CleanStrategyArg>,
+) -> Result<CleanCommandOutput, String> {
+    let clean_executor = OsActionExecutor;
+    run_clean_output_with_executor(dry_run, confirm, strategy_arg, &clean_executor)
+}
+
+fn run_clean_output_with_executor(
+    dry_run: bool,
+    confirm: bool,
+    strategy_arg: Option<CleanStrategyArg>,
+    clean_executor: &dyn ActionExecutorPort,
 ) -> Result<CleanCommandOutput, String> {
     if !dry_run && !confirm {
         return Err(err_code(
@@ -551,7 +582,6 @@ fn run_clean_output(
 
     let policy = DefaultSafetyPolicy::default();
     let sink = CollectingAuditSink::default();
-    let executor = OsActionExecutor;
     let mode = if dry_run {
         ExecutionMode::DryRun
     } else {
@@ -564,7 +594,7 @@ fn run_clean_output(
             mode,
             if confirm { Some("confirmed") } else { None },
             &policy,
-            &executor,
+            clean_executor,
             Some(&sink),
         ))
         .map_err(map_clean_runtime_error)?;

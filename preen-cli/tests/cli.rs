@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
+use async_trait::async_trait;
 use clap::Parser;
 use preen_cli::{
     Cli, CliError, CliErrorKind, check_registry_freshness_for_test,
@@ -21,12 +22,15 @@ use preen_cli::{
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, registry_backup_path_for_test,
     registry_update_json_for_test, resolve_registry_for_test, run_typed,
-    run_typed_with_verifier_for_test, save_lockfile_at, search_registry_for_test,
-    search_registry_json_for_test, test_failure_row_for_test, trust_policy_from_str,
-    validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
-    write_registry_index_with_backup_for_test,
+    run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
+    save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
+    test_failure_row_for_test, trust_policy_from_str, validate_registry_trust_inputs_for_test,
+    verify_lockfile_hashes, write_registry_index_with_backup_for_test,
 };
-use preen_core::action_runtime::{ActionExecutionError, RuntimeExecutionError};
+use preen_core::action_runtime::{
+    ActionExecutionError, ActionExecutionResult, ActionExecutorPort, ExecutionPlan,
+    RuntimeExecutionError,
+};
 use preen_core::plugin::{SignatureVerifier, VerificationInput, VerificationOutcome, VerifyError};
 use preen_core::plugin_lock::{LockedPlugin, PluginLockfile};
 use preen_core::rules::ScanRule;
@@ -53,6 +57,20 @@ struct AlwaysFailVerifier;
 impl SignatureVerifier for AlwaysFailVerifier {
     fn verify(&self, _input: VerificationInput) -> Result<VerificationOutcome, VerifyError> {
         Err(VerifyError::SignatureInvalid("forced failure".to_string()))
+    }
+}
+
+struct ForcedCleanErrorExecutor {
+    error: ActionExecutionError,
+}
+
+#[async_trait]
+impl ActionExecutorPort for ForcedCleanErrorExecutor {
+    async fn execute(
+        &self,
+        _plan: &ExecutionPlan,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        Err(self.error.clone())
     }
 }
 
@@ -107,6 +125,42 @@ fn with_temp_user_env<T>(f: impl FnOnce() -> T) -> T {
         }
     }
     out
+}
+
+fn with_clean_path_override<T>(f: impl FnOnce() -> T) -> T {
+    let temp = tempfile::tempdir().unwrap();
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("a.txt"), b"data").unwrap();
+    let old = std::env::var_os("PREEN_CLEAN_PATHS");
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_CLEAN_PATHS", cache_dir.as_os_str());
+    }
+    let out = f();
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        match old {
+            Some(v) => std::env::set_var("PREEN_CLEAN_PATHS", v),
+            None => std::env::remove_var("PREEN_CLEAN_PATHS"),
+        }
+    }
+    out
+}
+
+fn clean_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_clean_path_override(|| {
+        let cli = Cli::try_parse_from(["preen", "clean", "--confirm", "--json"]).unwrap();
+        let executor = ForcedCleanErrorExecutor { error };
+        let err = run_typed_with_verifier_and_clean_executor_for_test(
+            cli.clone(),
+            &AlwaysOkVerifier,
+            &executor,
+        )
+        .unwrap_err();
+        serde_json::from_str(&cli.format_error(&err)).unwrap()
+    })
 }
 
 fn check_passed_from_json(data: &Value, check_id: &str) -> Option<bool> {
@@ -960,6 +1014,47 @@ fn clean_apply_requires_confirm_flag() {
     assert_eq!(
         parsed["data"]["detail_code"].as_str().unwrap(),
         "clean_confirmation_required"
+    );
+}
+
+#[test]
+fn clean_json_maps_command_denied_detail_code() {
+    let parsed = clean_error_json_for_forced_executor(ActionExecutionError::CommandDenied {
+        command: "rm".to_string(),
+    });
+    assert_eq!(parsed["kind"].as_str().unwrap(), "error");
+    assert_eq!(parsed["data"]["error_kind"].as_str().unwrap(), "internal");
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "clean_command_denied"
+    );
+}
+
+#[test]
+fn clean_json_maps_command_timeout_detail_code() {
+    let parsed = clean_error_json_for_forced_executor(ActionExecutionError::CommandTimeout {
+        command: "brew cleanup".to_string(),
+        timeout_sec: 5,
+    });
+    assert_eq!(parsed["kind"].as_str().unwrap(), "error");
+    assert_eq!(parsed["data"]["error_kind"].as_str().unwrap(), "internal");
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "clean_command_timeout"
+    );
+}
+
+#[test]
+fn clean_json_maps_command_non_zero_detail_code() {
+    let parsed = clean_error_json_for_forced_executor(ActionExecutionError::CommandNonZero {
+        command: "brew cleanup".to_string(),
+        code: Some(1),
+    });
+    assert_eq!(parsed["kind"].as_str().unwrap(), "error");
+    assert_eq!(parsed["data"]["error_kind"].as_str().unwrap(), "internal");
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "clean_command_non_zero"
     );
 }
 
