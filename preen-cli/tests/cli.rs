@@ -8,12 +8,12 @@ use std::sync::Mutex;
 use clap::Parser;
 use preen_cli::{
     Cli, CliError, CliErrorKind, check_registry_freshness_for_test,
-    clean_selection_summary_for_test, cli_label_for_test, clone_rule_pack_for_test,
-    default_signature_source_for_test, enforce_clean_scope_for_test, error_json_for_test,
-    format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
-    install_plugin_in_dir_for_test, load_lockfile_at, parse_install_spec, parse_plugin_spec,
-    plugin_info_json_for_test, plugin_install_json_for_test, plugin_list_json_for_test,
-    plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
+    clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test, cli_label_for_test,
+    clone_rule_pack_for_test, default_signature_source_for_test, enforce_clean_scope_for_test,
+    error_json_for_test, format_bytes_for_test, hint_for_detail_code_for_test,
+    hint_message_for_test, install_plugin_in_dir_for_test, load_lockfile_at, parse_install_spec,
+    parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
+    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
     plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
     plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
     plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_verify_for_test,
@@ -26,6 +26,7 @@ use preen_cli::{
     validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
 };
+use preen_core::action_runtime::{ActionExecutionError, RuntimeExecutionError};
 use preen_core::plugin::{SignatureVerifier, VerificationInput, VerificationOutcome, VerifyError};
 use preen_core::plugin_lock::{LockedPlugin, PluginLockfile};
 use preen_core::rules::ScanRule;
@@ -3237,6 +3238,38 @@ fn tagged_error_decodes_deterministically() {
         assert_eq!(err.detail_code.as_deref(), expected_detail_code);
         assert_eq!(err.message, expected_message);
     }
+}
+
+#[test]
+fn clean_runtime_command_denied_maps_expected_detail_code() {
+    let detail = clean_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandDenied {
+            command: "echo".to_string(),
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("clean_command_denied"));
+}
+
+#[test]
+fn clean_runtime_command_timeout_maps_expected_detail_code() {
+    let detail = clean_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandTimeout {
+            command: "echo".to_string(),
+            timeout_sec: 5,
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("clean_command_timeout"));
+}
+
+#[test]
+fn clean_runtime_command_non_zero_maps_expected_detail_code() {
+    let detail = clean_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandNonZero {
+            command: "echo".to_string(),
+            code: Some(12),
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("clean_command_non_zero"));
 }
 
 #[test]

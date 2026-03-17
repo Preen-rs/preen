@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use preen_core::action_runtime::{
     ActionExecutionError, ActionExecutorPort, ActionRisk, ExecutionMode, ExecutionPlan,
@@ -7,6 +9,58 @@ use preen_core::action_runtime::{
 };
 use preen_core::plugin::{ActionSpec, ActionType};
 use preen_os::action_executor::OsActionExecutor;
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: callers ensure serialized env mutation with ENV_LOCK.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+
+    fn clear(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: callers ensure serialized env mutation with ENV_LOCK.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => {
+                // SAFETY: callers ensure serialized env mutation with ENV_LOCK.
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
+            }
+            None => {
+                // SAFETY: callers ensure serialized env mutation with ENV_LOCK.
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+}
 
 fn sample_plan(action_type: ActionType, mode: ExecutionMode, paths: Vec<String>) -> ExecutionPlan {
     sample_plan_with(
@@ -135,6 +189,8 @@ async fn run_command_apply_executes_when_allowlisted() {
 
 #[tokio::test]
 async fn run_command_rejects_when_allowlist_missing() {
+    let _guard = env_lock();
+    let _env = EnvVarGuard::clear("PREEN_RUN_COMMAND_ALLOWLIST");
     let plan = sample_plan_with(
         ActionType::RunCommand,
         ExecutionMode::Apply,
@@ -151,6 +207,8 @@ async fn run_command_rejects_when_allowlist_missing() {
 
 #[tokio::test]
 async fn run_command_rejects_when_not_allowlisted() {
+    let _guard = env_lock();
+    let _env = EnvVarGuard::clear("PREEN_RUN_COMMAND_ALLOWLIST");
     let mut params = HashMap::new();
     params.insert("allowlist".to_string(), "ls".to_string());
     let plan = sample_plan_with(
@@ -211,4 +269,77 @@ async fn run_command_non_zero_exit_is_classified() {
         err,
         ActionExecutionError::CommandNonZero { code: Some(12), .. }
     ));
+}
+
+#[tokio::test]
+async fn run_command_accepts_allowlist_from_env() {
+    let _guard = env_lock();
+    let _env = EnvVarGuard::set("PREEN_RUN_COMMAND_ALLOWLIST", "echo");
+    let plan = sample_plan_with(
+        ActionType::RunCommand,
+        ExecutionMode::Apply,
+        vec![],
+        vec!["/bin/echo".to_string(), "ok".to_string()],
+        HashMap::new(),
+        Some(5),
+    );
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+}
+
+#[tokio::test]
+async fn run_command_allowlist_combines_params_and_env() {
+    let _guard = env_lock();
+    let _env = EnvVarGuard::set("PREEN_RUN_COMMAND_ALLOWLIST", "ls");
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "echo".to_string());
+    let plan = sample_plan_with(
+        ActionType::RunCommand,
+        ExecutionMode::Apply,
+        vec![],
+        vec!["/bin/echo".to_string(), "ok".to_string()],
+        params,
+        Some(5),
+    );
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+}
+
+#[tokio::test]
+async fn run_command_timeout_zero_is_treated_as_one_second() {
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "sh".to_string());
+    let plan = sample_plan_with(
+        ActionType::RunCommand,
+        ExecutionMode::Apply,
+        vec![],
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 2".to_string(),
+        ],
+        params,
+        Some(0),
+    );
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(
+        err,
+        ActionExecutionError::CommandTimeout { timeout_sec: 1, .. }
+    ));
+}
+
+#[tokio::test]
+async fn run_command_timeout_none_uses_default() {
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "echo".to_string());
+    let plan = sample_plan_with(
+        ActionType::RunCommand,
+        ExecutionMode::Apply,
+        vec![],
+        vec!["/bin/echo".to_string(), "ok".to_string()],
+        params,
+        None,
+    );
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
 }

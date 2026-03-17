@@ -3031,6 +3031,11 @@ pub fn clean_output_for_test(
         .map_err(|e| err_with(CliErrorKind::Internal, "clean output parse failed", e))
 }
 
+pub fn clean_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {
+    let encoded = map_clean_runtime_error(error);
+    decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
+}
+
 pub fn clone_rule_pack_for_test(url: &str, rev: &str, dest: &Path) -> Result<String, String> {
     clone_rule_pack_at(url, rev, dest, "install_clone_failed")
 }
