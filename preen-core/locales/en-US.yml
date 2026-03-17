@@ -56,3 +56,31 @@ undo:
   restore_failed: "Undo restore failed. The target path may already exist."
   info_missing: "Undo metadata is missing for this item."
   generic: "Undo failed. Please try again."
+
+system:
+  errors:
+    kind_labels:
+      validation: "Validation"
+      not_found: "Not found"
+      trust: "Trust"
+      verification: "Verification"
+      io: "IO"
+      network: "Network"
+      unsupported: "Unsupported"
+      internal: "Internal"
+    detail:
+      command_not_implemented: "Command is not implemented yet."
+      clean_confirmation_required: "Clean apply mode requires --confirm."
+      clean_dry_run_unsupported_os: "Clean is not supported on this operating system."
+      clean_path_scope_violation: "Selected clean path is outside configured roots."
+      clean_symlink_not_allowed: "Selected clean path cannot be a symlink."
+      clean_relative_path: "Selected clean path must be absolute."
+      clean_blocked_path: "Selected clean path is blocked by safety policy."
+      clean_execution_failed: "Clean execution failed."
+      clean_command_denied: "Clean command was denied by allowlist."
+      clean_command_timeout: "Clean command timed out."
+      clean_command_non_zero: "Clean command exited with a non-zero status."
+    message:
+      command_not_implemented: "Command is not implemented yet."
+      clean_confirmation_required: "Clean apply mode requires --confirm."
+      clean_dry_run_unsupported_os: "Clean is not supported on this operating system."

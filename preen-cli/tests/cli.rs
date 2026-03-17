@@ -1259,6 +1259,63 @@ fn format_error_uses_locale_and_hint_for_text_mode() {
 }
 
 #[test]
+fn format_error_localizes_system_command_not_implemented_in_de() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_LANG", "de-DE");
+    }
+    let cli = Cli::try_parse_from(["preen", "uninstall"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    let out = cli.format_error(&err);
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_LANG");
+    }
+    assert!(out.contains("kind=unsupported"));
+    assert!(out.contains("kind_label=Nicht unterstuetzt"));
+    assert!(out.contains("uninstall Befehl ist noch nicht implementiert."));
+    assert!(!out.contains("hint_code="));
+}
+
+#[test]
+fn format_error_localizes_clean_confirmation_in_de() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_LANG", "de-DE");
+    }
+    let cli = Cli::try_parse_from(["preen", "clean"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    let out = cli.format_error(&err);
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_LANG");
+    }
+    assert!(out.contains("detail_code=clean_confirmation_required"));
+    assert!(out.contains("Clean-Anwenden benoetigt --confirm."));
+    assert!(!out.contains("hint_code="));
+}
+
+#[test]
+fn format_error_system_locale_fallback_to_en_us() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_LANG", "fr-FR");
+    }
+    let cli = Cli::try_parse_from(["preen", "uninstall"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    let out = cli.format_error(&err);
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_LANG");
+    }
+    assert!(out.contains("kind_label=Unsupported"));
+    assert!(out.contains("uninstall command is not implemented yet"));
+}
+
+#[test]
 fn format_error_localizes_common_text_message_in_de() {
     let _guard = ENV_LOCK.lock().unwrap();
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.

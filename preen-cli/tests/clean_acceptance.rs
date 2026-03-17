@@ -44,12 +44,19 @@ fn clean_dry_run_json_happy_path() {
     let _env = CleanEnvGuard::set(&fixture.root, None);
 
     let output = clean_output_for_test(true, false, None).expect("clean output");
-    assert_eq!(output["mode"].as_str(), Some("dry_run"));
-    assert_eq!(output["strategy"].as_str(), Some("delete"));
-    assert!(output["target_count"].as_u64().unwrap_or(0) > 0);
-    assert!(!output["preview_paths"].as_array().unwrap().is_empty());
+    assert_eq!(output["schema_version"].as_u64(), Some(1));
+    assert_eq!(output["kind"].as_str(), Some("system.clean"));
+    assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+    assert_eq!(output["data"]["strategy"].as_str(), Some("delete"));
+    assert!(output["data"]["target_count"].as_u64().unwrap_or(0) > 0);
+    assert!(
+        !output["data"]["preview_paths"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
-        output["risk_summary"]["requires_confirmation"].as_bool(),
+        output["data"]["risk_summary"]["requires_confirmation"].as_bool(),
         Some(false)
     );
 }
@@ -71,9 +78,10 @@ fn clean_apply_confirm_delete_strategy() {
     let _env = CleanEnvGuard::set(&fixture.root, None);
 
     let output = clean_output_for_test(false, true, Some("delete")).expect("clean output");
-    assert_eq!(output["mode"].as_str(), Some("apply"));
-    assert_eq!(output["strategy"].as_str(), Some("delete"));
-    assert!(output["affected_items"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(output["kind"].as_str(), Some("system.clean"));
+    assert_eq!(output["data"]["mode"].as_str(), Some("apply"));
+    assert_eq!(output["data"]["strategy"].as_str(), Some("delete"));
+    assert!(output["data"]["affected_items"].as_u64().unwrap_or(0) > 0);
     assert!(!file_a.exists() || !file_b.exists());
 }
 
@@ -83,9 +91,10 @@ fn clean_dry_run_trash_strategy() {
     let _env = CleanEnvGuard::set(&fixture.root, None);
 
     let output = clean_output_for_test(true, false, Some("trash")).expect("clean output");
-    assert_eq!(output["mode"].as_str(), Some("dry_run"));
-    assert_eq!(output["strategy"].as_str(), Some("trash"));
-    assert!(output["affected_items"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(output["kind"].as_str(), Some("system.clean"));
+    assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+    assert_eq!(output["data"]["strategy"].as_str(), Some("trash"));
+    assert!(output["data"]["affected_items"].as_u64().unwrap_or(0) > 0);
 }
 
 #[test]
@@ -96,8 +105,9 @@ fn clean_selection_limit_respected() {
     let _env = CleanEnvGuard::set(&fixture.root, Some("1"));
 
     let output = clean_output_for_test(false, true, Some("delete")).expect("clean output");
-    assert_eq!(output["target_count"].as_u64(), Some(1));
-    assert_eq!(output["affected_items"].as_u64(), Some(1));
+    assert_eq!(output["kind"].as_str(), Some("system.clean"));
+    assert_eq!(output["data"]["target_count"].as_u64(), Some(1));
+    assert_eq!(output["data"]["affected_items"].as_u64(), Some(1));
     let remaining = usize::from(file_a.exists()) + usize::from(file_b.exists());
     assert_eq!(remaining, 1);
 }
@@ -118,9 +128,10 @@ fn clean_empty_selection_reports_warning() {
     let _env = CleanEnvGuard::set_with_strategy(&fixture.root, None, "trash");
 
     let output = clean_output_for_test(true, false, None).expect("clean output");
-    assert_eq!(output["target_count"].as_u64(), Some(0));
-    assert_eq!(output["strategy"].as_str(), Some("trash"));
-    let warnings = output["warnings"].as_array().unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.clean"));
+    assert_eq!(output["data"]["target_count"].as_u64(), Some(0));
+    assert_eq!(output["data"]["strategy"].as_str(), Some("trash"));
+    let warnings = output["data"]["warnings"].as_array().unwrap();
     assert_eq!(warnings.len(), 1);
     assert_eq!(warnings[0].as_str(), Some("no cleanable items selected"));
 }

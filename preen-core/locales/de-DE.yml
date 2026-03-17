@@ -56,3 +56,31 @@ undo:
   restore_failed: "Undo-Wiederherstellung fehlgeschlagen. Das Ziel existiert moeglicherweise bereits."
   info_missing: "Undo-Metadaten fehlen fuer dieses Element."
   generic: "Undo fehlgeschlagen. Bitte erneut versuchen."
+
+system:
+  errors:
+    kind_labels:
+      validation: "Validierung"
+      not_found: "Nicht gefunden"
+      trust: "Vertrauen"
+      verification: "Verifizierung"
+      io: "Ein-/Ausgabe"
+      network: "Netzwerk"
+      unsupported: "Nicht unterstuetzt"
+      internal: "Intern"
+    detail:
+      command_not_implemented: "Befehl ist noch nicht implementiert."
+      clean_confirmation_required: "Clean-Anwenden benoetigt --confirm."
+      clean_dry_run_unsupported_os: "Clean wird auf diesem Betriebssystem nicht unterstuetzt."
+      clean_path_scope_violation: "Ausgewaehlter Clean-Pfad liegt ausserhalb der erlaubten Wurzeln."
+      clean_symlink_not_allowed: "Ausgewaehlter Clean-Pfad darf kein Symlink sein."
+      clean_relative_path: "Ausgewaehlter Clean-Pfad muss absolut sein."
+      clean_blocked_path: "Ausgewaehlter Clean-Pfad ist durch Sicherheitsrichtlinie blockiert."
+      clean_execution_failed: "Clean-Ausfuehrung ist fehlgeschlagen."
+      clean_command_denied: "Clean-Befehl wurde durch Allowlist abgelehnt."
+      clean_command_timeout: "Clean-Befehl hat das Zeitlimit ueberschritten."
+      clean_command_non_zero: "Clean-Befehl endete mit einem Fehlerstatus."
+    message:
+      command_not_implemented: "Befehl ist noch nicht implementiert."
+      clean_confirmation_required: "Clean-Anwenden benoetigt --confirm."
+      clean_dry_run_unsupported_os: "Clean wird auf diesem Betriebssystem nicht unterstuetzt."

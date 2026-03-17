@@ -36,7 +36,10 @@ use preen_core::plugin_lock::{LockedPlugin, PluginLockfile};
 use preen_core::plugin_registry::{RegistryIndex, ResolvedRegistryPlugin};
 use preen_core::rules::{ScanRule, ScanStrategy};
 use preen_core::store::{ItemRecord, ScanRecord, ScanStorePort};
-use preen_core::{FileSystemPort, ScanResult, config::AppConfig};
+use preen_core::{
+    FileSystemPort, ScanResult, config::AppConfig, system_error_kind_label,
+    system_localized_error_message,
+};
 use preen_os::OsFileSystemAdapter;
 use preen_os::action_executor::OsActionExecutor;
 use reqwest::blocking::Client;
@@ -396,7 +399,7 @@ fn run_clean(
     if json {
         println!(
             "{}",
-            serde_json::to_string(&output).map_err(|e| err_with(
+            clean_json(output).map_err(|e| err_with(
                 CliErrorKind::Internal,
                 "clean json serialize failed",
                 e
@@ -598,6 +601,10 @@ fn map_clean_runtime_error(error: RuntimeExecutionError) -> String {
             execution_error.to_string(),
         ),
     }
+}
+
+fn clean_json(out: CleanCommandOutput) -> Result<String, String> {
+    to_json_envelope("system.clean", out)
 }
 
 fn resolve_clean_paths() -> Vec<String> {
@@ -1217,25 +1224,44 @@ fn cli_label(language: &str, key: &str) -> &'static str {
 }
 
 fn format_human_error(err: &CliError, language: &str) -> String {
-    let message =
-        plugin_localized_error_message(err.detail_code.as_deref(), &err.message, language);
+    let is_system_error = is_system_detail_code(err.detail_code.as_deref());
+    let message = if is_system_error {
+        system_localized_error_message(err.detail_code.as_deref(), &err.message, language)
+    } else {
+        plugin_localized_error_message(err.detail_code.as_deref(), &err.message, language)
+    };
+    let kind_label = if is_system_error {
+        system_error_kind_label(err.kind.as_str(), language)
+    } else {
+        plugin_error_kind_label(err.kind.as_str(), language)
+    };
     let mut line = format!(
         "error: kind={} kind_label={} message={}",
         err.kind.as_str(),
-        plugin_error_kind_label(err.kind.as_str(), language),
+        kind_label,
         message
     );
     if let Some(detail_code) = &err.detail_code {
-        let hint = plugin_failure_hint_from_detail_code(detail_code);
         line.push_str(&format!(" detail_code={detail_code}"));
-        line.push_str(&format!(" hint_code={}", hint.code));
-        line.push_str(&format!(" hint_action={}", hint.action));
-        line.push_str(&format!(
-            " hint_message={}",
-            plugin_failure_hint_message(hint.code, language)
-        ));
+        if !is_system_error {
+            let hint = plugin_failure_hint_from_detail_code(detail_code);
+            line.push_str(&format!(" hint_code={}", hint.code));
+            line.push_str(&format!(" hint_action={}", hint.action));
+            line.push_str(&format!(
+                " hint_message={}",
+                plugin_failure_hint_message(hint.code, language)
+            ));
+        }
     }
     line
+}
+
+fn is_system_detail_code(code: Option<&str>) -> bool {
+    match code {
+        Some("command_not_implemented") => true,
+        Some(value) if value.starts_with("clean_") => true,
+        _ => false,
+    }
 }
 
 fn test_plugin_spec(
@@ -3000,8 +3026,9 @@ pub fn clean_output_for_test(
         None => None,
     };
     let output = run_clean_output(dry_run, confirm, strategy_arg)?;
-    serde_json::to_value(output)
-        .map_err(|e| err_with(CliErrorKind::Internal, "clean output serialize failed", e))
+    let json = clean_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "clean output parse failed", e))
 }
 
 pub fn clone_rule_pack_for_test(url: &str, rev: &str, dest: &Path) -> Result<String, String> {

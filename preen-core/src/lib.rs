@@ -25,6 +25,7 @@ pub const UNDO_CODE_NOT_FOUND: &str = "undo_not_found";
 pub const UNDO_CODE_RESTORE_FAILED: &str = "undo_restore_failed";
 pub const UNDO_CODE_INFO_MISSING: &str = "undo_info_missing";
 pub const UNDO_CODE_GENERIC: &str = "undo_failed";
+pub const SYSTEM_CODE_COMMAND_NOT_IMPLEMENTED: &str = "command_not_implemented";
 
 fn normalize_supported_locale(language: &str) -> &'static str {
     let lower = language.to_lowercase();
@@ -66,6 +67,47 @@ pub fn undo_failed_user_message_with_language(code: &str, language: &str) -> Str
 
 pub fn undo_failed_user_message(code: &str) -> String {
     undo_failed_user_message_with_language(code, "en-US")
+}
+
+pub fn system_error_kind_label(kind: &str, language: &str) -> String {
+    let locale = normalize_supported_locale(language);
+    match kind {
+        "validation" => rust_i18n::t!("system.errors.kind_labels.validation", locale = locale),
+        "not_found" => rust_i18n::t!("system.errors.kind_labels.not_found", locale = locale),
+        "trust" => rust_i18n::t!("system.errors.kind_labels.trust", locale = locale),
+        "verification" => rust_i18n::t!("system.errors.kind_labels.verification", locale = locale),
+        "io" => rust_i18n::t!("system.errors.kind_labels.io", locale = locale),
+        "network" => rust_i18n::t!("system.errors.kind_labels.network", locale = locale),
+        "unsupported" => rust_i18n::t!("system.errors.kind_labels.unsupported", locale = locale),
+        "internal" => rust_i18n::t!("system.errors.kind_labels.internal", locale = locale),
+        _ => rust_i18n::t!("system.errors.kind_labels.internal", locale = locale),
+    }
+    .to_string()
+}
+
+pub fn system_localized_error_message(
+    detail_code: Option<&str>,
+    message: &str,
+    language: &str,
+) -> String {
+    let locale = normalize_supported_locale(language);
+    if let Some(code) = detail_code {
+        if code == SYSTEM_CODE_COMMAND_NOT_IMPLEMENTED {
+            let suffix = " command is not implemented yet";
+            if let Some(command) = message.strip_suffix(suffix) {
+                if locale == "de-DE" {
+                    return format!("{command} Befehl ist noch nicht implementiert.");
+                }
+                return format!("{command}{suffix}");
+            }
+        }
+        let key = format!("system.errors.detail.{code}");
+        let localized = rust_i18n::t!(&key, locale = locale).to_string();
+        if localized != key {
+            return localized;
+        }
+    }
+    message.to_string()
 }
 
 // --- 1. Domain Models ---
