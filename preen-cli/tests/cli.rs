@@ -20,7 +20,7 @@ use preen_cli::{
     plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_verify_for_test,
     plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
-    primary_hint_for_drift_fields_for_test, registry_backup_path_for_test,
+    primary_hint_for_drift_fields_for_test, purge_output_for_test, registry_backup_path_for_test,
     registry_update_json_for_test, resolve_registry_for_test, run_typed,
     run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
     save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
@@ -886,7 +886,6 @@ fn top_level_system_commands_are_phase2_placeholders() {
         ["preen", "optimize"],
         ["preen", "analyze"],
         ["preen", "status"],
-        ["preen", "purge"],
         ["preen", "installer"],
         ["preen", "check"],
         ["preen", "touchid"],
@@ -927,7 +926,6 @@ fn all_top_level_system_commands_emit_json_errors() {
         ["preen", "optimize", "--json"],
         ["preen", "analyze", "--json"],
         ["preen", "status", "--json"],
-        ["preen", "purge", "--json"],
         ["preen", "installer", "--json"],
         ["preen", "check", "--json"],
         ["preen", "touchid", "--json"],
@@ -960,7 +958,6 @@ fn top_level_system_commands_text_errors_include_command_name() {
         ("optimize", "optimize command is not implemented yet"),
         ("analyze", "analyze command is not implemented yet"),
         ("status", "status command is not implemented yet"),
-        ("purge", "purge command is not implemented yet"),
         ("installer", "installer command is not implemented yet"),
         ("check", "check command is not implemented yet"),
         ("touchid", "touchid command is not implemented yet"),
@@ -1015,6 +1012,78 @@ fn clean_apply_requires_confirm_flag() {
         parsed["data"]["detail_code"].as_str().unwrap(),
         "clean_confirmation_required"
     );
+}
+
+#[test]
+fn purge_apply_requires_confirm_flag() {
+    let cli = Cli::try_parse_from(["preen", "purge", "--json"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("purge_confirmation_required")
+    );
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "purge_confirmation_required"
+    );
+}
+
+#[test]
+fn purge_dry_run_json_happy_path() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("app");
+    let artifact = project.join("node_modules");
+    fs::create_dir_all(&artifact).unwrap();
+    fs::write(artifact.join("a.js"), b"1234").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_PURGE_PATHS", temp.path().as_os_str());
+    }
+
+    let output = purge_output_for_test(true, false).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.purge"));
+    assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+    assert!(output["data"]["target_count"].as_u64().unwrap_or(0) >= 1);
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_PURGE_PATHS");
+    }
+}
+
+#[test]
+fn purge_apply_confirm_deletes_targets() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("app");
+    let artifact = project.join("target");
+    fs::create_dir_all(&artifact).unwrap();
+    fs::write(artifact.join("x.bin"), b"1234").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_PURGE_PATHS", temp.path().as_os_str());
+    }
+
+    let output = purge_output_for_test(false, true).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.purge"));
+    assert_eq!(output["data"]["mode"].as_str(), Some("apply"));
+    assert!(output["data"]["affected_items"].as_u64().unwrap_or(0) >= 1);
+    assert!(!artifact.exists());
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_PURGE_PATHS");
+    }
+}
+
+#[test]
+fn purge_paths_mode_runs_without_error() {
+    let cli = Cli::try_parse_from(["preen", "purge", "--paths", "--json"]).unwrap();
+    let result = run_typed(cli);
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -1233,7 +1302,9 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "optimize", "--dry-run", "--json"],
         vec!["preen", "analyze", "/tmp", "--json"],
         vec!["preen", "status", "--json"],
-        vec!["preen", "purge", "--dry-run", "--paths", "--json"],
+        vec!["preen", "purge", "--dry-run", "--json"],
+        vec!["preen", "purge", "--confirm", "--json"],
+        vec!["preen", "purge", "--paths", "--json"],
         vec!["preen", "installer", "--dry-run", "--json"],
         vec!["preen", "check", "--fix", "--json"],
         vec!["preen", "touchid", "enable", "--dry-run", "--json"],
@@ -1288,6 +1359,12 @@ fn top_level_system_commands_reject_unknown_flags() {
 #[test]
 fn clean_rejects_dry_run_with_confirm_conflict() {
     let parsed = Cli::try_parse_from(["preen", "clean", "--dry-run", "--confirm"]);
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn purge_rejects_dry_run_with_confirm_conflict() {
+    let parsed = Cli::try_parse_from(["preen", "purge", "--dry-run", "--confirm"]);
     assert!(parsed.is_err());
 }
 
