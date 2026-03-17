@@ -11,9 +11,10 @@ use preen_cli::{
     Cli, CliError, CliErrorKind, check_registry_freshness_for_test,
     clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test, cli_label_for_test,
     clone_rule_pack_for_test, default_signature_source_for_test, enforce_clean_scope_for_test,
-    error_json_for_test, format_bytes_for_test, hint_for_detail_code_for_test,
-    hint_message_for_test, install_plugin_in_dir_for_test, load_lockfile_at, parse_install_spec,
-    parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
+    enforce_installer_scope_for_test, error_json_for_test, format_bytes_for_test,
+    hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
+    installer_output_for_test, installer_runtime_error_detail_code_for_test, load_lockfile_at,
+    parse_install_spec, parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
     plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
     plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
     plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
@@ -886,7 +887,6 @@ fn top_level_system_commands_are_phase2_placeholders() {
         ["preen", "optimize"],
         ["preen", "analyze"],
         ["preen", "status"],
-        ["preen", "installer"],
         ["preen", "check"],
         ["preen", "touchid"],
         ["preen", "completion"],
@@ -926,7 +926,6 @@ fn all_top_level_system_commands_emit_json_errors() {
         ["preen", "optimize", "--json"],
         ["preen", "analyze", "--json"],
         ["preen", "status", "--json"],
-        ["preen", "installer", "--json"],
         ["preen", "check", "--json"],
         ["preen", "touchid", "--json"],
         ["preen", "completion", "--json"],
@@ -958,7 +957,6 @@ fn top_level_system_commands_text_errors_include_command_name() {
         ("optimize", "optimize command is not implemented yet"),
         ("analyze", "analyze command is not implemented yet"),
         ("status", "status command is not implemented yet"),
-        ("installer", "installer command is not implemented yet"),
         ("check", "check command is not implemented yet"),
         ("touchid", "touchid command is not implemented yet"),
         ("completion", "completion command is not implemented yet"),
@@ -1084,6 +1082,116 @@ fn purge_paths_mode_runs_without_error() {
     let cli = Cli::try_parse_from(["preen", "purge", "--paths", "--json"]).unwrap();
     let result = run_typed(cli);
     assert!(result.is_ok());
+}
+
+#[test]
+fn installer_apply_requires_confirm_flag() {
+    let cli = Cli::try_parse_from(["preen", "installer", "--json"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("installer_confirmation_required")
+    );
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "installer_confirmation_required"
+    );
+}
+
+#[test]
+fn installer_text_error_is_classified_as_system_without_plugin_hints() {
+    let cli = Cli::try_parse_from(["preen", "installer"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    let out = cli.format_error(&err);
+    assert!(out.contains("kind=validation"));
+    assert!(out.contains("detail_code=installer_confirmation_required"));
+    assert!(!out.contains("hint_code="));
+}
+
+#[test]
+fn installer_dry_run_json_happy_path() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let installer = temp.path().join("Setup.pkg");
+    fs::write(&installer, vec![0u8; 11 * 1024 * 1024]).unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_INSTALLER_PATHS", temp.path().as_os_str());
+    }
+
+    let output = installer_output_for_test(true, false).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.installer"));
+    assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+    assert!(output["data"]["target_count"].as_u64().unwrap_or(0) >= 1);
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_INSTALLER_PATHS");
+    }
+}
+
+#[test]
+fn installer_apply_confirm_deletes_targets() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let installer = temp.path().join("archive.dmg");
+    fs::write(&installer, vec![0u8; 11 * 1024 * 1024]).unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_INSTALLER_PATHS", temp.path().as_os_str());
+    }
+
+    let output = installer_output_for_test(false, true).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.installer"));
+    assert_eq!(output["data"]["mode"].as_str(), Some("apply"));
+    assert!(output["data"]["affected_items"].as_u64().unwrap_or(0) >= 1);
+    assert!(!installer.exists());
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_INSTALLER_PATHS");
+    }
+}
+
+#[test]
+fn installer_paths_mode_runs_without_error() {
+    let cli = Cli::try_parse_from(["preen", "installer", "--paths", "--json"]).unwrap();
+    let result = run_typed(cli);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn installer_scope_rejects_symlink_targets() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    let outside = fixture.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let outside_file = outside.join("Setup.pkg");
+    fs::write(&outside_file, vec![0u8; 11 * 1024 * 1024]).unwrap();
+    let link = root.join("linked.pkg");
+    std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+    let roots = vec![root.to_string_lossy().to_string()];
+    let selected = vec![link.to_string_lossy().to_string()];
+    let err = enforce_installer_scope_for_test(&selected, &roots).unwrap_err();
+    assert!(err.contains("installer_symlink_not_allowed"));
+}
+
+#[test]
+fn installer_scope_rejects_outside_root_paths() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    let outside = fixture.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let outside_file = outside.join("Setup.pkg");
+    fs::write(&outside_file, vec![0u8; 11 * 1024 * 1024]).unwrap();
+    let roots = vec![root.to_string_lossy().to_string()];
+    let selected = vec![outside_file.to_string_lossy().to_string()];
+    let err = enforce_installer_scope_for_test(&selected, &roots).unwrap_err();
+    assert!(err.contains("installer_path_scope_violation"));
 }
 
 #[test]
@@ -1306,6 +1414,8 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "purge", "--confirm", "--json"],
         vec!["preen", "purge", "--paths", "--json"],
         vec!["preen", "installer", "--dry-run", "--json"],
+        vec!["preen", "installer", "--confirm", "--json"],
+        vec!["preen", "installer", "--paths", "--json"],
         vec!["preen", "check", "--fix", "--json"],
         vec!["preen", "touchid", "enable", "--dry-run", "--json"],
         vec!["preen", "completion", "zsh", "--dry-run", "--json"],
@@ -1366,6 +1476,28 @@ fn clean_rejects_dry_run_with_confirm_conflict() {
 fn purge_rejects_dry_run_with_confirm_conflict() {
     let parsed = Cli::try_parse_from(["preen", "purge", "--dry-run", "--confirm"]);
     assert!(parsed.is_err());
+}
+
+#[test]
+fn purge_paths_rejects_dry_run_or_confirm_conflicts() {
+    let with_dry_run = Cli::try_parse_from(["preen", "purge", "--paths", "--dry-run"]);
+    assert!(with_dry_run.is_err());
+    let with_confirm = Cli::try_parse_from(["preen", "purge", "--paths", "--confirm"]);
+    assert!(with_confirm.is_err());
+}
+
+#[test]
+fn installer_rejects_dry_run_with_confirm_conflict() {
+    let parsed = Cli::try_parse_from(["preen", "installer", "--dry-run", "--confirm"]);
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn installer_paths_rejects_dry_run_or_confirm_conflicts() {
+    let with_dry_run = Cli::try_parse_from(["preen", "installer", "--paths", "--dry-run"]);
+    assert!(with_dry_run.is_err());
+    let with_confirm = Cli::try_parse_from(["preen", "installer", "--paths", "--confirm"]);
+    assert!(with_confirm.is_err());
 }
 
 #[test]
@@ -3442,6 +3574,38 @@ fn clean_runtime_command_non_zero_maps_expected_detail_code() {
         },
     ));
     assert_eq!(detail.as_deref(), Some("clean_command_non_zero"));
+}
+
+#[test]
+fn installer_runtime_command_denied_maps_expected_detail_code() {
+    let detail = installer_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandDenied {
+            command: "echo".to_string(),
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("installer_command_denied"));
+}
+
+#[test]
+fn installer_runtime_command_timeout_maps_expected_detail_code() {
+    let detail = installer_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandTimeout {
+            command: "echo".to_string(),
+            timeout_sec: 5,
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("installer_command_timeout"));
+}
+
+#[test]
+fn installer_runtime_command_non_zero_maps_expected_detail_code() {
+    let detail = installer_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandNonZero {
+            command: "echo".to_string(),
+            code: Some(12),
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("installer_command_non_zero"));
 }
 
 #[test]
