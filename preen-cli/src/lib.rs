@@ -250,6 +250,25 @@ struct OptimizeCommandOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SystemCheckRowOutput {
+    id: String,
+    label: String,
+    severity: String,
+    passed: bool,
+    message: String,
+    fixed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SystemCheckOutput {
+    mode: String,
+    overall_passed: bool,
+    checks: Vec<SystemCheckRowOutput>,
+    fixes_applied: u64,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PluginRemoveOutput {
     pack_id: String,
     removed: bool,
@@ -341,7 +360,7 @@ fn run_typed_with_verifier_and_clean_executor(
             .map_err(CliError::from),
         CliCommand::Analyze { .. } => Err(command_not_implemented_error("analyze")),
         CliCommand::Status { .. } => Err(command_not_implemented_error("status")),
-        CliCommand::Check { .. } => Err(command_not_implemented_error("check")),
+        CliCommand::Check { fix, json } => run_check(*fix, *json).map_err(CliError::from),
         CliCommand::Touchid { .. } => Err(command_not_implemented_error("touchid")),
         CliCommand::Completion { .. } => Err(command_not_implemented_error("completion")),
         CliCommand::Update { .. } => Err(command_not_implemented_error("update")),
@@ -1241,6 +1260,206 @@ fn run_optimize_output_with_executor(
         warnings,
         audit_events: sink.event_count(),
     })
+}
+
+fn run_check(fix: bool, json: bool) -> Result<(), String> {
+    let output = run_check_output(fix);
+    if json {
+        println!("{}", check_json(output.clone())?);
+        return Ok(());
+    }
+    print_check_output(&output);
+    Ok(())
+}
+
+fn run_check_output(fix: bool) -> SystemCheckOutput {
+    let mode = if fix { "check_and_fix" } else { "check" }.to_string();
+    let mut checks = Vec::new();
+    let mut warnings = Vec::new();
+    let mut fixes_applied = 0_u64;
+
+    let os_supported = matches!(std::env::consts::OS, "macos" | "linux");
+    checks.push(SystemCheckRowOutput {
+        id: "os_supported".to_string(),
+        label: "Supported OS".to_string(),
+        severity: "critical".to_string(),
+        passed: os_supported,
+        message: if os_supported {
+            format!("{} is supported", std::env::consts::OS)
+        } else {
+            format!("{} is not supported", std::env::consts::OS)
+        },
+        fixed: false,
+    });
+    if !os_supported {
+        warnings.push(format!("unsupported os: {}", std::env::consts::OS));
+    }
+
+    let state_dir = preen_state_dir();
+    let mut state_dir_path = None;
+    match state_dir {
+        Ok(path) => {
+            let mut state_dir_passed = path.exists();
+            let mut state_dir_fixed = false;
+            let state_dir_message = if state_dir_passed {
+                format!("state dir exists: {}", path.display())
+            } else if fix {
+                match fs::create_dir_all(&path) {
+                    Ok(_) => {
+                        state_dir_passed = true;
+                        state_dir_fixed = true;
+                        fixes_applied += 1;
+                        format!("state dir created: {}", path.display())
+                    }
+                    Err(err) => {
+                        warnings.push(format!("state dir create failed: {err}"));
+                        format!("state dir create failed: {err}")
+                    }
+                }
+            } else {
+                format!("state dir missing: {}", path.display())
+            };
+            checks.push(SystemCheckRowOutput {
+                id: "state_dir_exists".to_string(),
+                label: "State directory exists".to_string(),
+                severity: "critical".to_string(),
+                passed: state_dir_passed,
+                message: state_dir_message,
+                fixed: state_dir_fixed,
+            });
+            state_dir_path = Some(path);
+        }
+        Err(message) => {
+            warnings.push(message.clone());
+            checks.push(SystemCheckRowOutput {
+                id: "state_dir_exists".to_string(),
+                label: "State directory exists".to_string(),
+                severity: "critical".to_string(),
+                passed: false,
+                message,
+                fixed: false,
+            });
+        }
+    }
+
+    if let Some(state_dir) = state_dir_path {
+        let mut writable = true;
+        let mut writable_message = "state dir is writable".to_string();
+        if let Err(err) = fs::create_dir_all(&state_dir) {
+            writable = false;
+            writable_message = format!("state dir create check failed: {err}");
+        } else {
+            let probe = state_dir.join(".preen-check-write-probe");
+            match fs::write(&probe, b"probe") {
+                Ok(_) => {
+                    let _ = fs::remove_file(&probe);
+                }
+                Err(err) => {
+                    writable = false;
+                    writable_message = format!("state dir write probe failed: {err}");
+                }
+            }
+        }
+        if !writable {
+            warnings.push(writable_message.clone());
+        }
+        checks.push(SystemCheckRowOutput {
+            id: "state_dir_writable".to_string(),
+            label: "State directory writable".to_string(),
+            severity: "critical".to_string(),
+            passed: writable,
+            message: writable_message,
+            fixed: false,
+        });
+
+        let plugins_dir = state_dir.join("plugins");
+        let mut plugins_dir_passed = plugins_dir.exists();
+        let mut plugins_dir_fixed = false;
+        let plugins_dir_message = if plugins_dir_passed {
+            format!("plugins dir exists: {}", plugins_dir.display())
+        } else if fix {
+            match fs::create_dir_all(&plugins_dir) {
+                Ok(_) => {
+                    plugins_dir_passed = true;
+                    plugins_dir_fixed = true;
+                    fixes_applied += 1;
+                    format!("plugins dir created: {}", plugins_dir.display())
+                }
+                Err(err) => {
+                    warnings.push(format!("plugins dir create failed: {err}"));
+                    format!("plugins dir create failed: {err}")
+                }
+            }
+        } else {
+            format!("plugins dir missing: {}", plugins_dir.display())
+        };
+        checks.push(SystemCheckRowOutput {
+            id: "plugins_dir_exists".to_string(),
+            label: "Plugin directory exists".to_string(),
+            severity: "warning".to_string(),
+            passed: plugins_dir_passed,
+            message: plugins_dir_message,
+            fixed: plugins_dir_fixed,
+        });
+
+        let registry_index = state_dir.join("registry-index.toml");
+        checks.push(SystemCheckRowOutput {
+            id: "registry_index_present".to_string(),
+            label: "Registry index present".to_string(),
+            severity: "warning".to_string(),
+            passed: registry_index.exists(),
+            message: if registry_index.exists() {
+                format!("registry index found: {}", registry_index.display())
+            } else {
+                format!(
+                    "registry index missing: {} (run `preen plugin registry-update`)",
+                    registry_index.display()
+                )
+            },
+            fixed: false,
+        });
+    }
+
+    let overall_passed = checks.iter().all(|check| {
+        if check.severity == "critical" {
+            check.passed
+        } else {
+            true
+        }
+    });
+    SystemCheckOutput {
+        mode,
+        overall_passed,
+        checks,
+        fixes_applied,
+        warnings,
+    }
+}
+
+fn check_json(out: SystemCheckOutput) -> Result<String, String> {
+    to_json_envelope("system.check", out)
+}
+
+fn print_check_output(out: &SystemCheckOutput) {
+    println!(
+        "summary: kind=system_check overall_passed={}",
+        out.overall_passed
+    );
+    println!("mode: {}", out.mode);
+    println!("checks: label=Checks");
+    for check in &out.checks {
+        println!(
+            "check: id={} label={} severity={} passed={} fixed={} message={}",
+            check.id, check.label, check.severity, check.passed, check.fixed, check.message
+        );
+    }
+    println!("fixes_applied: {}", out.fixes_applied);
+    if !out.warnings.is_empty() {
+        println!("warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            println!("warning: {warning}");
+        }
+    }
 }
 
 fn run_clean_output(
@@ -2930,6 +3149,7 @@ fn is_system_detail_code(code: Option<&str>) -> bool {
         Some(value) if value.starts_with("installer_") => true,
         Some(value) if value.starts_with("uninstall_") => true,
         Some(value) if value.starts_with("optimize_") => true,
+        Some(value) if value.starts_with("check_") => true,
         _ => false,
     }
 }
@@ -4755,6 +4975,13 @@ pub fn optimize_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_js
     let json = optimize_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "optimize output parse failed", e))
+}
+
+pub fn check_output_for_test(fix: bool) -> Result<serde_json::Value, String> {
+    let output = run_check_output(fix);
+    let json = check_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "check output parse failed", e))
 }
 
 pub fn clean_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {

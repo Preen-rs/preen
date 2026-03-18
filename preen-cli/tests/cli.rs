@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use clap::Parser;
 use preen_cli::{
-    Cli, CliError, CliErrorKind, check_registry_freshness_for_test,
+    Cli, CliError, CliErrorKind, check_output_for_test, check_registry_freshness_for_test,
     clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test, cli_label_for_test,
     clone_rule_pack_for_test, default_signature_source_for_test, enforce_clean_scope_for_test,
     enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
@@ -190,6 +190,17 @@ fn check_passed_from_verify_text(text: &str, check_id: &str) -> Option<bool> {
         }
     }
     None
+}
+
+fn system_check_passed_from_json(data: &Value, check_id: &str) -> Option<bool> {
+    let checks = data.get("checks")?.as_array()?;
+    checks.iter().find_map(|item| {
+        if item.get("id").and_then(Value::as_str) == Some(check_id) {
+            item.get("passed").and_then(Value::as_bool)
+        } else {
+            None
+        }
+    })
 }
 
 fn init_preflight_git_repo(base: &Path) -> String {
@@ -888,7 +899,6 @@ fn top_level_system_commands_are_phase2_placeholders() {
     let cases = [
         ["preen", "analyze"],
         ["preen", "status"],
-        ["preen", "check"],
         ["preen", "touchid"],
         ["preen", "completion"],
         ["preen", "update"],
@@ -925,7 +935,6 @@ fn all_top_level_system_commands_emit_json_errors() {
     let cases = [
         ["preen", "analyze", "--json"],
         ["preen", "status", "--json"],
-        ["preen", "check", "--json"],
         ["preen", "touchid", "--json"],
         ["preen", "completion", "--json"],
         ["preen", "update", "--json"],
@@ -954,7 +963,6 @@ fn top_level_system_commands_text_errors_include_command_name() {
     let cases = [
         ("analyze", "analyze command is not implemented yet"),
         ("status", "status command is not implemented yet"),
-        ("check", "check command is not implemented yet"),
         ("touchid", "touchid command is not implemented yet"),
         ("completion", "completion command is not implemented yet"),
         ("update", "update command is not implemented yet"),
@@ -1046,6 +1054,40 @@ fn optimize_dry_run_json_happy_path() {
         .cloned()
         .unwrap_or_default();
     assert!(!executed.is_empty());
+}
+
+#[test]
+fn check_json_happy_path_without_fix() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = check_output_for_test(false).unwrap();
+        assert_eq!(output["kind"].as_str(), Some("system.check"));
+        assert_eq!(output["data"]["mode"].as_str(), Some("check"));
+        assert_eq!(output["data"]["fixes_applied"].as_u64(), Some(0));
+        assert_eq!(
+            system_check_passed_from_json(&output["data"], "state_dir_exists"),
+            Some(false)
+        );
+    });
+}
+
+#[test]
+fn check_fix_json_creates_state_and_plugin_dirs() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = check_output_for_test(true).unwrap();
+        assert_eq!(output["kind"].as_str(), Some("system.check"));
+        assert_eq!(output["data"]["mode"].as_str(), Some("check_and_fix"));
+        assert!(output["data"]["fixes_applied"].as_u64().unwrap_or(0) >= 1);
+        assert_eq!(
+            system_check_passed_from_json(&output["data"], "state_dir_exists"),
+            Some(true)
+        );
+        assert_eq!(
+            system_check_passed_from_json(&output["data"], "plugins_dir_exists"),
+            Some(true)
+        );
+    });
 }
 
 #[test]
