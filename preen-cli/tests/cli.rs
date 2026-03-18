@@ -11,10 +11,11 @@ use preen_cli::{
     Cli, CliError, CliErrorKind, check_registry_freshness_for_test,
     clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test, cli_label_for_test,
     clone_rule_pack_for_test, default_signature_source_for_test, enforce_clean_scope_for_test,
-    enforce_installer_scope_for_test, error_json_for_test, format_bytes_for_test,
-    hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
-    installer_output_for_test, installer_runtime_error_detail_code_for_test, load_lockfile_at,
-    parse_install_spec, parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
+    enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
+    format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
+    install_plugin_in_dir_for_test, installer_output_for_test,
+    installer_runtime_error_detail_code_for_test, load_lockfile_at, parse_install_spec,
+    parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
     plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
     plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
     plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
@@ -25,7 +26,8 @@ use preen_cli::{
     registry_update_json_for_test, resolve_registry_for_test, run_typed,
     run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
     save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
-    test_failure_row_for_test, trust_policy_from_str, validate_registry_trust_inputs_for_test,
+    test_failure_row_for_test, trust_policy_from_str, uninstall_output_for_test,
+    uninstall_runtime_error_detail_code_for_test, validate_registry_trust_inputs_for_test,
     verify_lockfile_hashes, write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
@@ -883,7 +885,6 @@ fn wants_json_output_detects_flag() {
 #[test]
 fn top_level_system_commands_are_phase2_placeholders() {
     let cases = [
-        ["preen", "uninstall"],
         ["preen", "optimize"],
         ["preen", "analyze"],
         ["preen", "status"],
@@ -904,7 +905,7 @@ fn top_level_system_commands_are_phase2_placeholders() {
 
 #[test]
 fn top_level_system_commands_emit_json_errors() {
-    let cli = Cli::try_parse_from(["preen", "uninstall", "--json"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "optimize", "--json"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -922,7 +923,6 @@ fn top_level_system_commands_emit_json_errors() {
 #[test]
 fn all_top_level_system_commands_emit_json_errors() {
     let cases = [
-        ["preen", "uninstall", "--json"],
         ["preen", "optimize", "--json"],
         ["preen", "analyze", "--json"],
         ["preen", "status", "--json"],
@@ -953,7 +953,6 @@ fn all_top_level_system_commands_emit_json_errors() {
 #[test]
 fn top_level_system_commands_text_errors_include_command_name() {
     let cases = [
-        ("uninstall", "uninstall command is not implemented yet"),
         ("optimize", "optimize command is not implemented yet"),
         ("analyze", "analyze command is not implemented yet"),
         ("status", "status command is not implemented yet"),
@@ -1010,6 +1009,98 @@ fn clean_apply_requires_confirm_flag() {
         parsed["data"]["detail_code"].as_str().unwrap(),
         "clean_confirmation_required"
     );
+}
+
+#[test]
+fn uninstall_requires_target_argument() {
+    let cli = Cli::try_parse_from(["preen", "uninstall", "--json"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("uninstall_target_required")
+    );
+}
+
+#[test]
+fn uninstall_apply_requires_confirm_flag() {
+    let cli = Cli::try_parse_from(["preen", "uninstall", "DemoApp", "--json"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("uninstall_confirmation_required")
+    );
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "uninstall_confirmation_required"
+    );
+}
+
+#[test]
+fn uninstall_text_error_is_classified_as_system_without_plugin_hints() {
+    let cli = Cli::try_parse_from(["preen", "uninstall", "DemoApp"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    let out = cli.format_error(&err);
+    assert!(out.contains("kind=validation"));
+    assert!(out.contains("detail_code=uninstall_confirmation_required"));
+    assert!(!out.contains("hint_code="));
+}
+
+#[test]
+fn uninstall_dry_run_json_happy_path() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let app_dir = temp.path().join("DemoApp.app");
+    fs::create_dir_all(&app_dir).unwrap();
+    fs::write(app_dir.join("Info.plist"), b"demo").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_UNINSTALL_PATHS", temp.path().as_os_str());
+    }
+
+    let output = uninstall_output_for_test(Some("DemoApp"), true, false).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.uninstall"));
+    assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+    assert_eq!(output["data"]["target"].as_str(), Some("DemoApp"));
+    assert!(output["data"]["target_count"].as_u64().unwrap_or(0) >= 1);
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_UNINSTALL_PATHS");
+    }
+}
+
+#[test]
+fn uninstall_apply_confirm_deletes_targets() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let app_dir = temp.path().join("DemoApp.app");
+    fs::create_dir_all(&app_dir).unwrap();
+    fs::write(app_dir.join("Info.plist"), b"demo").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_UNINSTALL_PATHS", temp.path().as_os_str());
+    }
+
+    let output = uninstall_output_for_test(Some("DemoApp"), false, true).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.uninstall"));
+    assert_eq!(output["data"]["mode"].as_str(), Some("apply"));
+    assert!(output["data"]["affected_items"].as_u64().unwrap_or(0) >= 1);
+    assert!(!app_dir.exists());
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_UNINSTALL_PATHS");
+    }
+}
+
+#[test]
+fn uninstall_paths_mode_runs_without_error() {
+    let cli = Cli::try_parse_from(["preen", "uninstall", "--paths", "--json"]).unwrap();
+    let result = run_typed(cli);
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -1192,6 +1283,38 @@ fn installer_scope_rejects_outside_root_paths() {
     let selected = vec![outside_file.to_string_lossy().to_string()];
     let err = enforce_installer_scope_for_test(&selected, &roots).unwrap_err();
     assert!(err.contains("installer_path_scope_violation"));
+}
+
+#[test]
+fn uninstall_scope_rejects_symlink_targets() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    let outside = fixture.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let outside_file = outside.join("DemoApp.app");
+    fs::write(&outside_file, b"demo").unwrap();
+    let link = root.join("linked.app");
+    std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+    let roots = vec![root.to_string_lossy().to_string()];
+    let selected = vec![link.to_string_lossy().to_string()];
+    let err = enforce_uninstall_scope_for_test(&selected, &roots).unwrap_err();
+    assert!(err.contains("uninstall_symlink_not_allowed"));
+}
+
+#[test]
+fn uninstall_scope_rejects_outside_root_paths() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    let outside = fixture.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let outside_file = outside.join("DemoApp.app");
+    fs::write(&outside_file, b"demo").unwrap();
+    let roots = vec![root.to_string_lossy().to_string()];
+    let selected = vec![outside_file.to_string_lossy().to_string()];
+    let err = enforce_uninstall_scope_for_test(&selected, &roots).unwrap_err();
+    assert!(err.contains("uninstall_path_scope_violation"));
 }
 
 #[test]
@@ -1406,7 +1529,9 @@ fn top_level_system_command_option_matrix_parses() {
             "trash",
             "--json",
         ],
-        vec!["preen", "uninstall", "--dry-run", "--json"],
+        vec!["preen", "uninstall", "DemoApp", "--dry-run", "--json"],
+        vec!["preen", "uninstall", "DemoApp", "--confirm", "--json"],
+        vec!["preen", "uninstall", "--paths", "--json"],
         vec!["preen", "optimize", "--dry-run", "--json"],
         vec!["preen", "analyze", "/tmp", "--json"],
         vec!["preen", "status", "--json"],
@@ -1431,7 +1556,7 @@ fn top_level_system_command_option_matrix_parses() {
 fn top_level_system_commands_short_flags_parse() {
     let cases: Vec<Vec<&str>> = vec![
         vec!["preen", "clean", "-n"],
-        vec!["preen", "uninstall", "-n"],
+        vec!["preen", "uninstall", "DemoApp", "-n"],
         vec!["preen", "optimize", "-n"],
         vec!["preen", "purge", "-n"],
         vec!["preen", "installer", "-n"],
@@ -1449,7 +1574,7 @@ fn top_level_system_commands_short_flags_parse() {
 fn top_level_system_commands_reject_unknown_flags() {
     let cases: Vec<Vec<&str>> = vec![
         vec!["preen", "clean", "--unexpected-flag"],
-        vec!["preen", "uninstall", "--unexpected-flag"],
+        vec!["preen", "uninstall", "DemoApp", "--unexpected-flag"],
         vec!["preen", "optimize", "--unexpected-flag"],
         vec!["preen", "analyze", "--unexpected-flag"],
         vec!["preen", "status", "--unexpected-flag"],
@@ -1470,6 +1595,22 @@ fn top_level_system_commands_reject_unknown_flags() {
 fn clean_rejects_dry_run_with_confirm_conflict() {
     let parsed = Cli::try_parse_from(["preen", "clean", "--dry-run", "--confirm"]);
     assert!(parsed.is_err());
+}
+
+#[test]
+fn uninstall_rejects_dry_run_with_confirm_conflict() {
+    let parsed = Cli::try_parse_from(["preen", "uninstall", "DemoApp", "--dry-run", "--confirm"]);
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn uninstall_paths_rejects_target_dry_run_or_confirm_conflicts() {
+    let with_target = Cli::try_parse_from(["preen", "uninstall", "DemoApp", "--paths"]);
+    assert!(with_target.is_err());
+    let with_dry_run = Cli::try_parse_from(["preen", "uninstall", "--paths", "--dry-run"]);
+    assert!(with_dry_run.is_err());
+    let with_confirm = Cli::try_parse_from(["preen", "uninstall", "--paths", "--confirm"]);
+    assert!(with_confirm.is_err());
 }
 
 #[test]
@@ -1570,7 +1711,7 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     unsafe {
         std::env::set_var("PREEN_LANG", "de-DE");
     }
-    let cli = Cli::try_parse_from(["preen", "uninstall"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "optimize"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
@@ -1579,7 +1720,7 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     }
     assert!(out.contains("kind=unsupported"));
     assert!(out.contains("kind_label=Nicht unterstuetzt"));
-    assert!(out.contains("uninstall Befehl ist noch nicht implementiert."));
+    assert!(out.contains("optimize Befehl ist noch nicht implementiert."));
     assert!(!out.contains("hint_code="));
 }
 
@@ -1609,7 +1750,7 @@ fn format_error_system_locale_fallback_to_en_us() {
     unsafe {
         std::env::set_var("PREEN_LANG", "fr-FR");
     }
-    let cli = Cli::try_parse_from(["preen", "uninstall"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "optimize"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
@@ -1617,7 +1758,7 @@ fn format_error_system_locale_fallback_to_en_us() {
         std::env::remove_var("PREEN_LANG");
     }
     assert!(out.contains("kind_label=Unsupported"));
-    assert!(out.contains("uninstall command is not implemented yet"));
+    assert!(out.contains("optimize command is not implemented yet"));
 }
 
 #[test]
@@ -3606,6 +3747,38 @@ fn installer_runtime_command_non_zero_maps_expected_detail_code() {
         },
     ));
     assert_eq!(detail.as_deref(), Some("installer_command_non_zero"));
+}
+
+#[test]
+fn uninstall_runtime_command_denied_maps_expected_detail_code() {
+    let detail = uninstall_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandDenied {
+            command: "echo".to_string(),
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("uninstall_command_denied"));
+}
+
+#[test]
+fn uninstall_runtime_command_timeout_maps_expected_detail_code() {
+    let detail = uninstall_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandTimeout {
+            command: "echo".to_string(),
+            timeout_sec: 5,
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("uninstall_command_timeout"));
+}
+
+#[test]
+fn uninstall_runtime_command_non_zero_maps_expected_detail_code() {
+    let detail = uninstall_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandNonZero {
+            command: "echo".to_string(),
+            code: Some(12),
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("uninstall_command_non_zero"));
 }
 
 #[test]

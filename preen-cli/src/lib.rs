@@ -63,6 +63,8 @@ const DEFAULT_PURGE_SCAN_DEPTH: usize = 6;
 const DEFAULT_PURGE_PREVIEW_LIMIT: usize = 20;
 const DEFAULT_INSTALLER_SCAN_DEPTH: usize = 5;
 const DEFAULT_INSTALLER_PREVIEW_LIMIT: usize = 20;
+const DEFAULT_UNINSTALL_SCAN_DEPTH: usize = 4;
+const DEFAULT_UNINSTALL_PREVIEW_LIMIT: usize = 20;
 const DEFAULT_PURGE_ARTIFACT_NAMES: [&str; 10] = [
     "node_modules",
     "target",
@@ -216,6 +218,26 @@ struct InstallerPathsOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct UninstallCommandOutput {
+    mode: String,
+    target: String,
+    scanned_roots: usize,
+    scanned_entries: usize,
+    target_count: usize,
+    estimated_freed_bytes: u64,
+    preview_paths: Vec<String>,
+    affected_items: u64,
+    freed_bytes: u64,
+    warnings: Vec<String>,
+    audit_events: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct UninstallPathsOutput {
+    roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PluginRemoveOutput {
     pack_id: String,
     removed: bool,
@@ -284,7 +306,21 @@ fn run_typed_with_verifier_and_clean_executor(
             json,
         } => run_installer_with_executor(*dry_run, *confirm, *paths, *json, clean_executor)
             .map_err(CliError::from),
-        CliCommand::Uninstall { .. } => Err(command_not_implemented_error("uninstall")),
+        CliCommand::Uninstall {
+            target,
+            dry_run,
+            confirm,
+            paths,
+            json,
+        } => run_uninstall_with_executor(
+            target.as_deref(),
+            *dry_run,
+            *confirm,
+            *paths,
+            *json,
+            clean_executor,
+        )
+        .map_err(CliError::from),
         CliCommand::Optimize { .. } => Err(command_not_implemented_error("optimize")),
         CliCommand::Analyze { .. } => Err(command_not_implemented_error("analyze")),
         CliCommand::Status { .. } => Err(command_not_implemented_error("status")),
@@ -782,6 +818,223 @@ fn run_installer_output_with_executor(
     })
 }
 
+fn run_uninstall_with_executor(
+    target: Option<&str>,
+    dry_run: bool,
+    confirm: bool,
+    paths: bool,
+    json: bool,
+    clean_executor: &dyn ActionExecutorPort,
+) -> Result<(), String> {
+    if paths {
+        let roots = normalize_uninstall_roots(resolve_uninstall_roots());
+        if json {
+            println!(
+                "{}",
+                to_json_envelope("system.uninstall.paths", UninstallPathsOutput { roots })?
+            );
+            return Ok(());
+        }
+        println!("Uninstall scan roots:");
+        for root in &roots {
+            println!("- {root}");
+        }
+        return Ok(());
+    }
+
+    let output = run_uninstall_output_with_executor(target, dry_run, confirm, clean_executor)?;
+    if json {
+        println!("{}", uninstall_json(output.clone())?);
+        return Ok(());
+    }
+
+    println!("Uninstall ({})", if dry_run { "dry-run" } else { "apply" });
+    println!("Target: {}", output.target);
+    println!("Scanned roots: {}", output.scanned_roots);
+    println!("Scanned entries: {}", output.scanned_entries);
+    println!("Targets: {}", output.target_count);
+    println!(
+        "Estimated reclaimable: {}",
+        format_bytes(output.estimated_freed_bytes)
+    );
+    if !output.preview_paths.is_empty() {
+        println!("Preview:");
+        for path in &output.preview_paths {
+            println!("- {path}");
+        }
+    }
+    println!("Affected items: {}", output.affected_items);
+    println!("Freed bytes: {}", format_bytes(output.freed_bytes));
+    if !output.warnings.is_empty() {
+        println!("Warnings:");
+        for warning in &output.warnings {
+            println!("- {warning}");
+        }
+    }
+    println!("Audit events: {}", output.audit_events);
+
+    Ok(())
+}
+
+fn run_uninstall_output_with_executor(
+    target: Option<&str>,
+    dry_run: bool,
+    confirm: bool,
+    clean_executor: &dyn ActionExecutorPort,
+) -> Result<UninstallCommandOutput, String> {
+    let target = target
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            err_code(
+                CliErrorKind::Validation,
+                "uninstall_target_required",
+                "uninstall requires a target argument",
+            )
+        })?;
+    if !dry_run && !confirm {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "uninstall_confirmation_required",
+            "uninstall apply mode requires --confirm",
+        ));
+    }
+
+    let roots = normalize_uninstall_roots(resolve_uninstall_roots());
+    if roots.is_empty() {
+        return Err(err_code(
+            CliErrorKind::Unsupported,
+            "uninstall_no_roots",
+            "uninstall has no configured scan roots",
+        ));
+    }
+
+    let (selection, scanned_entries, mut warnings) =
+        scan_uninstall_candidates(&roots, target, uninstall_scan_depth());
+    let selected_paths = selection
+        .iter()
+        .map(|item| item.path.clone())
+        .collect::<Vec<_>>();
+    let estimated_freed_bytes: u64 = selection.iter().map(|item| item.size).sum();
+    enforce_uninstall_scope(&selected_paths, &roots)?;
+    let preview_paths = clean_preview_paths(&selected_paths, uninstall_preview_limit());
+
+    if selected_paths.is_empty() {
+        warnings.push("no uninstall targets selected".to_string());
+        return Ok(UninstallCommandOutput {
+            mode: if dry_run {
+                "dry_run".to_string()
+            } else {
+                "apply".to_string()
+            },
+            target: target.to_string(),
+            scanned_roots: roots.len(),
+            scanned_entries,
+            target_count: 0,
+            estimated_freed_bytes: 0,
+            preview_paths: Vec::new(),
+            affected_items: 0,
+            freed_bytes: 0,
+            warnings,
+            audit_events: 0,
+        });
+    }
+
+    let manifest = Manifest {
+        schema_version: 1,
+        pack_id: "preen.builtin.uninstall".to_string(),
+        name: "Built-in Uninstall".to_string(),
+        version: "0.1.0".to_string(),
+        description: "Built-in uninstall plan".to_string(),
+        author: "Preen".to_string(),
+        license: "MIT".to_string(),
+        homepage: None,
+        core_compat: ">=0.1.0,<2.0.0".to_string(),
+        action_api: 1,
+        os_targets: vec![if cfg!(target_os = "macos") {
+            OsTarget::Macos
+        } else {
+            OsTarget::Linux
+        }],
+        capabilities: vec![Capability::FsRead, Capability::FsDelete],
+        signing: None,
+        rules: vec![RuleRef {
+            id: "builtin-uninstall".to_string(),
+            name: "Built-in Uninstall".to_string(),
+            rule_file: "builtin".to_string(),
+        }],
+    };
+    let rule = RuleFile {
+        schema_version: 1,
+        id: "builtin-uninstall".to_string(),
+        name: "Built-in Uninstall".to_string(),
+        category: ItemCategory::Other("app_uninstall".to_string()),
+        risk: RiskLevel::High,
+        enabled: true,
+        matcher: MatchSpec {
+            mode: MatchMode::Paths,
+            paths: selected_paths.clone(),
+            strategy: Some(ScanStrategy::Recursive),
+            command: Vec::new(),
+            parser: None,
+        },
+        action: ActionSpec {
+            action_type: ActionType::DeletePaths,
+            paths: selected_paths.clone(),
+            command: Vec::new(),
+            mode: None,
+            timeout_sec: Some(600),
+            allow_globs: false,
+            max_items: Some(25_000),
+            package_manager: None,
+            project_types: Vec::new(),
+            params: std::collections::HashMap::new(),
+        },
+    };
+
+    let policy = DefaultSafetyPolicy::default();
+    let sink = CollectingAuditSink::default();
+    let mode = if dry_run {
+        ExecutionMode::DryRun
+    } else {
+        ExecutionMode::Apply
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| err_with(CliErrorKind::Internal, "tokio runtime init failed", e))?;
+    let result = runtime
+        .block_on(execute_action_with_audit(
+            &manifest,
+            &rule,
+            mode,
+            if confirm { Some("confirmed") } else { None },
+            &policy,
+            clean_executor,
+            Some(&sink),
+        ))
+        .map_err(map_uninstall_runtime_error)?;
+    warnings.extend(result.warnings);
+
+    Ok(UninstallCommandOutput {
+        mode: if dry_run {
+            "dry_run".to_string()
+        } else {
+            "apply".to_string()
+        },
+        target: target.to_string(),
+        scanned_roots: roots.len(),
+        scanned_entries,
+        target_count: selected_paths.len(),
+        estimated_freed_bytes,
+        preview_paths,
+        affected_items: result.affected_items,
+        freed_bytes: result.freed_bytes,
+        warnings,
+        audit_events: sink.event_count(),
+    })
+}
+
 fn run_clean_output(
     dry_run: bool,
     confirm: bool,
@@ -1137,6 +1390,24 @@ fn map_installer_runtime_error(error: RuntimeExecutionError) -> String {
     }
 }
 
+fn map_uninstall_runtime_error(error: RuntimeExecutionError) -> String {
+    match error {
+        RuntimeExecutionError::Plan(plan_error) => err_code(
+            CliErrorKind::Validation,
+            &format!("uninstall_{}", plan_error_detail_code(&plan_error)),
+            plan_error.to_string(),
+        ),
+        RuntimeExecutionError::Execute(execution_error) => err_code(
+            CliErrorKind::Internal,
+            &format!(
+                "uninstall_{}",
+                execution_error_detail_code(&execution_error)
+            ),
+            execution_error.to_string(),
+        ),
+    }
+}
+
 fn clean_json(out: CleanCommandOutput) -> Result<String, String> {
     to_json_envelope("system.clean", out)
 }
@@ -1147,6 +1418,10 @@ fn purge_json(out: PurgeCommandOutput) -> Result<String, String> {
 
 fn installer_json(out: InstallerCommandOutput) -> Result<String, String> {
     to_json_envelope("system.installer", out)
+}
+
+fn uninstall_json(out: UninstallCommandOutput) -> Result<String, String> {
+    to_json_envelope("system.uninstall", out)
 }
 
 fn resolve_clean_paths() -> Vec<String> {
@@ -1225,6 +1500,61 @@ fn resolve_installer_roots() -> Vec<String> {
     ]
 }
 
+fn resolve_uninstall_roots() -> Vec<String> {
+    if let Some(from_env) = std::env::var_os("PREEN_UNINSTALL_PATHS") {
+        let out: Vec<String> = from_env
+            .to_string_lossy()
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        if !out.is_empty() {
+            return out;
+        }
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        return vec![
+            home.join("Applications").to_string_lossy().to_string(),
+            home.join("Library")
+                .join("Application Support")
+                .to_string_lossy()
+                .to_string(),
+            home.join("Library")
+                .join("Caches")
+                .to_string_lossy()
+                .to_string(),
+            home.join("Library")
+                .join("Preferences")
+                .to_string_lossy()
+                .to_string(),
+        ];
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec![
+            home.join(".local")
+                .join("share")
+                .join("applications")
+                .to_string_lossy()
+                .to_string(),
+            home.join(".local")
+                .join("share")
+                .to_string_lossy()
+                .to_string(),
+            home.join(".config").to_string_lossy().to_string(),
+            home.join(".cache").to_string_lossy().to_string(),
+        ]
+    }
+}
+
 fn clean_max_items() -> usize {
     std::env::var("PREEN_CLEAN_MAX_ITEMS")
         .ok()
@@ -1271,6 +1601,22 @@ fn installer_min_size_bytes() -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(DEFAULT_MIN_BYTES)
+}
+
+fn uninstall_scan_depth() -> usize {
+    std::env::var("PREEN_UNINSTALL_MAX_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_UNINSTALL_SCAN_DEPTH)
+}
+
+fn uninstall_preview_limit() -> usize {
+    std::env::var("PREEN_UNINSTALL_PREVIEW_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_UNINSTALL_PREVIEW_LIMIT)
 }
 
 async fn scan_clean_candidates(clean_paths: &[String]) -> Result<ScanResult, CoreError> {
@@ -1394,6 +1740,29 @@ fn normalize_installer_roots(roots: Vec<String>) -> Vec<String> {
         }
         let candidate = PathBuf::from(trimmed);
         if !candidate.is_dir() {
+            continue;
+        }
+        let normalized = fs::canonicalize(&candidate)
+            .unwrap_or(candidate)
+            .to_string_lossy()
+            .to_string();
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+fn normalize_uninstall_roots(roots: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for root in roots {
+        let trimmed = root.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let candidate = PathBuf::from(trimmed);
+        if !candidate.exists() {
             continue;
         }
         let normalized = fs::canonicalize(&candidate)
@@ -1552,6 +1921,138 @@ fn is_installer_file(path: &Path) -> bool {
     false
 }
 
+fn scan_uninstall_candidates(
+    roots: &[String],
+    target: &str,
+    max_depth: usize,
+) -> (Vec<CleanSelectedItem>, usize, Vec<String>) {
+    let mut out = Vec::new();
+    let mut warnings = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut scanned_entries = 0usize;
+    let target_key = uninstall_target_key(target);
+
+    if Path::new(target).is_absolute() {
+        let candidate = PathBuf::from(target);
+        scanned_entries = 1;
+        let canonical = fs::canonicalize(&candidate).unwrap_or(candidate.clone());
+        if seen.insert(canonical.clone()) {
+            out.push(CleanSelectedItem {
+                path: canonical.to_string_lossy().to_string(),
+                size: calculate_path_size(&canonical),
+            });
+        }
+        return (out, scanned_entries, warnings);
+    }
+
+    for root in roots {
+        let root_path = PathBuf::from(root);
+        if !root_path.exists() {
+            continue;
+        }
+        discover_uninstall_targets_under(
+            &root_path,
+            0,
+            max_depth,
+            &target_key,
+            &mut seen,
+            &mut out,
+            &mut scanned_entries,
+            &mut warnings,
+        );
+    }
+    out.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+    (out, scanned_entries, warnings)
+}
+
+fn discover_uninstall_targets_under(
+    root: &Path,
+    depth: usize,
+    max_depth: usize,
+    target_key: &str,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    out: &mut Vec<CleanSelectedItem>,
+    scanned_entries: &mut usize,
+    warnings: &mut Vec<String>,
+) {
+    if depth > max_depth {
+        return;
+    }
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            warnings.push(format!(
+                "uninstall scan skipped unreadable directory: {} ({e})",
+                root.display()
+            ));
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        *scanned_entries += 1;
+
+        if uninstall_target_matches(&path, target_key) {
+            let canonical = fs::canonicalize(&path).unwrap_or(path.clone());
+            if seen.insert(canonical.clone()) {
+                out.push(CleanSelectedItem {
+                    path: canonical.to_string_lossy().to_string(),
+                    size: calculate_path_size(&canonical),
+                });
+            }
+        }
+
+        if file_type.is_dir() {
+            discover_uninstall_targets_under(
+                &path,
+                depth + 1,
+                max_depth,
+                target_key,
+                seen,
+                out,
+                scanned_entries,
+                warnings,
+            );
+        }
+    }
+}
+
+fn uninstall_target_key(value: &str) -> String {
+    let raw = Path::new(value)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(value);
+    normalize_uninstall_name(raw)
+}
+
+fn uninstall_target_matches(path: &Path, target_key: &str) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    normalize_uninstall_name(name) == target_key
+}
+
+fn normalize_uninstall_name(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let trimmed = lower
+        .strip_suffix(".app")
+        .or_else(|| lower.strip_suffix(".desktop"))
+        .or_else(|| lower.strip_suffix(".plist"))
+        .unwrap_or(&lower);
+    trimmed
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
+}
+
 fn discover_purge_targets_under(
     root: &Path,
     depth: usize,
@@ -1673,6 +2174,10 @@ fn enforce_purge_scope(selected_paths: &[String], roots: &[String]) -> Result<()
 
 fn enforce_installer_scope(selected_paths: &[String], roots: &[String]) -> Result<(), String> {
     enforce_scope_with_prefix(selected_paths, roots, "installer")
+}
+
+fn enforce_uninstall_scope(selected_paths: &[String], roots: &[String]) -> Result<(), String> {
+    enforce_scope_with_prefix(selected_paths, roots, "uninstall")
 }
 
 fn enforce_scope_with_prefix(
@@ -2196,6 +2701,7 @@ fn is_system_detail_code(code: Option<&str>) -> bool {
         Some(value) if value.starts_with("clean_") => true,
         Some(value) if value.starts_with("purge_") => true,
         Some(value) if value.starts_with("installer_") => true,
+        Some(value) if value.starts_with("uninstall_") => true,
         _ => false,
     }
 }
@@ -3959,6 +4465,13 @@ pub fn enforce_installer_scope_for_test(
     enforce_installer_scope(selected_paths, roots)
 }
 
+pub fn enforce_uninstall_scope_for_test(
+    selected_paths: &[String],
+    roots: &[String],
+) -> Result<(), String> {
+    enforce_uninstall_scope(selected_paths, roots)
+}
+
 pub fn clean_output_for_test(
     dry_run: bool,
     confirm: bool,
@@ -3998,6 +4511,17 @@ pub fn installer_output_for_test(
         .map_err(|e| err_with(CliErrorKind::Internal, "installer output parse failed", e))
 }
 
+pub fn uninstall_output_for_test(
+    target: Option<&str>,
+    dry_run: bool,
+    confirm: bool,
+) -> Result<serde_json::Value, String> {
+    let output = run_uninstall_output_with_executor(target, dry_run, confirm, &OsActionExecutor)?;
+    let json = uninstall_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "uninstall output parse failed", e))
+}
+
 pub fn clean_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {
     let encoded = map_clean_runtime_error(error);
     decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
@@ -4007,6 +4531,13 @@ pub fn installer_runtime_error_detail_code_for_test(
     error: RuntimeExecutionError,
 ) -> Option<String> {
     let encoded = map_installer_runtime_error(error);
+    decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
+}
+
+pub fn uninstall_runtime_error_detail_code_for_test(
+    error: RuntimeExecutionError,
+) -> Option<String> {
+    let encoded = map_uninstall_runtime_error(error);
     decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
 }
 
@@ -4549,8 +5080,13 @@ enum CliCommand {
         json: bool,
     },
     Uninstall {
+        target: Option<String>,
         #[arg(long, short = 'n')]
         dry_run: bool,
+        #[arg(long, conflicts_with = "dry_run")]
+        confirm: bool,
+        #[arg(long, conflicts_with_all = ["target", "dry_run", "confirm"])]
+        paths: bool,
         #[arg(long)]
         json: bool,
     },
