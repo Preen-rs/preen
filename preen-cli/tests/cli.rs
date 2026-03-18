@@ -14,9 +14,10 @@ use preen_cli::{
     enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
     format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
     install_plugin_in_dir_for_test, installer_output_for_test,
-    installer_runtime_error_detail_code_for_test, load_lockfile_at, parse_install_spec,
-    parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
-    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
+    installer_runtime_error_detail_code_for_test, load_lockfile_at, optimize_output_for_test,
+    optimize_runtime_error_detail_code_for_test, parse_install_spec, parse_plugin_spec,
+    plugin_info_json_for_test, plugin_install_json_for_test, plugin_list_json_for_test,
+    plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
     plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
     plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
     plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_verify_for_test,
@@ -885,7 +886,6 @@ fn wants_json_output_detects_flag() {
 #[test]
 fn top_level_system_commands_are_phase2_placeholders() {
     let cases = [
-        ["preen", "optimize"],
         ["preen", "analyze"],
         ["preen", "status"],
         ["preen", "check"],
@@ -905,7 +905,7 @@ fn top_level_system_commands_are_phase2_placeholders() {
 
 #[test]
 fn top_level_system_commands_emit_json_errors() {
-    let cli = Cli::try_parse_from(["preen", "optimize", "--json"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "analyze", "--json"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -923,7 +923,6 @@ fn top_level_system_commands_emit_json_errors() {
 #[test]
 fn all_top_level_system_commands_emit_json_errors() {
     let cases = [
-        ["preen", "optimize", "--json"],
         ["preen", "analyze", "--json"],
         ["preen", "status", "--json"],
         ["preen", "check", "--json"],
@@ -953,7 +952,6 @@ fn all_top_level_system_commands_emit_json_errors() {
 #[test]
 fn top_level_system_commands_text_errors_include_command_name() {
     let cases = [
-        ("optimize", "optimize command is not implemented yet"),
         ("analyze", "analyze command is not implemented yet"),
         ("status", "status command is not implemented yet"),
         ("check", "check command is not implemented yet"),
@@ -1009,6 +1007,45 @@ fn clean_apply_requires_confirm_flag() {
         parsed["data"]["detail_code"].as_str().unwrap(),
         "clean_confirmation_required"
     );
+}
+
+#[test]
+fn optimize_apply_requires_confirm_flag() {
+    let cli = Cli::try_parse_from(["preen", "optimize", "--json"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("optimize_confirmation_required")
+    );
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "optimize_confirmation_required"
+    );
+}
+
+#[test]
+fn optimize_text_error_is_classified_as_system_without_plugin_hints() {
+    let cli = Cli::try_parse_from(["preen", "optimize"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    let out = cli.format_error(&err);
+    assert!(out.contains("kind=validation"));
+    assert!(out.contains("detail_code=optimize_confirmation_required"));
+    assert!(!out.contains("hint_code="));
+}
+
+#[test]
+fn optimize_dry_run_json_happy_path() {
+    let output = optimize_output_for_test(true, false).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.optimize"));
+    assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+    assert!(output["data"]["task_count"].as_u64().unwrap_or(0) >= 1);
+    let executed = output["data"]["executed_tasks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(!executed.is_empty());
 }
 
 #[test]
@@ -1533,6 +1570,7 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "uninstall", "DemoApp", "--confirm", "--json"],
         vec!["preen", "uninstall", "--paths", "--json"],
         vec!["preen", "optimize", "--dry-run", "--json"],
+        vec!["preen", "optimize", "--confirm", "--json"],
         vec!["preen", "analyze", "/tmp", "--json"],
         vec!["preen", "status", "--json"],
         vec!["preen", "purge", "--dry-run", "--json"],
@@ -1600,6 +1638,12 @@ fn clean_rejects_dry_run_with_confirm_conflict() {
 #[test]
 fn uninstall_rejects_dry_run_with_confirm_conflict() {
     let parsed = Cli::try_parse_from(["preen", "uninstall", "DemoApp", "--dry-run", "--confirm"]);
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn optimize_rejects_dry_run_with_confirm_conflict() {
+    let parsed = Cli::try_parse_from(["preen", "optimize", "--dry-run", "--confirm"]);
     assert!(parsed.is_err());
 }
 
@@ -1711,7 +1755,7 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     unsafe {
         std::env::set_var("PREEN_LANG", "de-DE");
     }
-    let cli = Cli::try_parse_from(["preen", "optimize"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "analyze"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
@@ -1720,7 +1764,7 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     }
     assert!(out.contains("kind=unsupported"));
     assert!(out.contains("kind_label=Nicht unterstuetzt"));
-    assert!(out.contains("optimize Befehl ist noch nicht implementiert."));
+    assert!(out.contains("analyze Befehl ist noch nicht implementiert."));
     assert!(!out.contains("hint_code="));
 }
 
@@ -1750,7 +1794,7 @@ fn format_error_system_locale_fallback_to_en_us() {
     unsafe {
         std::env::set_var("PREEN_LANG", "fr-FR");
     }
-    let cli = Cli::try_parse_from(["preen", "optimize"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "analyze"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
@@ -1758,7 +1802,7 @@ fn format_error_system_locale_fallback_to_en_us() {
         std::env::remove_var("PREEN_LANG");
     }
     assert!(out.contains("kind_label=Unsupported"));
-    assert!(out.contains("optimize command is not implemented yet"));
+    assert!(out.contains("analyze command is not implemented yet"));
 }
 
 #[test]
@@ -3779,6 +3823,38 @@ fn uninstall_runtime_command_non_zero_maps_expected_detail_code() {
         },
     ));
     assert_eq!(detail.as_deref(), Some("uninstall_command_non_zero"));
+}
+
+#[test]
+fn optimize_runtime_command_denied_maps_expected_detail_code() {
+    let detail = optimize_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandDenied {
+            command: "echo".to_string(),
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("optimize_command_denied"));
+}
+
+#[test]
+fn optimize_runtime_command_timeout_maps_expected_detail_code() {
+    let detail = optimize_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandTimeout {
+            command: "echo".to_string(),
+            timeout_sec: 5,
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("optimize_command_timeout"));
+}
+
+#[test]
+fn optimize_runtime_command_non_zero_maps_expected_detail_code() {
+    let detail = optimize_runtime_error_detail_code_for_test(RuntimeExecutionError::Execute(
+        ActionExecutionError::CommandNonZero {
+            command: "echo".to_string(),
+            code: Some(12),
+        },
+    ));
+    assert_eq!(detail.as_deref(), Some("optimize_command_non_zero"));
 }
 
 #[test]

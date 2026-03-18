@@ -65,6 +65,7 @@ const DEFAULT_INSTALLER_SCAN_DEPTH: usize = 5;
 const DEFAULT_INSTALLER_PREVIEW_LIMIT: usize = 20;
 const DEFAULT_UNINSTALL_SCAN_DEPTH: usize = 4;
 const DEFAULT_UNINSTALL_PREVIEW_LIMIT: usize = 20;
+const DEFAULT_OPTIMIZE_TIMEOUT_SEC: u64 = 60;
 const DEFAULT_PURGE_ARTIFACT_NAMES: [&str; 10] = [
     "node_modules",
     "target",
@@ -238,6 +239,17 @@ struct UninstallPathsOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct OptimizeCommandOutput {
+    mode: String,
+    os: String,
+    task_count: usize,
+    executed_tasks: Vec<String>,
+    affected_items: u64,
+    warnings: Vec<String>,
+    audit_events: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PluginRemoveOutput {
     pack_id: String,
     removed: bool,
@@ -321,7 +333,12 @@ fn run_typed_with_verifier_and_clean_executor(
             clean_executor,
         )
         .map_err(CliError::from),
-        CliCommand::Optimize { .. } => Err(command_not_implemented_error("optimize")),
+        CliCommand::Optimize {
+            dry_run,
+            confirm,
+            json,
+        } => run_optimize_with_executor(*dry_run, *confirm, *json, clean_executor)
+            .map_err(CliError::from),
         CliCommand::Analyze { .. } => Err(command_not_implemented_error("analyze")),
         CliCommand::Status { .. } => Err(command_not_implemented_error("status")),
         CliCommand::Check { .. } => Err(command_not_implemented_error("check")),
@@ -430,6 +447,38 @@ impl ActionAuditSink for CollectingAuditSink {
     fn record(&self, event: ActionAuditEvent) {
         self.events.lock().unwrap().push(event);
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OptimizeTaskSpec {
+    id: &'static str,
+    label: &'static str,
+    command: &'static [&'static str],
+}
+
+fn optimize_task_specs() -> Vec<OptimizeTaskSpec> {
+    if cfg!(target_os = "macos") {
+        return vec![
+            OptimizeTaskSpec {
+                id: "flush_dns_cache",
+                label: "Flush DNS cache",
+                command: &["dscacheutil", "-flushcache"],
+            },
+            OptimizeTaskSpec {
+                id: "restart_mdns_responder",
+                label: "Restart mDNSResponder",
+                command: &["killall", "-HUP", "mDNSResponder"],
+            },
+        ];
+    }
+    if cfg!(target_os = "linux") {
+        return vec![OptimizeTaskSpec {
+            id: "sync_filesystem_buffers",
+            label: "Sync filesystem buffers",
+            command: &["sync"],
+        }];
+    }
+    Vec::new()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1035,6 +1084,165 @@ fn run_uninstall_output_with_executor(
     })
 }
 
+fn run_optimize_with_executor(
+    dry_run: bool,
+    confirm: bool,
+    json: bool,
+    clean_executor: &dyn ActionExecutorPort,
+) -> Result<(), String> {
+    let output = run_optimize_output_with_executor(dry_run, confirm, clean_executor)?;
+    if json {
+        println!("{}", optimize_json(output.clone())?);
+        return Ok(());
+    }
+
+    println!("Optimize ({})", if dry_run { "dry-run" } else { "apply" });
+    println!("OS: {}", output.os);
+    println!("Tasks: {}", output.task_count);
+    if !output.executed_tasks.is_empty() {
+        println!("Executed tasks:");
+        for task in &output.executed_tasks {
+            println!("- {task}");
+        }
+    }
+    println!("Affected items: {}", output.affected_items);
+    if !output.warnings.is_empty() {
+        println!("Warnings:");
+        for warning in &output.warnings {
+            println!("- {warning}");
+        }
+    }
+    println!("Audit events: {}", output.audit_events);
+    Ok(())
+}
+
+fn run_optimize_output_with_executor(
+    dry_run: bool,
+    confirm: bool,
+    clean_executor: &dyn ActionExecutorPort,
+) -> Result<OptimizeCommandOutput, String> {
+    if !dry_run && !confirm {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "optimize_confirmation_required",
+            "optimize apply mode requires --confirm",
+        ));
+    }
+
+    let tasks = optimize_task_specs();
+    if tasks.is_empty() {
+        return Err(err_code(
+            CliErrorKind::Unsupported,
+            "optimize_no_tasks",
+            "optimize is not supported on this OS",
+        ));
+    }
+
+    let manifest = Manifest {
+        schema_version: 1,
+        pack_id: "preen.builtin.optimize".to_string(),
+        name: "Built-in Optimize".to_string(),
+        version: "0.1.0".to_string(),
+        description: "Built-in optimize plan".to_string(),
+        author: "Preen".to_string(),
+        license: "MIT".to_string(),
+        homepage: None,
+        core_compat: ">=0.1.0,<2.0.0".to_string(),
+        action_api: 1,
+        os_targets: vec![if cfg!(target_os = "macos") {
+            OsTarget::Macos
+        } else {
+            OsTarget::Linux
+        }],
+        capabilities: vec![Capability::RunCommand, Capability::SystemOptimize],
+        signing: None,
+        rules: tasks
+            .iter()
+            .map(|task| RuleRef {
+                id: format!("builtin-optimize-{}", task.id),
+                name: format!("Built-in Optimize {}", task.label),
+                rule_file: "builtin".to_string(),
+            })
+            .collect(),
+    };
+
+    let mode = if dry_run {
+        ExecutionMode::DryRun
+    } else {
+        ExecutionMode::Apply
+    };
+    let policy = DefaultSafetyPolicy::default();
+    let sink = CollectingAuditSink::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| err_with(CliErrorKind::Internal, "tokio runtime init failed", e))?;
+
+    let mut affected_items = 0_u64;
+    let mut warnings = Vec::new();
+    let mut executed_tasks = Vec::with_capacity(tasks.len());
+    for task in &tasks {
+        let mut params = std::collections::HashMap::new();
+        params.insert("command_allowlist".to_string(), task.command[0].to_string());
+        let rule = RuleFile {
+            schema_version: 1,
+            id: format!("builtin-optimize-{}", task.id),
+            name: format!("Built-in Optimize {}", task.label),
+            category: ItemCategory::Other("system_optimization".to_string()),
+            risk: RiskLevel::Medium,
+            enabled: true,
+            matcher: MatchSpec {
+                mode: MatchMode::Command,
+                paths: Vec::new(),
+                strategy: None,
+                command: task.command.iter().map(|part| part.to_string()).collect(),
+                parser: None,
+            },
+            action: ActionSpec {
+                action_type: ActionType::RunCommand,
+                paths: Vec::new(),
+                command: task.command.iter().map(|part| part.to_string()).collect(),
+                mode: None,
+                timeout_sec: Some(DEFAULT_OPTIMIZE_TIMEOUT_SEC),
+                allow_globs: false,
+                max_items: Some(1),
+                package_manager: None,
+                project_types: Vec::new(),
+                params,
+            },
+        };
+
+        let result = runtime
+            .block_on(execute_action_with_audit(
+                &manifest,
+                &rule,
+                mode,
+                if confirm { Some("confirmed") } else { None },
+                &policy,
+                clean_executor,
+                Some(&sink),
+            ))
+            .map_err(map_optimize_runtime_error)?;
+        affected_items += result.affected_items;
+        warnings.extend(result.warnings);
+        executed_tasks.push(task.label.to_string());
+    }
+
+    Ok(OptimizeCommandOutput {
+        mode: if dry_run {
+            "dry_run".to_string()
+        } else {
+            "apply".to_string()
+        },
+        os: std::env::consts::OS.to_string(),
+        task_count: tasks.len(),
+        executed_tasks,
+        affected_items,
+        warnings,
+        audit_events: sink.event_count(),
+    })
+}
+
 fn run_clean_output(
     dry_run: bool,
     confirm: bool,
@@ -1408,6 +1616,21 @@ fn map_uninstall_runtime_error(error: RuntimeExecutionError) -> String {
     }
 }
 
+fn map_optimize_runtime_error(error: RuntimeExecutionError) -> String {
+    match error {
+        RuntimeExecutionError::Plan(plan_error) => err_code(
+            CliErrorKind::Validation,
+            &format!("optimize_{}", plan_error_detail_code(&plan_error)),
+            plan_error.to_string(),
+        ),
+        RuntimeExecutionError::Execute(execution_error) => err_code(
+            CliErrorKind::Internal,
+            &format!("optimize_{}", execution_error_detail_code(&execution_error)),
+            execution_error.to_string(),
+        ),
+    }
+}
+
 fn clean_json(out: CleanCommandOutput) -> Result<String, String> {
     to_json_envelope("system.clean", out)
 }
@@ -1422,6 +1645,10 @@ fn installer_json(out: InstallerCommandOutput) -> Result<String, String> {
 
 fn uninstall_json(out: UninstallCommandOutput) -> Result<String, String> {
     to_json_envelope("system.uninstall", out)
+}
+
+fn optimize_json(out: OptimizeCommandOutput) -> Result<String, String> {
+    to_json_envelope("system.optimize", out)
 }
 
 fn resolve_clean_paths() -> Vec<String> {
@@ -2702,6 +2929,7 @@ fn is_system_detail_code(code: Option<&str>) -> bool {
         Some(value) if value.starts_with("purge_") => true,
         Some(value) if value.starts_with("installer_") => true,
         Some(value) if value.starts_with("uninstall_") => true,
+        Some(value) if value.starts_with("optimize_") => true,
         _ => false,
     }
 }
@@ -4522,6 +4750,13 @@ pub fn uninstall_output_for_test(
         .map_err(|e| err_with(CliErrorKind::Internal, "uninstall output parse failed", e))
 }
 
+pub fn optimize_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_json::Value, String> {
+    let output = run_optimize_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
+    let json = optimize_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "optimize output parse failed", e))
+}
+
 pub fn clean_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {
     let encoded = map_clean_runtime_error(error);
     decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
@@ -4538,6 +4773,11 @@ pub fn uninstall_runtime_error_detail_code_for_test(
     error: RuntimeExecutionError,
 ) -> Option<String> {
     let encoded = map_uninstall_runtime_error(error);
+    decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
+}
+
+pub fn optimize_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {
+    let encoded = map_optimize_runtime_error(error);
     decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
 }
 
@@ -5093,6 +5333,8 @@ enum CliCommand {
     Optimize {
         #[arg(long, short = 'n')]
         dry_run: bool,
+        #[arg(long, conflicts_with = "dry_run")]
+        confirm: bool,
         #[arg(long)]
         json: bool,
     },
