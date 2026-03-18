@@ -11,7 +11,7 @@ use preen_cli::{
     Cli, CliError, CliErrorKind, analyze_output_for_test, check_output_for_test,
     check_registry_freshness_for_test, clean_runtime_error_detail_code_for_test,
     clean_selection_summary_for_test, cli_label_for_test, clone_rule_pack_for_test,
-    default_signature_source_for_test, enforce_clean_scope_for_test,
+    completion_output_for_test, default_signature_source_for_test, enforce_clean_scope_for_test,
     enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
     format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
     install_plugin_in_dir_for_test, installer_output_for_test,
@@ -28,9 +28,9 @@ use preen_cli::{
     registry_update_json_for_test, resolve_registry_for_test, run_typed,
     run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
     save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
-    status_output_for_test, test_failure_row_for_test, trust_policy_from_str,
-    uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
-    validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
+    status_output_for_test, test_failure_row_for_test, touchid_output_for_test,
+    trust_policy_from_str, uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
+    update_output_for_test, validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
@@ -898,12 +898,7 @@ fn wants_json_output_detects_flag() {
 
 #[test]
 fn top_level_system_commands_are_phase2_placeholders() {
-    let cases = [
-        ["preen", "touchid"],
-        ["preen", "completion"],
-        ["preen", "update"],
-        ["preen", "remove"],
-    ];
+    let cases = [["preen", "remove"]];
 
     for args in cases {
         let cli = Cli::try_parse_from(args).unwrap();
@@ -915,7 +910,7 @@ fn top_level_system_commands_are_phase2_placeholders() {
 
 #[test]
 fn top_level_system_commands_emit_json_errors() {
-    let cli = Cli::try_parse_from(["preen", "touchid", "--json"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "remove", "--json"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -932,12 +927,7 @@ fn top_level_system_commands_emit_json_errors() {
 
 #[test]
 fn all_top_level_system_commands_emit_json_errors() {
-    let cases = [
-        ["preen", "touchid", "--json"],
-        ["preen", "completion", "--json"],
-        ["preen", "update", "--json"],
-        ["preen", "remove", "--json"],
-    ];
+    let cases = [["preen", "remove", "--json"]];
 
     for args in cases {
         let cli = Cli::try_parse_from(args).unwrap();
@@ -958,12 +948,7 @@ fn all_top_level_system_commands_emit_json_errors() {
 
 #[test]
 fn top_level_system_commands_text_errors_include_command_name() {
-    let cases = [
-        ("touchid", "touchid command is not implemented yet"),
-        ("completion", "completion command is not implemented yet"),
-        ("update", "update command is not implemented yet"),
-        ("remove", "remove command is not implemented yet"),
-    ];
+    let cases = [("remove", "remove command is not implemented yet")];
 
     for (cmd, expected_message) in cases {
         let cli = Cli::try_parse_from(["preen", cmd]).unwrap();
@@ -1177,6 +1162,99 @@ fn status_command_runs_without_error() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
         let cli = Cli::try_parse_from(["preen", "status", "--json"]).unwrap();
+        let result = run_typed(cli);
+        assert!(result.is_ok());
+    });
+}
+
+#[test]
+fn touchid_json_happy_path_enable_dry_run() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = touchid_output_for_test(Some("enable"), true).unwrap();
+        assert_eq!(output["kind"].as_str(), Some("system.touchid"));
+        assert_eq!(output["data"]["action"].as_str(), Some("enable"));
+        assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+        assert!(output["data"]["would_change"].is_boolean());
+    });
+}
+
+#[test]
+fn touchid_command_runs_without_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let cli = Cli::try_parse_from(["preen", "touchid", "status", "--json"]).unwrap();
+        let result = run_typed(cli);
+        assert!(result.is_ok());
+    });
+}
+
+#[test]
+fn completion_json_generates_script_for_explicit_shell() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = completion_output_for_test(Some("zsh"), true).unwrap();
+        assert_eq!(output["kind"].as_str(), Some("system.completion"));
+        assert_eq!(output["data"]["mode"].as_str(), Some("generate"));
+        assert_eq!(output["data"]["shell"].as_str(), Some("zsh"));
+        let script = output["data"]["script"].as_str().unwrap_or_default();
+        assert!(script.contains("compdef"));
+        assert!(script.contains("preen"));
+    });
+}
+
+#[test]
+fn completion_dry_run_autodetect_writes_no_file() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("HOME", home.path().as_os_str());
+            std::env::set_var("SHELL", "/bin/zsh");
+        }
+        let output = completion_output_for_test(None, true).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("SHELL");
+        }
+        assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+        assert_eq!(output["data"]["installed"].as_bool(), Some(false));
+        assert_eq!(output["data"]["changed"].as_bool(), Some(false));
+        assert!(!home.path().join(".zshrc").exists());
+    });
+}
+
+#[test]
+fn update_json_happy_path_contains_suggested_command() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_UPDATE_LATEST_VERSION", "9.9.9");
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
+        }
+        let output = update_output_for_test(false, false).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_UPDATE_LATEST_VERSION");
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert_eq!(output["kind"].as_str(), Some("system.update"));
+        assert_eq!(output["data"]["channel"].as_str(), Some("stable"));
+        assert_eq!(output["data"]["install_source"].as_str(), Some("cargo"));
+        let command = output["data"]["suggested_command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(command.contains("cargo install"));
+    });
+}
+
+#[test]
+fn update_command_runs_without_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let cli = Cli::try_parse_from(["preen", "update", "--json"]).unwrap();
         let result = run_typed(cli);
         assert!(result.is_ok());
     });
@@ -1889,7 +1967,7 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     unsafe {
         std::env::set_var("PREEN_LANG", "de-DE");
     }
-    let cli = Cli::try_parse_from(["preen", "touchid"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "remove"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
@@ -1898,7 +1976,7 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     }
     assert!(out.contains("kind=unsupported"));
     assert!(out.contains("kind_label=Nicht unterstuetzt"));
-    assert!(out.contains("touchid Befehl ist noch nicht implementiert."));
+    assert!(out.contains("remove Befehl ist noch nicht implementiert."));
     assert!(!out.contains("hint_code="));
 }
 
@@ -1928,7 +2006,7 @@ fn format_error_system_locale_fallback_to_en_us() {
     unsafe {
         std::env::set_var("PREEN_LANG", "fr-FR");
     }
-    let cli = Cli::try_parse_from(["preen", "touchid"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "remove"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
@@ -1936,7 +2014,7 @@ fn format_error_system_locale_fallback_to_en_us() {
         std::env::remove_var("PREEN_LANG");
     }
     assert!(out.contains("kind_label=Unsupported"));
-    assert!(out.contains("touchid command is not implemented yet"));
+    assert!(out.contains("remove command is not implemented yet"));
 }
 
 #[test]

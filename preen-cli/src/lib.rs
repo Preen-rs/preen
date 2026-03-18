@@ -321,6 +321,46 @@ struct StatusOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct TouchIdOutput {
+    mode: String,
+    action: String,
+    supported_os: bool,
+    configured: bool,
+    would_change: bool,
+    applied: bool,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CompletionOutput {
+    mode: String,
+    shell: String,
+    generated: bool,
+    installed: bool,
+    changed: bool,
+    config_path: Option<String>,
+    snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script: Option<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct UpdateOutput {
+    mode: String,
+    channel: String,
+    force: bool,
+    current_version: String,
+    latest_version: Option<String>,
+    update_available: Option<bool>,
+    install_source: String,
+    suggested_command: String,
+    executed: bool,
+    checks: Vec<SystemStatusCheckOutput>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PluginRemoveOutput {
     pack_id: String,
     removed: bool,
@@ -415,9 +455,21 @@ fn run_typed_with_verifier_and_clean_executor(
         }
         CliCommand::Status { json } => run_status(*json).map_err(CliError::from),
         CliCommand::Check { fix, json } => run_check(*fix, *json).map_err(CliError::from),
-        CliCommand::Touchid { .. } => Err(command_not_implemented_error("touchid")),
-        CliCommand::Completion { .. } => Err(command_not_implemented_error("completion")),
-        CliCommand::Update { .. } => Err(command_not_implemented_error("update")),
+        CliCommand::Touchid {
+            action,
+            dry_run,
+            json,
+        } => run_touchid(*action, *dry_run, *json).map_err(CliError::from),
+        CliCommand::Completion {
+            shell,
+            dry_run,
+            json,
+        } => run_completion(*shell, *dry_run, *json).map_err(CliError::from),
+        CliCommand::Update {
+            force,
+            nightly,
+            json,
+        } => run_update(*force, *nightly, *json).map_err(CliError::from),
         CliCommand::Remove { .. } => Err(command_not_implemented_error("remove")),
     }
 }
@@ -1955,6 +2007,604 @@ fn print_status_output(out: &StatusOutput) {
     if let Some(age_days) = out.registry_age_days {
         println!("registry_age_days: {age_days}");
     }
+    println!("checks: label=Checks");
+    for check in &out.checks {
+        println!(
+            "check: id={} label={} severity={} passed={} message={}",
+            check.id, check.label, check.severity, check.passed, check.message
+        );
+    }
+    if !out.warnings.is_empty() {
+        println!("warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            println!("warning: {warning}");
+        }
+    }
+}
+
+fn run_touchid(action: Option<TouchIdActionArg>, dry_run: bool, json: bool) -> Result<(), String> {
+    let output = run_touchid_output(action.unwrap_or(TouchIdActionArg::Status), dry_run)?;
+    if json {
+        println!("{}", touchid_json(output.clone())?);
+        return Ok(());
+    }
+    print_touchid_output(&output);
+    Ok(())
+}
+
+fn run_touchid_output(action: TouchIdActionArg, dry_run: bool) -> Result<TouchIdOutput, String> {
+    let mut warnings = Vec::new();
+    let supported_os = cfg!(target_os = "macos");
+    let configured = if supported_os {
+        touchid_is_configured(&mut warnings)?
+    } else {
+        warnings.push(format!(
+            "touchid is supported only on macos (current os: {})",
+            std::env::consts::OS
+        ));
+        false
+    };
+
+    let would_change = match action {
+        TouchIdActionArg::Status => false,
+        TouchIdActionArg::Enable => !configured,
+        TouchIdActionArg::Disable => configured,
+    };
+
+    let mut applied = false;
+    if !dry_run && !matches!(action, TouchIdActionArg::Status) {
+        warnings.push(
+            "touchid apply mode is not enabled in this build; run with --dry-run to preview"
+                .to_string(),
+        );
+    } else if !dry_run {
+        applied = true;
+    }
+
+    Ok(TouchIdOutput {
+        mode: if dry_run {
+            "dry_run".to_string()
+        } else {
+            "apply".to_string()
+        },
+        action: touchid_action_label(action).to_string(),
+        supported_os,
+        configured,
+        would_change,
+        applied,
+        warnings,
+    })
+}
+
+fn touchid_is_configured(warnings: &mut Vec<String>) -> Result<bool, String> {
+    let sudo_file =
+        std::env::var("PREEN_TOUCHID_SUDO_FILE").unwrap_or_else(|_| "/etc/pam.d/sudo".to_string());
+    let sudo_local_file = std::env::var("PREEN_TOUCHID_SUDO_LOCAL_FILE")
+        .unwrap_or_else(|_| "/etc/pam.d/sudo_local".to_string());
+    let mut configured = false;
+
+    for candidate in [sudo_local_file, sudo_file] {
+        let path = PathBuf::from(candidate);
+        if !path.exists() {
+            continue;
+        }
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                if content.contains("pam_tid.so") {
+                    configured = true;
+                    break;
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "touchid status read failed for {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
+    Ok(configured)
+}
+
+fn touchid_action_label(action: TouchIdActionArg) -> &'static str {
+    match action {
+        TouchIdActionArg::Enable => "enable",
+        TouchIdActionArg::Disable => "disable",
+        TouchIdActionArg::Status => "status",
+    }
+}
+
+fn touchid_json(out: TouchIdOutput) -> Result<String, String> {
+    to_json_envelope("system.touchid", out)
+}
+
+fn print_touchid_output(out: &TouchIdOutput) {
+    println!(
+        "summary: kind=system_touchid action={} mode={} supported_os={} configured={} would_change={} applied={}",
+        out.action, out.mode, out.supported_os, out.configured, out.would_change, out.applied
+    );
+    if !out.warnings.is_empty() {
+        println!("warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            println!("warning: {warning}");
+        }
+    }
+}
+
+fn run_completion(
+    shell: Option<CompletionShellArg>,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), String> {
+    let output = run_completion_output(shell, dry_run)?;
+    if json {
+        println!("{}", completion_json(output.clone())?);
+        return Ok(());
+    }
+
+    if output.mode == "generate" {
+        if let Some(script) = &output.script {
+            print!("{script}");
+        }
+        return Ok(());
+    }
+
+    println!(
+        "summary: kind=system_completion mode={} shell={} installed={} changed={}",
+        output.mode, output.shell, output.installed, output.changed
+    );
+    if let Some(path) = &output.config_path {
+        println!("config_path: {path}");
+    }
+    if let Some(snippet) = &output.snippet {
+        println!("snippet: {snippet}");
+    }
+    if !output.warnings.is_empty() {
+        println!("warnings: count={}", output.warnings.len());
+        for warning in &output.warnings {
+            println!("warning: {warning}");
+        }
+    }
+    Ok(())
+}
+
+fn run_completion_output(
+    shell: Option<CompletionShellArg>,
+    dry_run: bool,
+) -> Result<CompletionOutput, String> {
+    let explicit_shell = shell.is_some();
+    let shell = match shell {
+        Some(value) => value,
+        None => detect_completion_shell().ok_or_else(|| {
+            err_code(
+                CliErrorKind::Validation,
+                "completion_shell_unknown",
+                "unable to detect shell, pass bash|zsh|fish explicitly",
+            )
+        })?,
+    };
+
+    let script = generate_completion_script(shell);
+    if explicit_shell {
+        return Ok(CompletionOutput {
+            mode: "generate".to_string(),
+            shell: completion_shell_name(shell).to_string(),
+            generated: true,
+            installed: false,
+            changed: false,
+            config_path: None,
+            snippet: None,
+            script: Some(script),
+            warnings: Vec::new(),
+        });
+    }
+
+    let path = shell_config_path(shell)?;
+    install_completion_snippet(shell, &path, dry_run)
+}
+
+fn install_completion_snippet(
+    shell: CompletionShellArg,
+    path: &Path,
+    dry_run: bool,
+) -> Result<CompletionOutput, String> {
+    let snippet = completion_install_snippet(shell)?;
+    let mut warnings = Vec::new();
+    let mut changed = false;
+    let mut installed = false;
+    let mode = if dry_run { "dry_run" } else { "apply" };
+
+    let content = match fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(err_code(
+                CliErrorKind::Io,
+                "completion_read_failed",
+                format!("completion config read failed: {error}"),
+            ));
+        }
+    };
+
+    if content.contains(&snippet) {
+        installed = true;
+    } else if dry_run {
+        warnings.push("completion snippet is missing and would be appended".to_string());
+    } else {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|error| {
+                err_code(
+                    CliErrorKind::Io,
+                    "completion_write_failed",
+                    format!("completion config dir create failed: {error}"),
+                )
+            })?;
+        }
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| {
+                err_code(
+                    CliErrorKind::Io,
+                    "completion_write_failed",
+                    format!("completion config open failed: {error}"),
+                )
+            })?;
+        if !content.is_empty() && !content.ends_with('\n') {
+            file.write_all(b"\n").map_err(|error| {
+                err_code(
+                    CliErrorKind::Io,
+                    "completion_write_failed",
+                    format!("completion config newline write failed: {error}"),
+                )
+            })?;
+        }
+        file.write_all(b"# Preen shell completion\n")
+            .and_then(|_| file.write_all(snippet.as_bytes()))
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|error| {
+                err_code(
+                    CliErrorKind::Io,
+                    "completion_write_failed",
+                    format!("completion config write failed: {error}"),
+                )
+            })?;
+        changed = true;
+        installed = true;
+    }
+
+    Ok(CompletionOutput {
+        mode: mode.to_string(),
+        shell: completion_shell_name(shell).to_string(),
+        generated: false,
+        installed,
+        changed,
+        config_path: Some(path.display().to_string()),
+        snippet: Some(snippet),
+        script: None,
+        warnings,
+    })
+}
+
+fn completion_install_snippet(shell: CompletionShellArg) -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|error| {
+        err_code(
+            CliErrorKind::Internal,
+            "completion_executable_unknown",
+            format!("resolve executable path failed: {error}"),
+        )
+    })?;
+    let exe = exe.display().to_string();
+    let snippet = match shell {
+        CompletionShellArg::Bash | CompletionShellArg::Zsh => {
+            format!(
+                "eval \"$({exe} completion {})\"",
+                completion_shell_name(shell)
+            )
+        }
+        CompletionShellArg::Fish => format!("{exe} completion fish | source"),
+    };
+    Ok(snippet)
+}
+
+fn detect_completion_shell() -> Option<CompletionShellArg> {
+    let shell = std::env::var("SHELL").ok()?;
+    let name = Path::new(&shell)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "bash" => Some(CompletionShellArg::Bash),
+        "zsh" => Some(CompletionShellArg::Zsh),
+        "fish" => Some(CompletionShellArg::Fish),
+        _ => None,
+    }
+}
+
+fn shell_config_path(shell: CompletionShellArg) -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        err_code(
+            CliErrorKind::Io,
+            "completion_home_missing",
+            "missing HOME environment variable",
+        )
+    })?;
+    let path = match shell {
+        CompletionShellArg::Bash => home.join(".bashrc"),
+        CompletionShellArg::Zsh => home.join(".zshrc"),
+        CompletionShellArg::Fish => home.join(".config").join("fish").join("config.fish"),
+    };
+    Ok(path)
+}
+
+fn completion_shell_name(shell: CompletionShellArg) -> &'static str {
+    match shell {
+        CompletionShellArg::Bash => "bash",
+        CompletionShellArg::Zsh => "zsh",
+        CompletionShellArg::Fish => "fish",
+    }
+}
+
+fn generate_completion_script(shell: CompletionShellArg) -> String {
+    let commands = [
+        "plugin",
+        "clean",
+        "uninstall",
+        "optimize",
+        "analyze",
+        "status",
+        "purge",
+        "installer",
+        "check",
+        "touchid",
+        "completion",
+        "update",
+        "remove",
+    ];
+    match shell {
+        CompletionShellArg::Bash => format!(
+            "_preen_completions()\n{{\n    local cur prev\n    cur=\"${{COMP_WORDS[COMP_CWORD]}}\"\n    prev=\"${{COMP_WORDS[COMP_CWORD-1]}}\"\n\n    if [ \"$COMP_CWORD\" -eq 1 ]; then\n        COMPREPLY=( $(compgen -W \"{}\" -- \"$cur\") )\n        return\n    fi\n\n    case \"$prev\" in\n        completion)\n            COMPREPLY=( $(compgen -W \"bash zsh fish\" -- \"$cur\") )\n            ;;\n        touchid)\n            COMPREPLY=( $(compgen -W \"enable disable status\" -- \"$cur\") )\n            ;;\n        *)\n            COMPREPLY=()\n            ;;\n    esac\n}}\n\ncomplete -F _preen_completions preen\n",
+            commands.join(" ")
+        ),
+        CompletionShellArg::Zsh => {
+            let mut script =
+                String::from("#compdef preen\n\n_preen() {\n  local -a commands\n  commands=(\n");
+            for command in commands {
+                let _ = writeln!(script, "    '{command}:{command} command'");
+            }
+            script.push_str(
+                "    'completion:bash|zsh|fish'\n    'touchid:enable|disable|status'\n  )\n  _describe 'command' commands\n}\n\ncompdef _preen preen\n",
+            );
+            script
+        }
+        CompletionShellArg::Fish => format!(
+            "set -l preen_commands {}\nfor cmd in $preen_commands\n    complete -c preen -f -a $cmd\nend\ncomplete -c preen -n \"__fish_seen_subcommand_from completion\" -a \"bash zsh fish\"\ncomplete -c preen -n \"__fish_seen_subcommand_from touchid\" -a \"enable disable status\"\n",
+            commands.join(" ")
+        ),
+    }
+}
+
+fn completion_json(out: CompletionOutput) -> Result<String, String> {
+    to_json_envelope("system.completion", out)
+}
+
+fn run_update(force: bool, nightly: bool, json: bool) -> Result<(), String> {
+    let output = run_update_output(force, nightly);
+    if json {
+        println!("{}", update_json(output.clone())?);
+        return Ok(());
+    }
+    print_update_output(&output);
+    Ok(())
+}
+
+fn run_update_output(force: bool, nightly: bool) -> UpdateOutput {
+    let mut warnings = Vec::new();
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let install_source = detect_install_source();
+    let suggested_command = suggested_update_command(&install_source, nightly);
+    let latest_version = if nightly {
+        None
+    } else {
+        match fetch_latest_release_version() {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(error);
+                None
+            }
+        }
+    };
+
+    let update_available = latest_version
+        .as_deref()
+        .and_then(|latest| compare_semver_like(&current_version, latest));
+
+    let mut checks = Vec::new();
+    checks.push(SystemStatusCheckOutput {
+        id: "update_source_detected".to_string(),
+        label: "Install source detected".to_string(),
+        severity: "warning".to_string(),
+        passed: install_source != "unknown",
+        message: format!("install source: {install_source}"),
+    });
+    checks.push(SystemStatusCheckOutput {
+        id: "update_command_available".to_string(),
+        label: "Suggested update command".to_string(),
+        severity: "warning".to_string(),
+        passed: !suggested_command.is_empty(),
+        message: suggested_command.clone(),
+    });
+    checks.push(SystemStatusCheckOutput {
+        id: "update_version_check".to_string(),
+        label: "Version check".to_string(),
+        severity: "critical".to_string(),
+        passed: update_available.map(|available| !available).unwrap_or(true),
+        message: match (&latest_version, update_available) {
+            (Some(latest), Some(true)) => {
+                format!("update available: current={current_version} latest={latest}")
+            }
+            (Some(latest), Some(false)) => {
+                format!("already latest: current={current_version} latest={latest}")
+            }
+            (Some(latest), None) => {
+                format!("version comparison skipped: current={current_version} latest={latest}")
+            }
+            (None, _) => "latest version unavailable".to_string(),
+        },
+    });
+
+    if force {
+        warnings.push(
+            "force mode is advisory only in this build; run suggested command manually".to_string(),
+        );
+    }
+
+    UpdateOutput {
+        mode: if force {
+            "force_plan".to_string()
+        } else {
+            "plan".to_string()
+        },
+        channel: if nightly {
+            "nightly".to_string()
+        } else {
+            "stable".to_string()
+        },
+        force,
+        current_version,
+        latest_version,
+        update_available,
+        install_source,
+        suggested_command,
+        executed: false,
+        checks,
+        warnings,
+    }
+}
+
+fn fetch_latest_release_version() -> Result<Option<String>, String> {
+    if let Ok(value) = std::env::var("PREEN_UPDATE_LATEST_VERSION") {
+        let trimmed = value.trim().trim_start_matches('v').to_string();
+        if !trimmed.is_empty() {
+            return Ok(Some(trimmed));
+        }
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .map_err(|error| format!("build update client failed: {error}"))?;
+
+    let response = client
+        .get("https://api.github.com/repos/Preen-rs/preen/releases/latest")
+        .header("User-Agent", "preen-cli")
+        .send()
+        .map_err(|error| format!("latest release fetch failed: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "latest release fetch failed with status {}",
+            response.status()
+        ));
+    }
+
+    let body = response
+        .text()
+        .map_err(|error| format!("latest release body read failed: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| format!("latest release parse failed: {error}"))?;
+    let tag = value
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().trim_start_matches('v').to_string())
+        .filter(|v| !v.is_empty());
+    Ok(tag)
+}
+
+fn detect_install_source() -> String {
+    if let Ok(value) = std::env::var("PREEN_UPDATE_INSTALL_SOURCE") {
+        let lowered = value.trim().to_ascii_lowercase();
+        if !lowered.is_empty() {
+            return lowered;
+        }
+    }
+
+    match std::env::current_exe() {
+        Ok(path) => {
+            let text = path.display().to_string().to_ascii_lowercase();
+            if text.contains("homebrew") || text.contains("/cellar/") {
+                "homebrew".to_string()
+            } else if text.contains("/.cargo/bin/") {
+                "cargo".to_string()
+            } else {
+                "unknown".to_string()
+            }
+        }
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+fn suggested_update_command(install_source: &str, nightly: bool) -> String {
+    match (install_source, nightly) {
+        ("homebrew", false) => "brew upgrade preen".to_string(),
+        ("homebrew", true) => "brew upgrade --fetch-HEAD preen".to_string(),
+        ("cargo", false) => "cargo install preen-cli --locked --force".to_string(),
+        ("cargo", true) => {
+            "cargo install --git https://github.com/Preen-rs/preen preen-cli --locked --force"
+                .to_string()
+        }
+        ("script", false) => "curl -fsSL https://preen.rs/install.sh | bash".to_string(),
+        ("script", true) => {
+            "curl -fsSL https://preen.rs/install.sh | bash -s -- --nightly".to_string()
+        }
+        (_, false) => "preen update --force".to_string(),
+        (_, true) => "preen update --nightly --force".to_string(),
+    }
+}
+
+fn compare_semver_like(current: &str, latest: &str) -> Option<bool> {
+    let cur = parse_semver_like(current)?;
+    let lat = parse_semver_like(latest)?;
+    Some(lat > cur)
+}
+
+fn parse_semver_like(value: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = value.trim().trim_start_matches('v').split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next().unwrap_or("0").parse::<u64>().ok()?;
+    let patch = parts
+        .next()
+        .unwrap_or("0")
+        .split('-')
+        .next()
+        .unwrap_or("0")
+        .parse::<u64>()
+        .ok()?;
+    Some((major, minor, patch))
+}
+
+fn update_json(out: UpdateOutput) -> Result<String, String> {
+    to_json_envelope("system.update", out)
+}
+
+fn print_update_output(out: &UpdateOutput) {
+    println!(
+        "summary: kind=system_update mode={} channel={} force={} executed={}",
+        out.mode, out.channel, out.force, out.executed
+    );
+    println!("current_version: {}", out.current_version);
+    if let Some(version) = &out.latest_version {
+        println!("latest_version: {version}");
+    }
+    if let Some(available) = out.update_available {
+        println!("update_available: {available}");
+    }
+    println!("install_source: {}", out.install_source);
+    println!("suggested_command: {}", out.suggested_command);
     println!("checks: label=Checks");
     for check in &out.checks {
         println!(
@@ -3660,6 +4310,9 @@ fn is_system_detail_code(code: Option<&str>) -> bool {
         Some(value) if value.starts_with("check_") => true,
         Some(value) if value.starts_with("analyze_") => true,
         Some(value) if value.starts_with("status_") => true,
+        Some(value) if value.starts_with("touchid_") => true,
+        Some(value) if value.starts_with("completion_") => true,
+        Some(value) if value.starts_with("update_") => true,
         _ => false,
     }
 }
@@ -5506,6 +6159,57 @@ pub fn status_output_for_test() -> Result<serde_json::Value, String> {
     let json = status_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "status output parse failed", e))
+}
+
+pub fn touchid_output_for_test(
+    action: Option<&str>,
+    dry_run: bool,
+) -> Result<serde_json::Value, String> {
+    let action = match action.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if value == "enable" => Some(TouchIdActionArg::Enable),
+        Some(value) if value == "disable" => Some(TouchIdActionArg::Disable),
+        Some(value) if value == "status" => Some(TouchIdActionArg::Status),
+        Some(other) => {
+            return Err(err(
+                CliErrorKind::Validation,
+                format!("unsupported touchid action for test: {other}"),
+            ));
+        }
+        None => None,
+    };
+    let output = run_touchid_output(action.unwrap_or(TouchIdActionArg::Status), dry_run)?;
+    let json = touchid_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "touchid output parse failed", e))
+}
+
+pub fn completion_output_for_test(
+    shell: Option<&str>,
+    dry_run: bool,
+) -> Result<serde_json::Value, String> {
+    let shell = match shell.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if value == "bash" => Some(CompletionShellArg::Bash),
+        Some(value) if value == "zsh" => Some(CompletionShellArg::Zsh),
+        Some(value) if value == "fish" => Some(CompletionShellArg::Fish),
+        Some(other) => {
+            return Err(err(
+                CliErrorKind::Validation,
+                format!("unsupported completion shell for test: {other}"),
+            ));
+        }
+        None => None,
+    };
+    let output = run_completion_output(shell, dry_run)?;
+    let json = completion_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "completion output parse failed", e))
+}
+
+pub fn update_output_for_test(force: bool, nightly: bool) -> Result<serde_json::Value, String> {
+    let output = run_update_output(force, nightly);
+    let json = update_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "update output parse failed", e))
 }
 
 pub fn clean_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {
