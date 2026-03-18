@@ -28,9 +28,10 @@ use preen_cli::{
     registry_update_json_for_test, resolve_registry_for_test, run_typed,
     run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
     save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
-    test_failure_row_for_test, trust_policy_from_str, uninstall_output_for_test,
-    uninstall_runtime_error_detail_code_for_test, validate_registry_trust_inputs_for_test,
-    verify_lockfile_hashes, write_registry_index_with_backup_for_test,
+    status_output_for_test, test_failure_row_for_test, trust_policy_from_str,
+    uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
+    validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
+    write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
     ActionExecutionError, ActionExecutionResult, ActionExecutorPort, ExecutionPlan,
@@ -898,7 +899,6 @@ fn wants_json_output_detects_flag() {
 #[test]
 fn top_level_system_commands_are_phase2_placeholders() {
     let cases = [
-        ["preen", "status"],
         ["preen", "touchid"],
         ["preen", "completion"],
         ["preen", "update"],
@@ -915,7 +915,7 @@ fn top_level_system_commands_are_phase2_placeholders() {
 
 #[test]
 fn top_level_system_commands_emit_json_errors() {
-    let cli = Cli::try_parse_from(["preen", "status", "--json"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "touchid", "--json"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -933,7 +933,6 @@ fn top_level_system_commands_emit_json_errors() {
 #[test]
 fn all_top_level_system_commands_emit_json_errors() {
     let cases = [
-        ["preen", "status", "--json"],
         ["preen", "touchid", "--json"],
         ["preen", "completion", "--json"],
         ["preen", "update", "--json"],
@@ -960,7 +959,6 @@ fn all_top_level_system_commands_emit_json_errors() {
 #[test]
 fn top_level_system_commands_text_errors_include_command_name() {
     let cases = [
-        ("status", "status command is not implemented yet"),
         ("touchid", "touchid command is not implemented yet"),
         ("completion", "completion command is not implemented yet"),
         ("update", "update command is not implemented yet"),
@@ -1157,6 +1155,31 @@ fn analyze_text_error_is_classified_as_system_without_plugin_hints() {
     assert!(out.contains("kind=not_found"));
     assert!(out.contains("detail_code=analyze_root_not_found"));
     assert!(!out.contains("hint_code="));
+}
+
+#[test]
+fn status_json_happy_path_with_temp_user_env() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = status_output_for_test().unwrap();
+        assert_eq!(output["kind"].as_str(), Some("system.status"));
+        assert_eq!(output["data"]["mode"].as_str(), Some("status"));
+        assert!(output["data"]["os"].as_str().is_some());
+        assert!(output["data"]["arch"].as_str().is_some());
+        assert!(output["data"]["state_dir"].as_str().is_some());
+        assert!(output["data"]["checks"].as_array().is_some());
+        assert!(output["data"]["plugin_count"].as_u64().is_some());
+    });
+}
+
+#[test]
+fn status_command_runs_without_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let cli = Cli::try_parse_from(["preen", "status", "--json"]).unwrap();
+        let result = run_typed(cli);
+        assert!(result.is_ok());
+    });
 }
 
 #[test]
@@ -1866,7 +1889,7 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     unsafe {
         std::env::set_var("PREEN_LANG", "de-DE");
     }
-    let cli = Cli::try_parse_from(["preen", "status"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "touchid"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
@@ -1875,7 +1898,7 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     }
     assert!(out.contains("kind=unsupported"));
     assert!(out.contains("kind_label=Nicht unterstuetzt"));
-    assert!(out.contains("status Befehl ist noch nicht implementiert."));
+    assert!(out.contains("touchid Befehl ist noch nicht implementiert."));
     assert!(!out.contains("hint_code="));
 }
 
@@ -1905,7 +1928,7 @@ fn format_error_system_locale_fallback_to_en_us() {
     unsafe {
         std::env::set_var("PREEN_LANG", "fr-FR");
     }
-    let cli = Cli::try_parse_from(["preen", "status"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "touchid"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
@@ -1913,7 +1936,7 @@ fn format_error_system_locale_fallback_to_en_us() {
         std::env::remove_var("PREEN_LANG");
     }
     assert!(out.contains("kind_label=Unsupported"));
-    assert!(out.contains("status command is not implemented yet"));
+    assert!(out.contains("touchid command is not implemented yet"));
 }
 
 #[test]

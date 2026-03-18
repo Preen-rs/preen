@@ -297,6 +297,30 @@ struct AnalyzeStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SystemStatusCheckOutput {
+    id: String,
+    label: String,
+    severity: String,
+    passed: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StatusOutput {
+    mode: String,
+    os: String,
+    arch: String,
+    state_dir: String,
+    plugin_count: Option<usize>,
+    registry_index_present: bool,
+    registry_generated_at: Option<String>,
+    registry_age_days: Option<i64>,
+    overall_passed: bool,
+    checks: Vec<SystemStatusCheckOutput>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PluginRemoveOutput {
     pack_id: String,
     removed: bool,
@@ -389,7 +413,7 @@ fn run_typed_with_verifier_and_clean_executor(
         CliCommand::Analyze { path, json } => {
             run_analyze(path.clone(), *json).map_err(CliError::from)
         }
-        CliCommand::Status { .. } => Err(command_not_implemented_error("status")),
+        CliCommand::Status { json } => run_status(*json).map_err(CliError::from),
         CliCommand::Check { fix, json } => run_check(*fix, *json).map_err(CliError::from),
         CliCommand::Touchid { .. } => Err(command_not_implemented_error("touchid")),
         CliCommand::Completion { .. } => Err(command_not_implemented_error("completion")),
@@ -1742,6 +1766,200 @@ fn print_analyze_output(out: &AnalyzeOutput) {
             entry.item_type,
             format_bytes(entry.size_bytes),
             entry.path
+        );
+    }
+    if !out.warnings.is_empty() {
+        println!("warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            println!("warning: {warning}");
+        }
+    }
+}
+
+fn run_status(json: bool) -> Result<(), String> {
+    let output = run_status_output()?;
+    if json {
+        println!("{}", status_json(output.clone())?);
+        return Ok(());
+    }
+    print_status_output(&output);
+    Ok(())
+}
+
+fn run_status_output() -> Result<StatusOutput, String> {
+    let mut warnings = Vec::new();
+    let state_dir = preen_state_dir().map_err(|error| {
+        let decoded = CliError::from(error);
+        err_code(
+            decoded.kind,
+            "status_state_dir_unavailable",
+            decoded.message,
+        )
+    })?;
+
+    let os = std::env::consts::OS.to_string();
+    let arch = std::env::consts::ARCH.to_string();
+    let mut checks = Vec::new();
+
+    let state_exists = state_dir.exists();
+    checks.push(SystemStatusCheckOutput {
+        id: "state_dir_exists".to_string(),
+        label: "State directory exists".to_string(),
+        severity: "critical".to_string(),
+        passed: state_exists,
+        message: if state_exists {
+            format!("state dir exists: {}", state_dir.display())
+        } else {
+            format!("state dir missing: {}", state_dir.display())
+        },
+    });
+
+    let (state_writable, state_writable_message) = if state_exists {
+        let probe = state_dir.join(".preen-status-write-probe");
+        match fs::write(&probe, b"probe") {
+            Ok(_) => {
+                let _ = fs::remove_file(&probe);
+                (true, "state dir is writable".to_string())
+            }
+            Err(error) => (false, format!("state dir write probe failed: {error}")),
+        }
+    } else {
+        (false, "state dir is not present".to_string())
+    };
+    if !state_writable {
+        warnings.push(state_writable_message.clone());
+    }
+    checks.push(SystemStatusCheckOutput {
+        id: "state_dir_writable".to_string(),
+        label: "State directory writable".to_string(),
+        severity: "critical".to_string(),
+        passed: state_writable,
+        message: state_writable_message,
+    });
+
+    let lock_path = default_lockfile_path()?;
+    let plugin_count = if lock_path.exists() {
+        match load_lockfile_at(&lock_path) {
+            Ok(lockfile) => Some(lockfile.plugins.len()),
+            Err(error) => {
+                warnings.push(format!("lockfile read failed: {error}"));
+                None
+            }
+        }
+    } else {
+        Some(0)
+    };
+    checks.push(SystemStatusCheckOutput {
+        id: "lockfile_readable".to_string(),
+        label: "Lockfile readable".to_string(),
+        severity: "warning".to_string(),
+        passed: plugin_count.is_some(),
+        message: if plugin_count.is_some() {
+            format!("lockfile readable: {}", lock_path.display())
+        } else {
+            format!("lockfile read failed: {}", lock_path.display())
+        },
+    });
+
+    let registry_path = registry_index_path()?;
+    let mut registry_generated_at = None;
+    let mut registry_age_days = None;
+    let registry_index_present = registry_path.exists();
+    if registry_index_present {
+        match fs::read_to_string(&registry_path) {
+            Ok(content) => match toml::from_str::<RegistryIndex>(&content) {
+                Ok(index) => {
+                    registry_generated_at = index.generated_at.clone();
+                    if let Some(generated_at) = index.generated_at {
+                        if let Ok(parsed) = OffsetDateTime::parse(&generated_at, &Rfc3339) {
+                            let age = OffsetDateTime::now_utc() - parsed;
+                            registry_age_days = Some(age.whole_days());
+                        }
+                    }
+                }
+                Err(error) => warnings.push(format!("registry index parse failed: {error}")),
+            },
+            Err(error) => warnings.push(format!("registry index read failed: {error}")),
+        }
+    }
+    checks.push(SystemStatusCheckOutput {
+        id: "registry_index_present".to_string(),
+        label: "Registry index present".to_string(),
+        severity: "warning".to_string(),
+        passed: registry_index_present,
+        message: if registry_index_present {
+            format!("registry index found: {}", registry_path.display())
+        } else {
+            format!(
+                "registry index missing: {} (run `preen plugin registry-update`)",
+                registry_path.display()
+            )
+        },
+    });
+
+    let registry_fresh = registry_age_days
+        .map(|age| age <= DEFAULT_REGISTRY_MAX_AGE_DAYS)
+        .unwrap_or(true);
+    checks.push(SystemStatusCheckOutput {
+        id: "registry_index_fresh".to_string(),
+        label: "Registry index fresh".to_string(),
+        severity: "warning".to_string(),
+        passed: registry_fresh,
+        message: match registry_age_days {
+            Some(age) => format!("registry index age: {age} days"),
+            None => "registry index freshness unknown".to_string(),
+        },
+    });
+
+    let overall_passed = checks
+        .iter()
+        .all(|check| check.severity != "critical" || check.passed);
+
+    Ok(StatusOutput {
+        mode: "status".to_string(),
+        os,
+        arch,
+        state_dir: state_dir.display().to_string(),
+        plugin_count,
+        registry_index_present,
+        registry_generated_at,
+        registry_age_days,
+        overall_passed,
+        checks,
+        warnings,
+    })
+}
+
+fn status_json(out: StatusOutput) -> Result<String, String> {
+    to_json_envelope("system.status", out)
+}
+
+fn print_status_output(out: &StatusOutput) {
+    println!(
+        "summary: kind=system_status overall_passed={}",
+        out.overall_passed
+    );
+    println!("mode: {}", out.mode);
+    println!("os: {}", out.os);
+    println!("arch: {}", out.arch);
+    println!("state_dir: {}", out.state_dir);
+    if let Some(plugin_count) = out.plugin_count {
+        println!("plugins: count={plugin_count}");
+    } else {
+        println!("plugins: count=unknown");
+    }
+    println!("registry_index_present: {}", out.registry_index_present);
+    if let Some(generated_at) = &out.registry_generated_at {
+        println!("registry_generated_at: {generated_at}");
+    }
+    if let Some(age_days) = out.registry_age_days {
+        println!("registry_age_days: {age_days}");
+    }
+    println!("checks: label=Checks");
+    for check in &out.checks {
+        println!(
+            "check: id={} label={} severity={} passed={} message={}",
+            check.id, check.label, check.severity, check.passed, check.message
         );
     }
     if !out.warnings.is_empty() {
@@ -3441,6 +3659,7 @@ fn is_system_detail_code(code: Option<&str>) -> bool {
         Some(value) if value.starts_with("optimize_") => true,
         Some(value) if value.starts_with("check_") => true,
         Some(value) if value.starts_with("analyze_") => true,
+        Some(value) if value.starts_with("status_") => true,
         _ => false,
     }
 }
@@ -5280,6 +5499,13 @@ pub fn analyze_output_for_test(path: Option<&Path>) -> Result<serde_json::Value,
     let json = analyze_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "analyze output parse failed", e))
+}
+
+pub fn status_output_for_test() -> Result<serde_json::Value, String> {
+    let output = run_status_output()?;
+    let json = status_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "status output parse failed", e))
 }
 
 pub fn clean_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {
