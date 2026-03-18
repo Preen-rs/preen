@@ -66,6 +66,8 @@ const DEFAULT_INSTALLER_PREVIEW_LIMIT: usize = 20;
 const DEFAULT_UNINSTALL_SCAN_DEPTH: usize = 4;
 const DEFAULT_UNINSTALL_PREVIEW_LIMIT: usize = 20;
 const DEFAULT_OPTIMIZE_TIMEOUT_SEC: u64 = 60;
+const DEFAULT_ANALYZE_MAX_DEPTH: usize = 8;
+const DEFAULT_ANALYZE_TOP_ENTRIES: usize = 20;
 const DEFAULT_PURGE_ARTIFACT_NAMES: [&str; 10] = [
     "node_modules",
     "target",
@@ -269,6 +271,32 @@ struct SystemCheckOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AnalyzeEntryOutput {
+    name: String,
+    path: String,
+    item_type: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AnalyzeOutput {
+    root: String,
+    scanned_entries: usize,
+    total_files: u64,
+    total_dirs: u64,
+    total_size_bytes: u64,
+    top_entries: Vec<AnalyzeEntryOutput>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AnalyzeStats {
+    files: u64,
+    dirs: u64,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PluginRemoveOutput {
     pack_id: String,
     removed: bool,
@@ -358,7 +386,9 @@ fn run_typed_with_verifier_and_clean_executor(
             json,
         } => run_optimize_with_executor(*dry_run, *confirm, *json, clean_executor)
             .map_err(CliError::from),
-        CliCommand::Analyze { .. } => Err(command_not_implemented_error("analyze")),
+        CliCommand::Analyze { path, json } => {
+            run_analyze(path.clone(), *json).map_err(CliError::from)
+        }
         CliCommand::Status { .. } => Err(command_not_implemented_error("status")),
         CliCommand::Check { fix, json } => run_check(*fix, *json).map_err(CliError::from),
         CliCommand::Touchid { .. } => Err(command_not_implemented_error("touchid")),
@@ -1454,6 +1484,266 @@ fn print_check_output(out: &SystemCheckOutput) {
         );
     }
     println!("fixes_applied: {}", out.fixes_applied);
+    if !out.warnings.is_empty() {
+        println!("warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            println!("warning: {warning}");
+        }
+    }
+}
+
+fn run_analyze(path: Option<PathBuf>, json: bool) -> Result<(), String> {
+    let output = run_analyze_output(path)?;
+    if json {
+        println!("{}", analyze_json(output.clone())?);
+        return Ok(());
+    }
+    print_analyze_output(&output);
+    Ok(())
+}
+
+fn run_analyze_output(path: Option<PathBuf>) -> Result<AnalyzeOutput, String> {
+    let mut warnings = Vec::new();
+    let root = resolve_analyze_root(path)?;
+    if !root.exists() {
+        return Err(err_code(
+            CliErrorKind::NotFound,
+            "analyze_root_not_found",
+            format!("analyze root not found: {}", root.display()),
+        ));
+    }
+    if !root.is_dir() {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "analyze_root_not_directory",
+            format!("analyze root is not a directory: {}", root.display()),
+        ));
+    }
+
+    let max_depth = analyze_max_depth();
+    let mut scanned_entries = 0_usize;
+    let mut top_entries = Vec::new();
+    let read_dir = fs::read_dir(&root).map_err(|e| {
+        err_code(
+            CliErrorKind::Io,
+            "analyze_target_not_readable",
+            format!("analyze root read failed: {}: {e}", root.display()),
+        )
+    })?;
+    for child in read_dir {
+        let child = match child {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(format!("analyze read_dir entry failed: {error}"));
+                continue;
+            }
+        };
+        scanned_entries += 1;
+        let child_path = child.path();
+        let metadata = match fs::symlink_metadata(&child_path) {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(format!(
+                    "analyze metadata failed: {}: {error}",
+                    child_path.display()
+                ));
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            warnings.push(format!("analyze skipped symlink: {}", child_path.display()));
+            continue;
+        }
+        let stats = if metadata.is_dir() {
+            analyze_path_stats(&child_path, max_depth, &mut warnings)
+        } else if metadata.is_file() {
+            AnalyzeStats {
+                files: 1,
+                dirs: 0,
+                size_bytes: metadata.len(),
+            }
+        } else {
+            AnalyzeStats {
+                files: 0,
+                dirs: 0,
+                size_bytes: 0,
+            }
+        };
+        let item_type = if metadata.is_dir() {
+            "dir"
+        } else if metadata.is_file() {
+            "file"
+        } else {
+            "other"
+        };
+        top_entries.push(AnalyzeEntryOutput {
+            name: child.file_name().to_string_lossy().to_string(),
+            path: child_path.display().to_string(),
+            item_type: item_type.to_string(),
+            size_bytes: stats.size_bytes,
+        });
+    }
+
+    top_entries.sort_by(|left, right| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    top_entries.truncate(analyze_top_entries());
+
+    let root_stats = analyze_path_stats(&root, max_depth, &mut warnings);
+    Ok(AnalyzeOutput {
+        root: root.display().to_string(),
+        scanned_entries,
+        total_files: root_stats.files,
+        total_dirs: root_stats.dirs,
+        total_size_bytes: root_stats.size_bytes,
+        top_entries,
+        warnings,
+    })
+}
+
+fn resolve_analyze_root(path: Option<PathBuf>) -> Result<PathBuf, String> {
+    if let Some(value) = path {
+        return Ok(value);
+    }
+    if let Some(value) =
+        std::env::var_os("PREEN_ANALYZE_PATH").or_else(|| std::env::var_os("MO_ANALYZE_PATH"))
+    {
+        return Ok(PathBuf::from(value));
+    }
+    dirs::home_dir().ok_or_else(|| {
+        err_code(
+            CliErrorKind::Io,
+            "analyze_home_missing",
+            "analyze default root requires a home directory",
+        )
+    })
+}
+
+fn analyze_path_stats(path: &Path, max_depth: usize, warnings: &mut Vec<String>) -> AnalyzeStats {
+    fn walk(
+        path: &Path,
+        depth: usize,
+        max_depth: usize,
+        warnings: &mut Vec<String>,
+    ) -> AnalyzeStats {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(format!(
+                    "analyze metadata failed: {}: {error}",
+                    path.display()
+                ));
+                return AnalyzeStats {
+                    files: 0,
+                    dirs: 0,
+                    size_bytes: 0,
+                };
+            }
+        };
+
+        if metadata.file_type().is_symlink() {
+            warnings.push(format!("analyze skipped symlink: {}", path.display()));
+            return AnalyzeStats {
+                files: 0,
+                dirs: 0,
+                size_bytes: 0,
+            };
+        }
+
+        if metadata.is_file() {
+            return AnalyzeStats {
+                files: 1,
+                dirs: 0,
+                size_bytes: metadata.len(),
+            };
+        }
+
+        if !metadata.is_dir() {
+            return AnalyzeStats {
+                files: 0,
+                dirs: 0,
+                size_bytes: 0,
+            };
+        }
+
+        let mut stats = AnalyzeStats {
+            files: 0,
+            dirs: 1,
+            size_bytes: 0,
+        };
+        if depth >= max_depth {
+            return stats;
+        }
+
+        let read_dir = match fs::read_dir(path) {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(format!(
+                    "analyze read_dir failed: {}: {error}",
+                    path.display()
+                ));
+                return stats;
+            }
+        };
+        for child in read_dir {
+            let child = match child {
+                Ok(value) => value,
+                Err(error) => {
+                    warnings.push(format!("analyze read_dir entry failed: {error}"));
+                    continue;
+                }
+            };
+            let child_stats = walk(&child.path(), depth + 1, max_depth, warnings);
+            stats.files += child_stats.files;
+            stats.dirs += child_stats.dirs;
+            stats.size_bytes += child_stats.size_bytes;
+        }
+        stats
+    }
+
+    walk(path, 0, max_depth, warnings)
+}
+
+fn analyze_max_depth() -> usize {
+    std::env::var("PREEN_ANALYZE_MAX_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ANALYZE_MAX_DEPTH)
+}
+
+fn analyze_top_entries() -> usize {
+    std::env::var("PREEN_ANALYZE_TOP_ENTRIES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ANALYZE_TOP_ENTRIES)
+}
+
+fn analyze_json(out: AnalyzeOutput) -> Result<String, String> {
+    to_json_envelope("system.analyze", out)
+}
+
+fn print_analyze_output(out: &AnalyzeOutput) {
+    println!("summary: kind=system_analyze");
+    println!("root: {}", out.root);
+    println!("scanned_entries: {}", out.scanned_entries);
+    println!("total_files: {}", out.total_files);
+    println!("total_dirs: {}", out.total_dirs);
+    println!("total_size: {}", format_bytes(out.total_size_bytes));
+    println!("entries: label=Top entries");
+    for entry in &out.top_entries {
+        println!(
+            "entry: name={} type={} size={} path={}",
+            entry.name,
+            entry.item_type,
+            format_bytes(entry.size_bytes),
+            entry.path
+        );
+    }
     if !out.warnings.is_empty() {
         println!("warnings: count={}", out.warnings.len());
         for warning in &out.warnings {
@@ -3150,6 +3440,7 @@ fn is_system_detail_code(code: Option<&str>) -> bool {
         Some(value) if value.starts_with("uninstall_") => true,
         Some(value) if value.starts_with("optimize_") => true,
         Some(value) if value.starts_with("check_") => true,
+        Some(value) if value.starts_with("analyze_") => true,
         _ => false,
     }
 }
@@ -4982,6 +5273,13 @@ pub fn check_output_for_test(fix: bool) -> Result<serde_json::Value, String> {
     let json = check_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "check output parse failed", e))
+}
+
+pub fn analyze_output_for_test(path: Option<&Path>) -> Result<serde_json::Value, String> {
+    let output = run_analyze_output(path.map(|value| value.to_path_buf()))?;
+    let json = analyze_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "analyze output parse failed", e))
 }
 
 pub fn clean_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {

@@ -8,9 +8,10 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use clap::Parser;
 use preen_cli::{
-    Cli, CliError, CliErrorKind, check_output_for_test, check_registry_freshness_for_test,
-    clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test, cli_label_for_test,
-    clone_rule_pack_for_test, default_signature_source_for_test, enforce_clean_scope_for_test,
+    Cli, CliError, CliErrorKind, analyze_output_for_test, check_output_for_test,
+    check_registry_freshness_for_test, clean_runtime_error_detail_code_for_test,
+    clean_selection_summary_for_test, cli_label_for_test, clone_rule_pack_for_test,
+    default_signature_source_for_test, enforce_clean_scope_for_test,
     enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
     format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
     install_plugin_in_dir_for_test, installer_output_for_test,
@@ -897,7 +898,6 @@ fn wants_json_output_detects_flag() {
 #[test]
 fn top_level_system_commands_are_phase2_placeholders() {
     let cases = [
-        ["preen", "analyze"],
         ["preen", "status"],
         ["preen", "touchid"],
         ["preen", "completion"],
@@ -915,7 +915,7 @@ fn top_level_system_commands_are_phase2_placeholders() {
 
 #[test]
 fn top_level_system_commands_emit_json_errors() {
-    let cli = Cli::try_parse_from(["preen", "analyze", "--json"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "status", "--json"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -933,7 +933,6 @@ fn top_level_system_commands_emit_json_errors() {
 #[test]
 fn all_top_level_system_commands_emit_json_errors() {
     let cases = [
-        ["preen", "analyze", "--json"],
         ["preen", "status", "--json"],
         ["preen", "touchid", "--json"],
         ["preen", "completion", "--json"],
@@ -961,7 +960,6 @@ fn all_top_level_system_commands_emit_json_errors() {
 #[test]
 fn top_level_system_commands_text_errors_include_command_name() {
     let cases = [
-        ("analyze", "analyze command is not implemented yet"),
         ("status", "status command is not implemented yet"),
         ("touchid", "touchid command is not implemented yet"),
         ("completion", "completion command is not implemented yet"),
@@ -1088,6 +1086,77 @@ fn check_fix_json_creates_state_and_plugin_dirs() {
             Some(true)
         );
     });
+}
+
+#[test]
+fn analyze_json_happy_path_with_explicit_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("dir-a")).unwrap();
+    fs::create_dir_all(root.join("dir-b")).unwrap();
+    fs::write(root.join("root.bin"), vec![0_u8; 512]).unwrap();
+    fs::write(root.join("dir-a").join("nested.bin"), vec![0_u8; 128]).unwrap();
+
+    let output = analyze_output_for_test(Some(root)).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.analyze"));
+    assert_eq!(
+        output["data"]["root"].as_str(),
+        Some(root.to_string_lossy().as_ref())
+    );
+    assert!(output["data"]["scanned_entries"].as_u64().unwrap_or(0) >= 1);
+    assert!(output["data"]["total_files"].as_u64().unwrap_or(0) >= 2);
+    assert!(output["data"]["total_size_bytes"].as_u64().unwrap_or(0) >= 640);
+    assert!(output["data"]["top_entries"].as_array().is_some());
+}
+
+#[test]
+fn analyze_rejects_missing_root_path() {
+    let missing = "/tmp/preen-analyze-missing-root-for-test";
+    let cli = Cli::try_parse_from(["preen", "analyze", missing, "--json"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::NotFound);
+    assert_eq!(err.detail_code.as_deref(), Some("analyze_root_not_found"));
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("analyze_root_not_found")
+    );
+}
+
+#[test]
+fn analyze_rejects_non_directory_root_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let file_path = temp.path().join("only-file.txt");
+    fs::write(&file_path, b"data").unwrap();
+
+    let cli = Cli::try_parse_from([
+        "preen",
+        "analyze",
+        file_path.to_string_lossy().as_ref(),
+        "--json",
+    ])
+    .unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("analyze_root_not_directory")
+    );
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("analyze_root_not_directory")
+    );
+}
+
+#[test]
+fn analyze_text_error_is_classified_as_system_without_plugin_hints() {
+    let cli = Cli::try_parse_from(["preen", "analyze", "/tmp/preen-analyze-missing-root"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    let out = cli.format_error(&err);
+    assert!(out.contains("kind=not_found"));
+    assert!(out.contains("detail_code=analyze_root_not_found"));
+    assert!(!out.contains("hint_code="));
 }
 
 #[test]
@@ -1797,7 +1866,7 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     unsafe {
         std::env::set_var("PREEN_LANG", "de-DE");
     }
-    let cli = Cli::try_parse_from(["preen", "analyze"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "status"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
@@ -1806,7 +1875,7 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     }
     assert!(out.contains("kind=unsupported"));
     assert!(out.contains("kind_label=Nicht unterstuetzt"));
-    assert!(out.contains("analyze Befehl ist noch nicht implementiert."));
+    assert!(out.contains("status Befehl ist noch nicht implementiert."));
     assert!(!out.contains("hint_code="));
 }
 
@@ -1836,7 +1905,7 @@ fn format_error_system_locale_fallback_to_en_us() {
     unsafe {
         std::env::set_var("PREEN_LANG", "fr-FR");
     }
-    let cli = Cli::try_parse_from(["preen", "analyze"]).unwrap();
+    let cli = Cli::try_parse_from(["preen", "status"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
@@ -1844,7 +1913,7 @@ fn format_error_system_locale_fallback_to_en_us() {
         std::env::remove_var("PREEN_LANG");
     }
     assert!(out.contains("kind_label=Unsupported"));
-    assert!(out.contains("analyze command is not implemented yet"));
+    assert!(out.contains("status command is not implemented yet"));
 }
 
 #[test]
