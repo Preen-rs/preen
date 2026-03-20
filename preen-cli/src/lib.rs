@@ -361,6 +361,17 @@ struct UpdateOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RemoveOutput {
+    mode: String,
+    executable: String,
+    detected_paths: Vec<String>,
+    removed_paths: Vec<String>,
+    skipped_paths: Vec<String>,
+    manual_steps: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PluginRemoveOutput {
     pack_id: String,
     removed: bool,
@@ -470,7 +481,7 @@ fn run_typed_with_verifier_and_clean_executor(
             nightly,
             json,
         } => run_update(*force, *nightly, *json).map_err(CliError::from),
-        CliCommand::Remove { .. } => Err(command_not_implemented_error("remove")),
+        CliCommand::Remove { dry_run, json } => run_remove(*dry_run, *json).map_err(CliError::from),
     }
 }
 
@@ -487,14 +498,6 @@ pub fn run_typed_with_verifier_and_clean_executor_for_test(
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<(), CliError> {
     run_typed_with_verifier_and_clean_executor(&cli, verifier, clean_executor)
-}
-
-fn command_not_implemented_error(command: &str) -> CliError {
-    CliError {
-        kind: CliErrorKind::Unsupported,
-        detail_code: Some("command_not_implemented".to_string()),
-        message: format!("{command} command is not implemented yet"),
-    }
 }
 
 fn run_plugin(cmd: &PluginCommand, verifier: &dyn SignatureVerifier) -> Result<(), String> {
@@ -2620,6 +2623,200 @@ fn print_update_output(out: &UpdateOutput) {
     }
 }
 
+fn run_remove(dry_run: bool, json: bool) -> Result<(), String> {
+    let output = run_remove_output(dry_run)?;
+    if json {
+        println!("{}", remove_json(output.clone())?);
+        return Ok(());
+    }
+    print_remove_output(&output);
+    Ok(())
+}
+
+fn run_remove_output(dry_run: bool) -> Result<RemoveOutput, String> {
+    let executable = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let mut detected_paths = Vec::new();
+    let mut removed_paths = Vec::new();
+    let mut skipped_paths = Vec::new();
+    let mut warnings = Vec::new();
+
+    let state_dir = resolve_remove_state_dir()?;
+    if state_dir.exists() {
+        detected_paths.push(state_dir.display().to_string());
+        if dry_run {
+            skipped_paths.push(state_dir.display().to_string());
+        } else {
+            remove_path_recursively(&state_dir)?;
+            removed_paths.push(state_dir.display().to_string());
+        }
+    }
+
+    let cache_dir = resolve_remove_cache_dir()?;
+    if cache_dir.exists() {
+        detected_paths.push(cache_dir.display().to_string());
+        if dry_run {
+            skipped_paths.push(cache_dir.display().to_string());
+        } else {
+            remove_path_recursively(&cache_dir)?;
+            removed_paths.push(cache_dir.display().to_string());
+        }
+    }
+
+    if detected_paths.is_empty() {
+        warnings.push("no managed Preen paths detected".to_string());
+    }
+
+    let install_source = detect_install_source();
+    let manual_steps = remove_manual_steps(&install_source);
+    if manual_steps.is_empty() {
+        warnings.push("install source unknown; remove executable manually if needed".to_string());
+    }
+
+    Ok(RemoveOutput {
+        mode: if dry_run {
+            "dry_run".to_string()
+        } else {
+            "apply".to_string()
+        },
+        executable,
+        detected_paths,
+        removed_paths,
+        skipped_paths,
+        manual_steps,
+        warnings,
+    })
+}
+
+fn resolve_remove_state_dir() -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("PREEN_REMOVE_STATE_DIR") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    preen_state_dir()
+}
+
+fn resolve_remove_cache_dir() -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("PREEN_REMOVE_CACHE_DIR") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    match std::env::consts::OS {
+        "macos" => {
+            let home = dirs::home_dir().ok_or_else(|| err(CliErrorKind::Io, "missing home dir"))?;
+            Ok(home.join("Library").join("Caches").join("Preen"))
+        }
+        "linux" => {
+            let base =
+                dirs::cache_dir().ok_or_else(|| err(CliErrorKind::Io, "missing cache dir"))?;
+            Ok(base.join("preen"))
+        }
+        other => Err(err(
+            CliErrorKind::Unsupported,
+            format!("unsupported OS: {other}"),
+        )),
+    }
+}
+
+fn remove_path_recursively(path: &Path) -> Result<(), String> {
+    let target = path
+        .canonicalize()
+        .or_else(|_| Ok::<PathBuf, std::io::Error>(path.to_path_buf()))
+        .map_err(|error| {
+            err_code(
+                CliErrorKind::Io,
+                "remove_path_resolve_failed",
+                format!("remove path resolve failed: {error}"),
+            )
+        })?;
+
+    if !is_safe_remove_target(&target) {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "remove_path_scope_violation",
+            format!("refusing to remove unsafe path: {}", target.display()),
+        ));
+    }
+
+    if target.is_dir() {
+        fs::remove_dir_all(&target).map_err(|error| {
+            err_code(
+                CliErrorKind::Io,
+                "remove_execution_failed",
+                format!("remove dir failed: {error}"),
+            )
+        })?;
+    } else if target.exists() {
+        fs::remove_file(&target).map_err(|error| {
+            err_code(
+                CliErrorKind::Io,
+                "remove_execution_failed",
+                format!("remove file failed: {error}"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn is_safe_remove_target(path: &Path) -> bool {
+    let value = path.to_string_lossy();
+    if value.is_empty() || value == "/" {
+        return false;
+    }
+    if path == Path::new("/usr") || path == Path::new("/var") || path == Path::new("/etc") {
+        return false;
+    }
+    true
+}
+
+fn remove_manual_steps(install_source: &str) -> Vec<String> {
+    match install_source {
+        "homebrew" => vec!["brew uninstall --force preen".to_string()],
+        "cargo" => vec!["cargo uninstall preen-cli".to_string()],
+        "script" => vec!["rm -f $(command -v preen)".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn remove_json(out: RemoveOutput) -> Result<String, String> {
+    to_json_envelope("system.remove", out)
+}
+
+fn print_remove_output(out: &RemoveOutput) {
+    println!(
+        "summary: kind=system_remove mode={} detected={} removed={} skipped={}",
+        out.mode,
+        out.detected_paths.len(),
+        out.removed_paths.len(),
+        out.skipped_paths.len()
+    );
+    println!("executable: {}", out.executable);
+    for path in &out.detected_paths {
+        println!("detected_path: {path}");
+    }
+    for path in &out.removed_paths {
+        println!("removed_path: {path}");
+    }
+    for path in &out.skipped_paths {
+        println!("skipped_path: {path}");
+    }
+    for step in &out.manual_steps {
+        println!("manual_step: {step}");
+    }
+    if !out.warnings.is_empty() {
+        println!("warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            println!("warning: {warning}");
+        }
+    }
+}
+
 fn run_clean_output(
     dry_run: bool,
     confirm: bool,
@@ -4313,6 +4510,7 @@ fn is_system_detail_code(code: Option<&str>) -> bool {
         Some(value) if value.starts_with("touchid_") => true,
         Some(value) if value.starts_with("completion_") => true,
         Some(value) if value.starts_with("update_") => true,
+        Some(value) if value.starts_with("remove_") => true,
         _ => false,
     }
 }
@@ -6210,6 +6408,13 @@ pub fn update_output_for_test(force: bool, nightly: bool) -> Result<serde_json::
     let json = update_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "update output parse failed", e))
+}
+
+pub fn remove_output_for_test(dry_run: bool) -> Result<serde_json::Value, String> {
+    let output = run_remove_output(dry_run)?;
+    let json = remove_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "remove output parse failed", e))
 }
 
 pub fn clean_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {

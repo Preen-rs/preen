@@ -25,7 +25,7 @@ use preen_cli::{
     plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, purge_output_for_test, registry_backup_path_for_test,
-    registry_update_json_for_test, resolve_registry_for_test, run_typed,
+    registry_update_json_for_test, remove_output_for_test, resolve_registry_for_test, run_typed,
     run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
     save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
     status_output_for_test, test_failure_row_for_test, touchid_output_for_test,
@@ -897,66 +897,17 @@ fn wants_json_output_detects_flag() {
 }
 
 #[test]
-fn top_level_system_commands_are_phase2_placeholders() {
-    let cases = [["preen", "remove"]];
+fn top_level_system_commands_are_implemented() {
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["preen", "touchid", "status", "--json"],
+        vec!["preen", "completion", "zsh", "--json"],
+        vec!["preen", "update", "--json"],
+        vec!["preen", "remove", "--dry-run", "--json"],
+    ];
 
     for args in cases {
         let cli = Cli::try_parse_from(args).unwrap();
-        let err = run_typed(cli).unwrap_err();
-        assert_eq!(err.kind, CliErrorKind::Unsupported);
-        assert_eq!(err.detail_code.as_deref(), Some("command_not_implemented"));
-    }
-}
-
-#[test]
-fn top_level_system_commands_emit_json_errors() {
-    let cli = Cli::try_parse_from(["preen", "remove", "--json"]).unwrap();
-    let err = run_typed(cli.clone()).unwrap_err();
-    let out = cli.format_error(&err);
-    let parsed: Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(parsed["kind"].as_str().unwrap(), "error");
-    assert_eq!(
-        parsed["data"]["error_kind"].as_str().unwrap(),
-        "unsupported"
-    );
-    assert_eq!(
-        parsed["data"]["detail_code"].as_str().unwrap(),
-        "command_not_implemented"
-    );
-}
-
-#[test]
-fn all_top_level_system_commands_emit_json_errors() {
-    let cases = [["preen", "remove", "--json"]];
-
-    for args in cases {
-        let cli = Cli::try_parse_from(args).unwrap();
-        let err = run_typed(cli.clone()).unwrap_err();
-        let out = cli.format_error(&err);
-        let parsed: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(parsed["kind"].as_str().unwrap(), "error");
-        assert_eq!(
-            parsed["data"]["error_kind"].as_str().unwrap(),
-            "unsupported"
-        );
-        assert_eq!(
-            parsed["data"]["detail_code"].as_str().unwrap(),
-            "command_not_implemented"
-        );
-    }
-}
-
-#[test]
-fn top_level_system_commands_text_errors_include_command_name() {
-    let cases = [("remove", "remove command is not implemented yet")];
-
-    for (cmd, expected_message) in cases {
-        let cli = Cli::try_parse_from(["preen", cmd]).unwrap();
-        let err = run_typed(cli.clone()).unwrap_err();
-        let out = cli.format_error(&err);
-        assert!(out.contains("kind=unsupported"));
-        assert!(out.contains("detail_code=command_not_implemented"));
-        assert!(out.contains(expected_message));
+        assert!(run_typed(cli).is_ok());
     }
 }
 
@@ -1256,6 +1207,92 @@ fn update_command_runs_without_error() {
     with_temp_user_env(|| {
         let cli = Cli::try_parse_from(["preen", "update", "--json"]).unwrap();
         let result = run_typed(cli);
+        assert!(result.is_ok());
+    });
+}
+
+#[test]
+fn remove_json_happy_path_dry_run() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let state_dir = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        fs::write(state_dir.path().join("plugins.lock"), "dummy").unwrap();
+        fs::write(cache_dir.path().join("cache.tmp"), "dummy").unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_dir.path().as_os_str());
+            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
+        }
+        let output = remove_output_for_test(true).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
+            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert_eq!(output["kind"].as_str(), Some("system.remove"));
+        assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+        assert!(output["data"]["detected_paths"].as_array().is_some());
+        assert!(output["data"]["manual_steps"].as_array().is_some());
+    });
+}
+
+#[test]
+fn remove_apply_deletes_temp_paths() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let state_root = tempfile::tempdir().unwrap();
+        let cache_root = tempfile::tempdir().unwrap();
+        let state_path = state_root.path().join("state");
+        let cache_path = cache_root.path().join("cache");
+        fs::create_dir_all(&state_path).unwrap();
+        fs::create_dir_all(&cache_path).unwrap();
+        fs::write(state_path.join("plugins.lock"), "dummy").unwrap();
+        fs::write(cache_path.join("cache.tmp"), "dummy").unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_path.as_os_str());
+            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_path.as_os_str());
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
+        }
+        let output = remove_output_for_test(false).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
+            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert_eq!(output["data"]["mode"].as_str(), Some("apply"));
+        assert!(!state_path.exists());
+        assert!(!cache_path.exists());
+        assert!(output["data"]["removed_paths"].as_array().is_some());
+    });
+}
+
+#[test]
+fn remove_command_runs_without_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let state_root = tempfile::tempdir().unwrap();
+        let cache_root = tempfile::tempdir().unwrap();
+        let state_path = state_root.path().join("state");
+        let cache_path = cache_root.path().join("cache");
+        fs::create_dir_all(&state_path).unwrap();
+        fs::create_dir_all(&cache_path).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_path.as_os_str());
+            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_path.as_os_str());
+        }
+        let cli = Cli::try_parse_from(["preen", "remove", "--dry-run", "--json"]).unwrap();
+        let result = run_typed(cli);
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
+            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
+        }
         assert!(result.is_ok());
     });
 }
@@ -1967,8 +2004,12 @@ fn format_error_localizes_system_command_not_implemented_in_de() {
     unsafe {
         std::env::set_var("PREEN_LANG", "de-DE");
     }
-    let cli = Cli::try_parse_from(["preen", "remove"]).unwrap();
-    let err = run_typed(cli.clone()).unwrap_err();
+    let cli = Cli::try_parse_from(["preen", "status"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Unsupported,
+        detail_code: Some("command_not_implemented".to_string()),
+        message: "remove command is not implemented yet".to_string(),
+    };
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
@@ -2006,8 +2047,12 @@ fn format_error_system_locale_fallback_to_en_us() {
     unsafe {
         std::env::set_var("PREEN_LANG", "fr-FR");
     }
-    let cli = Cli::try_parse_from(["preen", "remove"]).unwrap();
-    let err = run_typed(cli.clone()).unwrap_err();
+    let cli = Cli::try_parse_from(["preen", "status"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Unsupported,
+        detail_code: Some("command_not_implemented".to_string()),
+        message: "remove command is not implemented yet".to_string(),
+    };
     let out = cli.format_error(&err);
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
