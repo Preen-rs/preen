@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use preen_core::ItemCategory;
@@ -310,14 +311,27 @@ struct StatusOutput {
     mode: String,
     os: String,
     arch: String,
+    health_score: u8,
     state_dir: String,
     plugin_count: Option<usize>,
     registry_index_present: bool,
     registry_generated_at: Option<String>,
     registry_age_days: Option<i64>,
+    metrics: SystemMetricsOutput,
     overall_passed: bool,
     checks: Vec<SystemStatusCheckOutput>,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SystemMetricsOutput {
+    cpu_cores: Option<usize>,
+    load_avg_1m_milli: Option<u64>,
+    uptime_seconds: Option<u64>,
+    memory_total_bytes: Option<u64>,
+    memory_used_bytes: Option<u64>,
+    disk_total_bytes: Option<u64>,
+    disk_available_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1966,23 +1980,381 @@ fn run_status_output() -> Result<StatusOutput, String> {
         },
     });
 
+    let metrics = collect_system_metrics(Path::new(&state_dir), &mut warnings);
+    if let (Some(load), Some(cores)) = (metrics.load_avg_1m_milli, metrics.cpu_cores) {
+        let threshold = (cores as u64).saturating_mul(2000);
+        checks.push(SystemStatusCheckOutput {
+            id: "system_load_normal".to_string(),
+            label: "System load normal".to_string(),
+            severity: "warning".to_string(),
+            passed: load <= threshold,
+            message: format!(
+                "load_1m={} cores={} threshold_milli={threshold}",
+                format_load_milli(load),
+                cores
+            ),
+        });
+    }
+    if let (Some(total), Some(used)) = (metrics.memory_total_bytes, metrics.memory_used_bytes)
+        && total > 0
+    {
+        let usage_pct = ((used as f64 / total as f64) * 100.0).round() as u64;
+        checks.push(SystemStatusCheckOutput {
+            id: "memory_pressure_ok".to_string(),
+            label: "Memory pressure".to_string(),
+            severity: "warning".to_string(),
+            passed: usage_pct <= 90,
+            message: format!("memory_used_pct={usage_pct}"),
+        });
+    }
+    if let (Some(total), Some(available)) = (metrics.disk_total_bytes, metrics.disk_available_bytes)
+        && total > 0
+    {
+        let free_pct = ((available as f64 / total as f64) * 100.0).round() as u64;
+        checks.push(SystemStatusCheckOutput {
+            id: "disk_space_ok".to_string(),
+            label: "Disk free space".to_string(),
+            severity: "warning".to_string(),
+            passed: free_pct >= 10,
+            message: format!("disk_free_pct={free_pct}"),
+        });
+    }
+
     let overall_passed = checks
         .iter()
         .all(|check| check.severity != "critical" || check.passed);
+    let health_score = status_health_score(&checks);
 
     Ok(StatusOutput {
         mode: "status".to_string(),
         os,
         arch,
+        health_score,
         state_dir: state_dir.display().to_string(),
         plugin_count,
         registry_index_present,
         registry_generated_at,
         registry_age_days,
+        metrics,
         overall_passed,
         checks,
         warnings,
     })
+}
+
+fn collect_system_metrics(state_dir: &Path, warnings: &mut Vec<String>) -> SystemMetricsOutput {
+    let cpu_cores = std::thread::available_parallelism()
+        .ok()
+        .map(|value| value.get());
+    let load_avg_1m_milli = collect_load_avg_1m_milli(warnings);
+    let uptime_seconds = collect_uptime_seconds(warnings);
+    let (memory_total_bytes, memory_used_bytes) = collect_memory_bytes(warnings);
+    let (disk_total_bytes, disk_available_bytes) = collect_disk_bytes(state_dir, warnings);
+    SystemMetricsOutput {
+        cpu_cores,
+        load_avg_1m_milli,
+        uptime_seconds,
+        memory_total_bytes,
+        memory_used_bytes,
+        disk_total_bytes,
+        disk_available_bytes,
+    }
+}
+
+fn collect_load_avg_1m_milli(warnings: &mut Vec<String>) -> Option<u64> {
+    if let Ok(value) = std::env::var("PREEN_STATUS_LOAD_1M_MILLI")
+        && let Ok(parsed) = value.trim().parse::<u64>()
+    {
+        return Some(parsed);
+    }
+
+    if cfg!(target_os = "linux") {
+        match fs::read_to_string("/proc/loadavg") {
+            Ok(value) => {
+                if let Some(first) = value.split_whitespace().next()
+                    && let Ok(parsed) = first.parse::<f64>()
+                {
+                    return Some((parsed * 1000.0).round() as u64);
+                }
+            }
+            Err(error) => warnings.push(format!("status loadavg read failed: {error}")),
+        }
+        return None;
+    }
+
+    if cfg!(target_os = "macos") {
+        let output = ProcessCommand::new("sysctl")
+            .args(["-n", "vm.loadavg"])
+            .output();
+        match output {
+            Ok(value) if value.status.success() => {
+                let text = String::from_utf8_lossy(&value.stdout);
+                if let Some(parsed) = parse_first_float(&text) {
+                    return Some((parsed * 1000.0).round() as u64);
+                }
+            }
+            Ok(value) => warnings.push(format!(
+                "status loadavg command failed: {}",
+                String::from_utf8_lossy(&value.stderr).trim()
+            )),
+            Err(error) => warnings.push(format!("status loadavg command failed: {error}")),
+        }
+    }
+    None
+}
+
+fn collect_uptime_seconds(warnings: &mut Vec<String>) -> Option<u64> {
+    if let Ok(value) = std::env::var("PREEN_STATUS_UPTIME_SECONDS")
+        && let Ok(parsed) = value.trim().parse::<u64>()
+    {
+        return Some(parsed);
+    }
+
+    if cfg!(target_os = "linux") {
+        match fs::read_to_string("/proc/uptime") {
+            Ok(value) => {
+                if let Some(first) = value.split_whitespace().next()
+                    && let Ok(parsed) = first.parse::<f64>()
+                {
+                    return Some(parsed as u64);
+                }
+            }
+            Err(error) => warnings.push(format!("status uptime read failed: {error}")),
+        }
+        return None;
+    }
+
+    if cfg!(target_os = "macos") {
+        let output = ProcessCommand::new("sysctl")
+            .args(["-n", "kern.boottime"])
+            .output();
+        match output {
+            Ok(value) if value.status.success() => {
+                let text = String::from_utf8_lossy(&value.stdout);
+                if let Some(boot_sec) = parse_boot_time_seconds(&text)
+                    && let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH)
+                {
+                    return Some(now.as_secs().saturating_sub(boot_sec));
+                }
+            }
+            Ok(value) => warnings.push(format!(
+                "status uptime command failed: {}",
+                String::from_utf8_lossy(&value.stderr).trim()
+            )),
+            Err(error) => warnings.push(format!("status uptime command failed: {error}")),
+        }
+    }
+    None
+}
+
+fn collect_memory_bytes(warnings: &mut Vec<String>) -> (Option<u64>, Option<u64>) {
+    if let Ok(total) = std::env::var("PREEN_STATUS_MEMORY_TOTAL_BYTES")
+        && let Ok(total_bytes) = total.trim().parse::<u64>()
+    {
+        let used = std::env::var("PREEN_STATUS_MEMORY_USED_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok());
+        return (Some(total_bytes), used);
+    }
+
+    if cfg!(target_os = "linux") {
+        return collect_memory_linux(warnings);
+    }
+    if cfg!(target_os = "macos") {
+        return collect_memory_macos(warnings);
+    }
+    (None, None)
+}
+
+fn collect_memory_linux(warnings: &mut Vec<String>) -> (Option<u64>, Option<u64>) {
+    match fs::read_to_string("/proc/meminfo") {
+        Ok(content) => {
+            let total_kb = parse_meminfo_kb(&content, "MemTotal:");
+            let available_kb = parse_meminfo_kb(&content, "MemAvailable:");
+            if let (Some(total), Some(available)) = (total_kb, available_kb) {
+                let total_bytes = total.saturating_mul(1024);
+                let available_bytes = available.saturating_mul(1024);
+                let used = total_bytes.saturating_sub(available_bytes);
+                return (Some(total_bytes), Some(used));
+            }
+        }
+        Err(error) => warnings.push(format!("status meminfo read failed: {error}")),
+    }
+    (None, None)
+}
+
+fn collect_memory_macos(warnings: &mut Vec<String>) -> (Option<u64>, Option<u64>) {
+    let total_output = ProcessCommand::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output();
+    let total_bytes = match total_output {
+        Ok(value) if value.status.success() => String::from_utf8_lossy(&value.stdout)
+            .trim()
+            .parse::<u64>()
+            .ok(),
+        Ok(value) => {
+            warnings.push(format!(
+                "status hw.memsize command failed: {}",
+                String::from_utf8_lossy(&value.stderr).trim()
+            ));
+            None
+        }
+        Err(error) => {
+            warnings.push(format!("status hw.memsize command failed: {error}"));
+            None
+        }
+    };
+
+    let page_size_output = ProcessCommand::new("sysctl")
+        .args(["-n", "hw.pagesize"])
+        .output();
+    let page_size = match page_size_output {
+        Ok(value) if value.status.success() => String::from_utf8_lossy(&value.stdout)
+            .trim()
+            .parse::<u64>()
+            .ok(),
+        _ => None,
+    };
+
+    let vm_output = ProcessCommand::new("vm_stat").output();
+    let vm_text = match vm_output {
+        Ok(value) if value.status.success() => {
+            Some(String::from_utf8_lossy(&value.stdout).to_string())
+        }
+        _ => None,
+    };
+
+    if let (Some(total), Some(page_size), Some(vm)) = (total_bytes, page_size, vm_text) {
+        let free_pages = parse_vm_stat_pages(&vm, "Pages free:")
+            .unwrap_or(0)
+            .saturating_add(parse_vm_stat_pages(&vm, "Pages speculative:").unwrap_or(0));
+        let free_bytes = free_pages.saturating_mul(page_size);
+        let used = total.saturating_sub(free_bytes);
+        return (Some(total), Some(used));
+    }
+
+    (total_bytes, None)
+}
+
+fn collect_disk_bytes(state_dir: &Path, warnings: &mut Vec<String>) -> (Option<u64>, Option<u64>) {
+    if let Ok(total) = std::env::var("PREEN_STATUS_DISK_TOTAL_BYTES")
+        && let Ok(total_bytes) = total.trim().parse::<u64>()
+    {
+        let available = std::env::var("PREEN_STATUS_DISK_AVAILABLE_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok());
+        return (Some(total_bytes), available);
+    }
+
+    let probe = if state_dir.exists() {
+        state_dir.to_path_buf()
+    } else {
+        state_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    let output = ProcessCommand::new("df")
+        .args(["-kP", &probe.to_string_lossy()])
+        .output();
+    match output {
+        Ok(value) if value.status.success() => {
+            let text = String::from_utf8_lossy(&value.stdout);
+            if let Some((total, available)) = parse_df_kbytes(&text) {
+                return (
+                    Some(total.saturating_mul(1024)),
+                    Some(available.saturating_mul(1024)),
+                );
+            }
+        }
+        Ok(value) => warnings.push(format!(
+            "status disk command failed: {}",
+            String::from_utf8_lossy(&value.stderr).trim()
+        )),
+        Err(error) => warnings.push(format!("status disk command failed: {error}")),
+    }
+    (None, None)
+}
+
+fn parse_meminfo_kb(content: &str, key: &str) -> Option<u64> {
+    content.lines().find_map(|line| {
+        if !line.starts_with(key) {
+            return None;
+        }
+        line.split_whitespace().nth(1)?.parse::<u64>().ok()
+    })
+}
+
+fn parse_vm_stat_pages(content: &str, key: &str) -> Option<u64> {
+    content.lines().find_map(|line| {
+        if !line.trim_start().starts_with(key) {
+            return None;
+        }
+        let value = line.split(':').nth(1)?.trim().trim_end_matches('.');
+        value.parse::<u64>().ok()
+    })
+}
+
+fn parse_df_kbytes(content: &str) -> Option<(u64, u64)> {
+    let line = content.lines().nth(1)?;
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 4 {
+        return None;
+    }
+    let total = cols.get(1)?.parse::<u64>().ok()?;
+    let available = cols.get(3)?.parse::<u64>().ok()?;
+    Some((total, available))
+}
+
+fn parse_first_float(content: &str) -> Option<f64> {
+    let mut token = String::new();
+    for ch in content.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            token.push(ch);
+        } else if !token.is_empty() {
+            if let Ok(parsed) = token.parse::<f64>() {
+                return Some(parsed);
+            }
+            token.clear();
+        }
+    }
+    if token.is_empty() {
+        return None;
+    }
+    token.parse::<f64>().ok()
+}
+
+fn parse_boot_time_seconds(content: &str) -> Option<u64> {
+    let marker = "sec =";
+    let start = content.find(marker)?;
+    let rest = &content[start + marker.len()..];
+    let value = rest
+        .chars()
+        .skip_while(|ch| ch.is_whitespace())
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    value.parse::<u64>().ok()
+}
+
+fn format_load_milli(value: u64) -> String {
+    let whole = value / 1000;
+    let frac = value % 1000;
+    format!("{whole}.{frac:03}")
+}
+
+fn status_health_score(checks: &[SystemStatusCheckOutput]) -> u8 {
+    let mut score: i32 = 100;
+    for check in checks {
+        if check.passed {
+            continue;
+        }
+        if check.severity == "critical" {
+            score -= 30;
+        } else {
+            score -= 10;
+        }
+    }
+    score.clamp(0, 100) as u8
 }
 
 fn status_json(out: StatusOutput) -> Result<String, String> {
@@ -1991,8 +2363,8 @@ fn status_json(out: StatusOutput) -> Result<String, String> {
 
 fn print_status_output(out: &StatusOutput) {
     println!(
-        "summary: kind=system_status overall_passed={}",
-        out.overall_passed
+        "summary: kind=system_status overall_passed={} health_score={}",
+        out.overall_passed, out.health_score
     );
     println!("mode: {}", out.mode);
     println!("os: {}", out.os);
@@ -2009,6 +2381,27 @@ fn print_status_output(out: &StatusOutput) {
     }
     if let Some(age_days) = out.registry_age_days {
         println!("registry_age_days: {age_days}");
+    }
+    if let Some(value) = out.metrics.cpu_cores {
+        println!("metrics_cpu_cores: {value}");
+    }
+    if let Some(value) = out.metrics.load_avg_1m_milli {
+        println!("metrics_load_avg_1m: {}", format_load_milli(value));
+    }
+    if let Some(value) = out.metrics.uptime_seconds {
+        println!("metrics_uptime_seconds: {value}");
+    }
+    if let Some(value) = out.metrics.memory_total_bytes {
+        println!("metrics_memory_total: {}", format_bytes(value));
+    }
+    if let Some(value) = out.metrics.memory_used_bytes {
+        println!("metrics_memory_used: {}", format_bytes(value));
+    }
+    if let Some(value) = out.metrics.disk_total_bytes {
+        println!("metrics_disk_total: {}", format_bytes(value));
+    }
+    if let Some(value) = out.metrics.disk_available_bytes {
+        println!("metrics_disk_available: {}", format_bytes(value));
     }
     println!("checks: label=Checks");
     for check in &out.checks {

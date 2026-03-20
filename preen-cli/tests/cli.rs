@@ -1102,8 +1102,10 @@ fn status_json_happy_path_with_temp_user_env() {
         assert_eq!(output["data"]["mode"].as_str(), Some("status"));
         assert!(output["data"]["os"].as_str().is_some());
         assert!(output["data"]["arch"].as_str().is_some());
+        assert!(output["data"]["health_score"].as_u64().is_some());
         assert!(output["data"]["state_dir"].as_str().is_some());
         assert!(output["data"]["checks"].as_array().is_some());
+        assert!(output["data"]["metrics"].as_object().is_some());
         assert!(output["data"]["plugin_count"].as_u64().is_some());
     });
 }
@@ -1115,6 +1117,16 @@ fn status_command_runs_without_error() {
         let cli = Cli::try_parse_from(["preen", "status", "--json"]).unwrap();
         let result = run_typed(cli);
         assert!(result.is_ok());
+    });
+}
+
+#[test]
+fn status_json_health_score_is_bounded() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = status_output_for_test().unwrap();
+        let score = output["data"]["health_score"].as_u64().unwrap_or(101);
+        assert!(score <= 100);
     });
 }
 
