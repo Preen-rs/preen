@@ -2956,6 +2956,44 @@ fn install_verify_remove_lifecycle_with_temp_user_state_dirs() {
 }
 
 #[test]
+fn install_local_git_old_tag_sets_resolved_rev_in_lockfile() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let tag = init_preflight_git_repo_with_old_tag(&repo);
+        let expected_commit = git_rev_parse(&repo, &tag);
+        let lockfile = tmp.path().join("plugins.lock");
+        let spec = format!("file://{}@{}", repo.to_string_lossy(), tag);
+
+        let install = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "install",
+            &spec,
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(install, &AlwaysOkVerifier).unwrap();
+
+        let lock = load_lockfile_at(&lockfile).unwrap();
+        assert_eq!(lock.plugins.len(), 1);
+        assert_eq!(lock.plugins[0].rev, "v0.0.1");
+        assert_eq!(
+            lock.plugins[0].resolved_rev.as_deref(),
+            Some(expected_commit.as_str())
+        );
+
+        let checked_out = git_rev_parse(
+            &plugin_install_base_dir_from_env().join("test.pack"),
+            "HEAD",
+        );
+        assert_eq!(checked_out, expected_commit);
+    });
+}
+
+#[test]
 fn update_plugin_rewrites_tampered_lock_hashes() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
@@ -2995,6 +3033,62 @@ fn update_plugin_rewrites_tampered_lock_hashes() {
         let repaired = load_lockfile_at(&lockfile).unwrap();
         assert_ne!(repaired.plugins[0].manifest_hash, "sha256:tampered");
         assert_ne!(repaired.plugins[0].signature, "sha256:tampered");
+    });
+}
+
+#[test]
+fn update_local_git_old_tag_repairs_tampered_resolved_rev_to_pinned_commit() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let tag = init_preflight_git_repo_with_old_tag(&repo);
+        let tag_commit = git_rev_parse(&repo, &tag);
+        let branch_head = git_rev_parse(&repo, "HEAD");
+        assert_ne!(tag_commit, branch_head);
+
+        let lockfile = tmp.path().join("plugins.lock");
+        let spec = format!("file://{}@{}", repo.to_string_lossy(), tag);
+
+        let install = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "install",
+            &spec,
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(install, &AlwaysOkVerifier).unwrap();
+
+        let mut lock = load_lockfile_at(&lockfile).unwrap();
+        lock.plugins[0].resolved_rev = Some(branch_head.clone());
+        save_lockfile_at(&lockfile, &lock).unwrap();
+
+        let update = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "update",
+            "test.pack",
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(update, &AlwaysOkVerifier).unwrap();
+
+        let repaired = load_lockfile_at(&lockfile).unwrap();
+        assert_eq!(repaired.plugins.len(), 1);
+        assert_eq!(repaired.plugins[0].rev, "v0.0.1");
+        assert_eq!(
+            repaired.plugins[0].resolved_rev.as_deref(),
+            Some(tag_commit.as_str())
+        );
+
+        let checked_out = git_rev_parse(
+            &plugin_install_base_dir_from_env().join("test.pack"),
+            "HEAD",
+        );
+        assert_eq!(checked_out, tag_commit);
     });
 }
 
