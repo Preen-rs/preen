@@ -25,14 +25,14 @@ use preen_cli::{
     plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
     plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
-    primary_hint_for_drift_fields_for_test, purge_output_for_test, registry_backup_path_for_test,
-    registry_update_json_for_test, remove_output_for_test, resolve_registry_for_test, run_typed,
-    run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
-    save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
-    status_output_for_test, status_should_emit_json_for_test, test_failure_row_for_test,
-    touchid_output_for_test, trust_policy_from_str, uninstall_output_for_test,
-    uninstall_runtime_error_detail_code_for_test, update_output_for_test,
-    validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
+    primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
+    registry_backup_path_for_test, registry_update_json_for_test, remove_output_for_test,
+    resolve_registry_for_test, run_typed, run_typed_with_verifier_and_clean_executor_for_test,
+    run_typed_with_verifier_for_test, save_lockfile_at, search_registry_for_test,
+    search_registry_json_for_test, status_output_for_test, status_should_emit_json_for_test,
+    test_failure_row_for_test, touchid_output_for_test, trust_policy_from_str,
+    uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
+    update_output_for_test, validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
@@ -2233,6 +2233,15 @@ fn plugin_verbose_option_supports_single_and_all_flows() {
     );
     assert!(Cli::try_parse_from(["preen", "plugin", "preflight", "--all", "--verbose"]).is_ok());
     assert!(Cli::try_parse_from(["preen", "plugin", "test", "--all", "--verbose"]).is_ok());
+}
+
+#[test]
+fn plugin_progress_line_format_is_stable() {
+    let line = progress_line_for_test("plugin.install", "verify_signature", "preen-rs.homebrew");
+    assert_eq!(
+        line,
+        "progress: command=plugin.install stage=verify_signature subject=preen-rs.homebrew"
+    );
 }
 
 #[test]

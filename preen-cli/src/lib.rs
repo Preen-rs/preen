@@ -4916,11 +4916,15 @@ fn err_with<E: Display>(kind: CliErrorKind, context: &str, source: E) -> String 
     err(kind, format!("{context}: {source}"))
 }
 
+fn progress_line(command: &str, stage: &str, subject: &str) -> String {
+    format!("progress: command={command} stage={stage} subject={subject}")
+}
+
 fn emit_progress(verbose: bool, command: &str, stage: &str, subject: &str) {
     if !verbose {
         return;
     }
-    eprintln!("progress: command={command} stage={stage} subject={subject}");
+    eprintln!("{}", progress_line(command, stage, subject));
 }
 
 fn install_plugin(
@@ -6948,6 +6952,10 @@ pub fn search_registry_for_test(
 
 pub fn default_signature_source_for_test(source: &str) -> String {
     default_signature_source(source)
+}
+
+pub fn progress_line_for_test(command: &str, stage: &str, subject: &str) -> String {
+    progress_line(command, stage, subject)
 }
 
 pub fn validate_registry_trust_inputs_for_test(identity: &str, issuer: &str) -> Result<(), String> {
