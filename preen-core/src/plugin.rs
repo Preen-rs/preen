@@ -271,6 +271,7 @@ impl PluginFailureHint {
 pub fn plugin_failure_hint_from_detail_code(code: &str) -> PluginFailureHint {
     match code {
         "preflight_signature_or_trust_failed"
+        | "install_signature_or_trust_failed"
         | "verify_signature_or_trust_failed"
         | "test_signature_or_trust_failed" => PluginFailureHint {
             code: "trust_or_signature_failed",
@@ -278,6 +279,7 @@ pub fn plugin_failure_hint_from_detail_code(code: &str) -> PluginFailureHint {
             priority: 0,
         },
         "preflight_core_compat_failed"
+        | "install_core_compat_failed"
         | "verify_core_compat_failed"
         | "test_core_compat_failed" => PluginFailureHint {
             code: "core_compat_failed",
@@ -285,19 +287,21 @@ pub fn plugin_failure_hint_from_detail_code(code: &str) -> PluginFailureHint {
             priority: 1,
         },
         "preflight_action_api_unsupported"
+        | "install_action_api_unsupported"
         | "verify_action_api_unsupported"
         | "test_action_api_unsupported" => PluginFailureHint {
             code: "action_api_unsupported",
             action: "upgrade_preen_core_or_plugin_action_api",
             priority: 1,
         },
-        "preflight_os_target_failed" | "verify_os_target_failed" | "test_os_target_failed" => {
-            PluginFailureHint {
-                code: "os_target_failed",
-                action: "use_plugin_with_matching_os_target",
-                priority: 1,
-            }
-        }
+        "preflight_os_target_failed"
+        | "install_os_target_failed"
+        | "verify_os_target_failed"
+        | "test_os_target_failed" => PluginFailureHint {
+            code: "os_target_failed",
+            action: "use_plugin_with_matching_os_target",
+            priority: 1,
+        },
         "verify_resolved_rev_drift" | "test_resolved_rev_drift" => PluginFailureHint {
             code: "resolved_rev_drift",
             action: "reinstall_plugin_with_exact_pinned_commit",
@@ -328,15 +332,37 @@ pub fn plugin_failure_hint_from_detail_code(code: &str) -> PluginFailureHint {
             action: "validate_git_url_and_pinned_rev",
             priority: 2,
         },
-        "preflight_pack_load_failed" | "verify_pack_load_failed" => PluginFailureHint {
-            code: "pack_load_failed",
-            action: "validate_manifest_and_rule_files",
+        "preflight_pack_load_failed" | "install_pack_load_failed" | "verify_pack_load_failed" => {
+            PluginFailureHint {
+                code: "pack_load_failed",
+                action: "validate_manifest_and_rule_files",
+                priority: 2,
+            }
+        }
+        "install_source_resolve_failed" => PluginFailureHint {
+            code: "registry_or_source_resolve_failed",
+            action: "refresh_registry_or_validate_pack_id_and_version",
             priority: 2,
         },
-        "preflight_spec_invalid" => PluginFailureHint {
+        "preflight_spec_invalid" | "install_spec_invalid" => PluginFailureHint {
             code: "invalid_spec",
             action: "use_format_url_at_tag_or_commit",
             priority: 3,
+        },
+        "install_trust_policy_invalid" => PluginFailureHint {
+            code: "trust_policy_invalid",
+            action: "fix_trust_config_and_retry",
+            priority: 2,
+        },
+        "install_lockfile_load_failed" | "install_lockfile_save_failed" => PluginFailureHint {
+            code: "lockfile_io_failed",
+            action: "check_lockfile_path_permissions_and_retry",
+            priority: 3,
+        },
+        "install_manifest_hash_failed" | "install_signature_hash_failed" => PluginFailureHint {
+            code: "artifact_hash_failed",
+            action: "verify_manifest_artifacts_and_retry",
+            priority: 2,
         },
         "test_all_failed" | "preflight_all_failed" => PluginFailureHint {
             code: "aggregate_failed",

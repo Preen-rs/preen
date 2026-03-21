@@ -2393,6 +2393,7 @@ fn run_typed_returns_validation_for_invalid_install_spec() {
         Cli::try_parse_from(["preen", "plugin", "install", "invalid-spec-without-rev"]).unwrap();
     let err = run_typed(cli).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(err.detail_code.as_deref(), Some("install_spec_invalid"));
     assert!(err.message.contains("missing @<tag|commit>"));
 }
 
@@ -2430,6 +2431,46 @@ fn detail_code_hints_prioritize_security_and_compatibility() {
     let (code, _, priority) = hint_for_detail_code_for_test("test_signature_or_trust_failed");
     assert_eq!(code, "trust_or_signature_failed");
     assert_eq!(priority, 0);
+
+    let (code, _, priority) = hint_for_detail_code_for_test("install_action_api_unsupported");
+    assert_eq!(code, "action_api_unsupported");
+    assert_eq!(priority, 1);
+
+    let (code, _, priority) = hint_for_detail_code_for_test("install_source_resolve_failed");
+    assert_eq!(code, "registry_or_source_resolve_failed");
+    assert_eq!(priority, 2);
+}
+
+#[test]
+fn run_typed_install_local_git_verification_failure_has_install_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{}", repo.display(), rev);
+        let cli = Cli::try_parse_from(["preen", "plugin", "install", &spec]).unwrap();
+        let err = run_typed_with_verifier_for_test(cli, &AlwaysFailVerifier).unwrap_err();
+        assert_eq!(err.kind, CliErrorKind::Verification);
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("install_signature_or_trust_failed")
+        );
+    });
+}
+
+#[test]
+fn run_typed_install_registry_source_resolve_failure_has_install_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let cli =
+            Cli::try_parse_from(["preen", "plugin", "install", "preen-rs.homebrew@1.0.0"]).unwrap();
+        let err = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier).unwrap_err();
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("install_source_resolve_failed")
+        );
+    });
 }
 
 #[test]

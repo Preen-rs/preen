@@ -5129,22 +5129,70 @@ fn install_plugin_internal_in_dir(
     install_dir: &Path,
     verifier: &dyn SignatureVerifier,
 ) -> Result<LockedPlugin, String> {
-    let parsed = parse_plugin_spec(spec)?;
-    let (source, url, rev) = resolve_install_source(parsed)?;
-    let mut lock = load_lockfile(lockfile.as_deref())?;
+    let parsed = parse_plugin_spec(spec)
+        .map_err(|e| err_code(CliErrorKind::Validation, "install_spec_invalid", e))?;
+    let (source, url, rev) = resolve_install_source(parsed).map_err(|e| {
+        map_install_error_with_detail_code(
+            e,
+            CliErrorKind::Validation,
+            "install_source_resolve_failed",
+        )
+    })?;
+    let mut lock = load_lockfile(lockfile.as_deref()).map_err(|e| {
+        map_install_error_with_detail_code(e, CliErrorKind::Io, "install_lockfile_load_failed")
+    })?;
     fs::create_dir_all(install_dir)
         .map_err(|e| err_with(CliErrorKind::Io, "plugin base dir create failed", e))?;
     let temp_dir = TempDir::new_in(install_dir)
         .map_err(|e| err_with(CliErrorKind::Io, "temp dir create failed", e))?;
     let pack_dir = temp_dir.path().join("repo");
     let resolved_rev = clone_rule_pack_at(&url, &rev, &pack_dir, "install_clone_failed")?;
-    let loaded = load_rule_pack_from_dir(&pack_dir)
-        .map_err(|e| err(CliErrorKind::Validation, format!("load failed: {e:?}")))?;
-    validate_os_targets(&loaded)?;
-    let trust = load_trust_policy()?;
-    verify_rule_pack_with_verifier(&loaded, &trust, verifier)?;
-    let manifest_hash = hash_file(&pack_dir.join("manifest.toml"))?;
-    let signature_hash = hash_file(&pack_dir.join("manifest.sig"))?;
+    let loaded = load_rule_pack_from_dir(&pack_dir).map_err(|e| {
+        err_code(
+            CliErrorKind::Validation,
+            "install_pack_load_failed",
+            format!("load failed: {e:?}"),
+        )
+    })?;
+    validate_os_targets(&loaded)
+        .map_err(|e| err_code(CliErrorKind::Validation, "install_os_target_failed", e))?;
+    loaded
+        .manifest
+        .validate_with_core_version("0.1.0")
+        .map_err(|e| {
+            err_code(
+                CliErrorKind::Validation,
+                "install_core_compat_failed",
+                format!("core compatibility check failed: {e:?}"),
+            )
+        })?;
+    if loaded.manifest.action_api != 1 {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "install_action_api_unsupported",
+            "unsupported action_api",
+        ));
+    }
+    let trust = load_trust_policy().map_err(|e| {
+        map_install_error_with_detail_code(
+            e,
+            CliErrorKind::Validation,
+            "install_trust_policy_invalid",
+        )
+    })?;
+    verify_rule_pack_with_verifier(&loaded, &trust, verifier).map_err(|e| {
+        map_install_error_with_detail_code(
+            e,
+            CliErrorKind::Verification,
+            "install_signature_or_trust_failed",
+        )
+    })?;
+    let manifest_hash = hash_file(&pack_dir.join("manifest.toml")).map_err(|e| {
+        map_install_error_with_detail_code(e, CliErrorKind::Io, "install_manifest_hash_failed")
+    })?;
+    let signature_hash = hash_file(&pack_dir.join("manifest.sig")).map_err(|e| {
+        map_install_error_with_detail_code(e, CliErrorKind::Io, "install_signature_hash_failed")
+    })?;
 
     let final_dir = install_dir.join(&loaded.manifest.pack_id);
     if final_dir.exists() {
@@ -5173,8 +5221,20 @@ fn install_plugin_internal_in_dir(
             .unwrap_or_default(),
     };
     upsert_lockfile(&mut lock, locked.clone());
-    save_lockfile(lockfile.as_deref(), &lock)?;
+    save_lockfile(lockfile.as_deref(), &lock).map_err(|e| {
+        map_install_error_with_detail_code(e, CliErrorKind::Io, "install_lockfile_save_failed")
+    })?;
     Ok(locked)
+}
+
+fn map_install_error_with_detail_code(
+    message: String,
+    fallback_kind: CliErrorKind,
+    detail_code: &str,
+) -> String {
+    let (kind_raw, _, plain_message) = parse_error_metadata(&message);
+    let kind = CliErrorKind::from_str(&kind_raw).unwrap_or(fallback_kind);
+    err_code(kind, detail_code, plain_message)
 }
 
 fn list_plugins(lockfile: Option<PathBuf>, json: bool) -> Result<(), String> {
@@ -5598,7 +5658,8 @@ fn format_plugin_test_output(report: &PluginTestOutput, language: &str) -> Strin
         .expect("writing to String should be infallible");
     }
     if report.suggested_actions.is_empty() {
-        writeln!(&mut out, "suggested_actions: []").expect("writing to String should be infallible");
+        writeln!(&mut out, "suggested_actions: []")
+            .expect("writing to String should be infallible");
     } else {
         writeln!(
             &mut out,
