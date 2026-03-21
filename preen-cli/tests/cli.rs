@@ -16,23 +16,25 @@ use preen_cli::{
     enforce_uninstall_scope_for_test, error_json_for_test, format_bytes_for_test,
     hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
     installer_output_for_test, installer_runtime_error_detail_code_for_test, load_lockfile_at,
-    optimize_output_for_test, optimize_output_with_executor_for_test,
-    optimize_runtime_error_detail_code_for_test, parse_install_spec, parse_plugin_spec,
-    plugin_info_json_for_test, plugin_install_json_for_test, plugin_install_text_for_test,
-    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
-    plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
-    plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
-    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
-    plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
+    map_error_with_detail_code_for_test, optimize_output_for_test,
+    optimize_output_with_executor_for_test, optimize_runtime_error_detail_code_for_test,
+    parse_install_spec, parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
+    plugin_install_text_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
+    plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
+    plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
+    plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
+    plugin_update_json_for_test, plugin_update_text_for_test, plugin_verify_for_test,
+    plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
-    registry_backup_path_for_test, registry_update_json_for_test, remove_output_for_test,
-    resolve_registry_for_test, run_typed, run_typed_with_verifier_and_clean_executor_for_test,
-    run_typed_with_verifier_for_test, save_lockfile_at, search_registry_for_test,
-    search_registry_json_for_test, status_output_for_test, status_should_emit_json_for_test,
-    test_failure_row_for_test, touchid_output_for_test, trust_policy_from_str,
-    uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
-    update_output_for_test, validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
+    registry_backup_path_for_test, registry_source_detail_code_for_test,
+    registry_update_json_for_test, remove_output_for_test, resolve_registry_for_test, run_typed,
+    run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
+    save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
+    status_output_for_test, status_should_emit_json_for_test, test_failure_row_for_test,
+    touchid_output_for_test, trust_policy_from_str, uninstall_output_for_test,
+    uninstall_runtime_error_detail_code_for_test, update_output_for_test,
+    validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
@@ -65,6 +67,28 @@ struct AlwaysFailVerifier;
 impl SignatureVerifier for AlwaysFailVerifier {
     fn verify(&self, _input: VerificationInput) -> Result<VerificationOutcome, VerifyError> {
         Err(VerifyError::SignatureInvalid("forced failure".to_string()))
+    }
+}
+
+struct MissingCertVerifier;
+
+impl SignatureVerifier for MissingCertVerifier {
+    fn verify(&self, _input: VerificationInput) -> Result<VerificationOutcome, VerifyError> {
+        Err(VerifyError::SignatureInvalid(
+            "manifest certificate is missing".to_string(),
+        ))
+    }
+}
+
+struct UntrustedIdentityVerifier;
+
+impl SignatureVerifier for UntrustedIdentityVerifier {
+    fn verify(&self, _input: VerificationInput) -> Result<VerificationOutcome, VerifyError> {
+        Ok(VerificationOutcome {
+            identity:
+                "https://github.com/Preen-rs/other/.github/workflows/release.yml@refs/heads/main"
+                    .to_string(),
+        })
     }
 }
 
@@ -2502,6 +2526,17 @@ fn detail_code_hints_prioritize_security_and_compatibility() {
     let (code, _, priority) = hint_for_detail_code_for_test("install_source_resolve_failed");
     assert_eq!(code, "registry_or_source_resolve_failed");
     assert_eq!(priority, 2);
+
+    let (code, action, priority) =
+        hint_for_detail_code_for_test("registry_signature_verify_failed");
+    assert_eq!(code, "trust_or_signature_failed");
+    assert_eq!(action, "check_sigstore_identity_and_trust_policy");
+    assert_eq!(priority, 0);
+
+    let (code, action, priority) = hint_for_detail_code_for_test("registry_source_fetch_failed");
+    assert_eq!(code, "registry_or_source_resolve_failed");
+    assert_eq!(action, "refresh_registry_or_validate_pack_id_and_version");
+    assert_eq!(priority, 2);
 }
 
 #[test]
@@ -2822,6 +2857,10 @@ fn run_typed_registry_update_rejects_invalid_identity() {
     .unwrap();
     let err = run_typed(cli).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Trust);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_identity_invalid")
+    );
     assert!(err.message.contains("registry identity must start with"));
 }
 
@@ -2849,7 +2888,77 @@ fn run_typed_registry_update_rejects_invalid_issuer() {
     .unwrap();
     let err = run_typed(cli).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Trust);
+    assert_eq!(err.detail_code.as_deref(), Some("registry_issuer_invalid"));
     assert!(err.message.contains("registry issuer must be"));
+}
+
+#[test]
+fn run_typed_registry_update_missing_source_has_detail_code_and_hint() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_REGISTRY_SOURCE");
+        std::env::remove_var("PREEN_REGISTRY_SIGNATURE_SOURCE");
+        std::env::remove_var("PREEN_REGISTRY_IDENTITY");
+        std::env::remove_var("PREEN_REGISTRY_ISSUER");
+    }
+    let cli = Cli::try_parse_from(["preen", "plugin", "registry-update"]).unwrap();
+    let err = run_typed(cli.clone()).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(err.detail_code.as_deref(), Some("registry_source_missing"));
+
+    let out = cli.format_error(&err);
+    assert!(out.contains("detail_code=registry_source_missing"));
+    assert!(out.contains("hint_code=invalid_spec"));
+}
+
+#[test]
+fn registry_source_detail_code_uses_remote_for_http_and_local_for_file() {
+    let code = registry_source_detail_code_for_test(
+        "https://example.com/registry-index.toml",
+        "registry_source_fetch_failed",
+        "registry_source_read_failed",
+    );
+    assert_eq!(code, "registry_source_fetch_failed");
+
+    let code = registry_source_detail_code_for_test(
+        "file:///tmp/registry-index.toml",
+        "registry_source_fetch_failed",
+        "registry_source_read_failed",
+    );
+    assert_eq!(code, "registry_source_read_failed");
+}
+
+#[test]
+fn registry_fetch_404_message_can_be_mapped_to_specific_detail_code() {
+    let encoded = map_error_with_detail_code_for_test(
+        "__preen_kind:network__registry fetch failed with status 404 Not Found",
+        CliErrorKind::Network,
+        "registry_source_fetch_failed",
+    );
+    let err = CliError::from(encoded);
+    assert_eq!(err.kind, CliErrorKind::Network);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_source_fetch_failed")
+    );
+    assert!(err.message.contains("status 404"));
+}
+
+#[test]
+fn registry_signature_fetch_404_message_can_be_mapped_to_specific_detail_code() {
+    let encoded = map_error_with_detail_code_for_test(
+        "__preen_kind:network__registry fetch failed with status 404 Not Found",
+        CliErrorKind::Network,
+        "registry_signature_fetch_failed",
+    );
+    let err = CliError::from(encoded);
+    assert_eq!(err.kind, CliErrorKind::Network);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_signature_fetch_failed")
+    );
+    assert!(err.message.contains("status 404"));
 }
 
 #[test]
@@ -3955,11 +4064,139 @@ latest_version = "1.2.0"
         "https://token.actions.githubusercontent.com",
     ])
     .unwrap();
-    let err = run_typed_with_verifier_for_test(cli, &AlwaysFailVerifier).unwrap_err();
+    let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysFailVerifier).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Verification);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_signature_verify_failed")
+    );
     assert!(
         err.message
             .contains("registry signature verification failed")
+    );
+    let text = cli.format_error(&err);
+    assert!(text.contains("hint_code=trust_or_signature_failed"));
+    assert!(!cache.exists());
+}
+
+#[test]
+fn run_typed_registry_update_local_source_missing_cert_failure_has_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let index = tmp.path().join("registry-index.toml");
+    let sig = tmp.path().join("registry-index.toml.sig");
+    let cache = tmp.path().join("cache-index.toml");
+
+    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+    fs::write(
+        &index,
+        format!(
+            r#"
+schema_version = 1
+generated_at = "{now}"
+
+[[entries]]
+pack_id = "preen-rs.homebrew"
+name = "Homebrew"
+description = "Cleanup pack"
+repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
+latest_version = "1.2.0"
+  [[entries.versions]]
+  version = "1.2.0"
+  rev = "abc123"
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(&sig, "sig").unwrap();
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
+        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
+        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
+    }
+
+    let cli = Cli::try_parse_from([
+        "preen",
+        "plugin",
+        "registry-update",
+        "--source",
+        &format!("file://{}", index.display()),
+        "--signature-source",
+        &format!("file://{}", sig.display()),
+        "--identity",
+        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
+        "--issuer",
+        "https://token.actions.githubusercontent.com",
+    ])
+    .unwrap();
+    let err = run_typed_with_verifier_for_test(cli, &MissingCertVerifier).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Verification);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_signature_verify_failed")
+    );
+    assert!(!cache.exists());
+}
+
+#[test]
+fn run_typed_registry_update_local_source_identity_mismatch_has_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let index = tmp.path().join("registry-index.toml");
+    let sig = tmp.path().join("registry-index.toml.sig");
+    let cache = tmp.path().join("cache-index.toml");
+
+    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+    fs::write(
+        &index,
+        format!(
+            r#"
+schema_version = 1
+generated_at = "{now}"
+
+[[entries]]
+pack_id = "preen-rs.homebrew"
+name = "Homebrew"
+description = "Cleanup pack"
+repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
+latest_version = "1.2.0"
+  [[entries.versions]]
+  version = "1.2.0"
+  rev = "abc123"
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(&sig, "sig").unwrap();
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
+        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
+        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
+    }
+
+    let cli = Cli::try_parse_from([
+        "preen",
+        "plugin",
+        "registry-update",
+        "--source",
+        &format!("file://{}", index.display()),
+        "--signature-source",
+        &format!("file://{}", sig.display()),
+        "--identity",
+        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
+        "--issuer",
+        "https://token.actions.githubusercontent.com",
+    ])
+    .unwrap();
+    let err = run_typed_with_verifier_for_test(cli, &UntrustedIdentityVerifier).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Verification);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_signature_verify_failed")
     );
     assert!(!cache.exists());
 }
@@ -4020,6 +4257,10 @@ latest_version = "1.2.0"
     .unwrap();
     let err = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_freshness_failed")
+    );
     assert!(err.message.contains("stale"));
     assert!(!cache.exists());
 }
@@ -4081,6 +4322,10 @@ latest_version = "1.2.0"
     .unwrap();
     let err = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_freshness_failed")
+    );
     assert!(err.message.contains("stale"));
     assert!(!cache.exists());
 }

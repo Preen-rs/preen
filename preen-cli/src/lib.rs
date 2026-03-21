@@ -5383,6 +5383,14 @@ fn map_install_error_with_detail_code(
     fallback_kind: CliErrorKind,
     detail_code: &str,
 ) -> String {
+    map_error_with_detail_code(message, fallback_kind, detail_code)
+}
+
+fn map_error_with_detail_code(
+    message: String,
+    fallback_kind: CliErrorKind,
+    detail_code: &str,
+) -> String {
     let (kind_raw, _, plain_message) = parse_error_metadata(&message);
     let kind = CliErrorKind::from_str(&kind_raw).unwrap_or(fallback_kind);
     err_code(kind, detail_code, plain_message)
@@ -6493,8 +6501,9 @@ fn update_registry_index(
     let source = match source {
         Some(value) => value,
         None => std::env::var("PREEN_REGISTRY_SOURCE").map_err(|_| {
-            err(
+            err_code(
                 CliErrorKind::Validation,
+                "registry_source_missing",
                 "missing registry source; pass --source or set PREEN_REGISTRY_SOURCE",
             )
         })?,
@@ -6515,8 +6524,16 @@ fn update_registry_index(
             .unwrap_or_else(|_| REGISTRY_ALLOWED_ISSUER.to_string()),
     };
     validate_registry_trust_inputs(&identity, &issuer)?;
-    let content = read_registry_source(&source)?;
-    let signature = read_registry_source(&signature_source)?;
+    let content = read_registry_source_with_detail_code(
+        &source,
+        "registry_source_fetch_failed",
+        "registry_source_read_failed",
+    )?;
+    let signature = read_registry_source_with_detail_code(
+        &signature_source,
+        "registry_signature_fetch_failed",
+        "registry_signature_read_failed",
+    )?;
     verify_registry_index_signature(
         content.as_bytes().to_vec(),
         signature,
@@ -6525,16 +6542,20 @@ fn update_registry_index(
         verifier,
     )?;
     let index = content.parse::<RegistryIndex>().map_err(|e| {
-        err(
+        err_code(
             CliErrorKind::Validation,
+            "registry_index_parse_failed",
             format!("registry index parse failed: {e:?}"),
         )
     })?;
     let stale_mode = effective_registry_stale_mode(strict)?;
     let max_age_days = registry_max_age_days()?;
-    check_registry_freshness(index.generated_at.as_deref(), stale_mode, max_age_days)?;
+    check_registry_freshness(index.generated_at.as_deref(), stale_mode, max_age_days).map_err(
+        |e| map_error_with_detail_code(e, CliErrorKind::Validation, "registry_freshness_failed"),
+    )?;
     let path = registry_index_path()?;
-    let backup_path = write_registry_index_with_backup(&path, &content)?;
+    let backup_path = write_registry_index_with_backup(&path, &content)
+        .map_err(|e| map_error_with_detail_code(e, CliErrorKind::Io, "registry_write_failed"))?;
     if json {
         println!(
             "{}",
@@ -6718,8 +6739,9 @@ fn verify_registry_index_signature(
         expected_issuer: Some(issuer.to_string()),
     };
     preen_core::plugin::verify_with_policy(verifier, &policy, input).map_err(|verify_err| {
-        err(
+        err_code(
             CliErrorKind::Verification,
+            "registry_signature_verify_failed",
             format!("registry signature verification failed: {verify_err:?}"),
         )
     })?;
@@ -6767,10 +6789,36 @@ fn read_registry_source(source: &str) -> Result<String, String> {
         .map_err(|e| err_with(CliErrorKind::Io, "registry source read failed", e))
 }
 
+fn is_remote_registry_source(source: &str) -> bool {
+    source.starts_with("http://") || source.starts_with("https://")
+}
+
+fn read_registry_source_with_detail_code(
+    source: &str,
+    remote_detail_code: &str,
+    local_detail_code: &str,
+) -> Result<String, String> {
+    let detail_code = registry_source_detail_code(source, remote_detail_code, local_detail_code);
+    read_registry_source(source)
+        .map_err(|e| map_error_with_detail_code(e, CliErrorKind::Network, detail_code))
+}
+
+fn registry_source_detail_code<'a>(
+    source: &str,
+    remote_detail_code: &'a str,
+    local_detail_code: &'a str,
+) -> &'a str {
+    if is_remote_registry_source(source) {
+        return remote_detail_code;
+    }
+    local_detail_code
+}
+
 fn validate_registry_trust_inputs(identity: &str, issuer: &str) -> Result<(), String> {
     if !identity.starts_with(REGISTRY_ALLOWED_IDENTITY_PREFIX) {
-        return Err(err(
+        return Err(err_code(
             CliErrorKind::Trust,
+            "registry_identity_invalid",
             format!(
                 "registry identity must start with {}",
                 REGISTRY_ALLOWED_IDENTITY_PREFIX
@@ -6778,8 +6826,9 @@ fn validate_registry_trust_inputs(identity: &str, issuer: &str) -> Result<(), St
         ));
     }
     if issuer != REGISTRY_ALLOWED_ISSUER {
-        return Err(err(
+        return Err(err_code(
             CliErrorKind::Trust,
+            "registry_issuer_invalid",
             format!("registry issuer must be {}", REGISTRY_ALLOWED_ISSUER),
         ));
     }
@@ -6952,6 +7001,22 @@ pub fn search_registry_for_test(
 
 pub fn default_signature_source_for_test(source: &str) -> String {
     default_signature_source(source)
+}
+
+pub fn registry_source_detail_code_for_test(
+    source: &str,
+    remote_detail_code: &str,
+    local_detail_code: &str,
+) -> String {
+    registry_source_detail_code(source, remote_detail_code, local_detail_code).to_string()
+}
+
+pub fn map_error_with_detail_code_for_test(
+    message: &str,
+    fallback_kind: CliErrorKind,
+    detail_code: &str,
+) -> String {
+    map_error_with_detail_code(message.to_string(), fallback_kind, detail_code)
 }
 
 pub fn progress_line_for_test(command: &str, stage: &str, subject: &str) -> String {

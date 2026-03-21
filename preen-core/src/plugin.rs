@@ -332,6 +332,44 @@ pub fn plugin_failure_hint_from_detail_code(code: &str) -> PluginFailureHint {
             action: "validate_git_url_and_pinned_rev",
             priority: 2,
         },
+        "registry_source_missing" => PluginFailureHint {
+            code: "invalid_spec",
+            action: "set_registry_source_or_pass_source_flag",
+            priority: 2,
+        },
+        "registry_source_fetch_failed"
+        | "registry_signature_fetch_failed"
+        | "registry_source_read_failed"
+        | "registry_signature_read_failed" => PluginFailureHint {
+            code: "registry_or_source_resolve_failed",
+            action: "refresh_registry_or_validate_pack_id_and_version",
+            priority: 2,
+        },
+        "registry_identity_invalid" | "registry_issuer_invalid" => PluginFailureHint {
+            code: "trust_or_signature_failed",
+            action: "check_sigstore_identity_and_trust_policy",
+            priority: 1,
+        },
+        "registry_signature_verify_failed" => PluginFailureHint {
+            code: "trust_or_signature_failed",
+            action: "check_sigstore_identity_and_trust_policy",
+            priority: 0,
+        },
+        "registry_index_parse_failed" => PluginFailureHint {
+            code: "pack_load_failed",
+            action: "fix_registry_index_format_and_retry",
+            priority: 2,
+        },
+        "registry_freshness_failed" => PluginFailureHint {
+            code: "aggregate_failed",
+            action: "refresh_registry_or_adjust_staleness_policy",
+            priority: 2,
+        },
+        "registry_write_failed" => PluginFailureHint {
+            code: "aggregate_failed",
+            action: "check_registry_cache_permissions_and_retry",
+            priority: 2,
+        },
         "preflight_pack_load_failed" | "install_pack_load_failed" | "verify_pack_load_failed" => {
             PluginFailureHint {
                 code: "pack_load_failed",
@@ -490,6 +528,9 @@ pub fn plugin_failure_hint_message(code: &str, language: &str) -> String {
             rust_i18n::t!("plugin.hints.signature_hash_drift", locale = locale).to_string()
         }
         "version_drift" => rust_i18n::t!("plugin.hints.version_drift", locale = locale).to_string(),
+        "registry_or_source_resolve_failed" => {
+            rust_i18n::t!("plugin.hints.invalid_spec", locale = locale).to_string()
+        }
         _ => rust_i18n::t!("plugin.hints.unknown_failure", locale = locale).to_string(),
     }
 }
