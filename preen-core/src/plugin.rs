@@ -731,6 +731,7 @@ pub struct PluginPreflightReport {
     pub action_api_verified: bool,
     pub os_target_verified: bool,
     pub checks: Vec<PluginCheckStatus>,
+    pub suggested_actions: Vec<String>,
     pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail_code: Option<String>,
@@ -769,6 +770,7 @@ pub struct PluginTestReport {
     pub action_api_verified: bool,
     pub os_target_verified: bool,
     pub checks: Vec<PluginCheckStatus>,
+    pub suggested_actions: Vec<String>,
     pub duration_ms: u64,
     pub drifts: Vec<PluginTestDrift>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -810,6 +812,7 @@ pub struct PluginTestSpecReport {
     pub action_api_verified: bool,
     pub os_target_verified: bool,
     pub checks: Vec<PluginCheckStatus>,
+    pub suggested_actions: Vec<String>,
     pub duration_ms: u64,
 }
 

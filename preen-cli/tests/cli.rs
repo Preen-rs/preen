@@ -549,6 +549,7 @@ fn plugin_test_json_for_test_contains_fields() {
     assert!(parsed["data"]["version_matches_lock"].as_bool().unwrap());
     assert!(parsed["data"]["signature_verified"].as_bool().unwrap());
     assert!(parsed["data"]["checks"].as_array().is_some());
+    assert!(parsed["data"]["suggested_actions"].as_array().is_some());
     assert!(parsed["data"]["duration_ms"].as_u64().is_some());
     assert!(parsed["data"]["drifts"].as_array().unwrap().is_empty());
 }
@@ -580,6 +581,7 @@ fn plugin_test_spec_json_for_test_contains_fields() {
     assert_eq!(parsed["data"]["pack_id"].as_str().unwrap(), "test.pack");
     assert!(parsed["data"]["overall_passed"].as_bool().unwrap());
     assert!(parsed["data"]["checks"].as_array().is_some());
+    assert!(parsed["data"]["suggested_actions"].as_array().is_some());
     assert!(parsed["data"]["duration_ms"].as_u64().is_some());
 }
 
@@ -596,6 +598,7 @@ fn plugin_preflight_json_for_test_contains_fields() {
     assert_eq!(parsed["data"]["pack_id"].as_str().unwrap(), "test.pack");
     assert!(parsed["data"]["signature_verified"].as_bool().unwrap());
     assert!(parsed["data"]["checks"].as_array().is_some());
+    assert!(parsed["data"]["suggested_actions"].as_array().is_some());
     assert!(parsed["data"]["duration_ms"].as_u64().is_some());
 }
 
@@ -747,6 +750,7 @@ fn json_envelopes_have_exact_expected_data_keys() {
             "action_api_verified".to_string(),
             "os_target_verified".to_string(),
             "checks".to_string(),
+            "suggested_actions".to_string(),
             "duration_ms".to_string(),
             "drifts".to_string(),
         ])
@@ -817,6 +821,7 @@ fn json_envelopes_have_exact_expected_data_keys() {
             "action_api_verified".to_string(),
             "os_target_verified".to_string(),
             "checks".to_string(),
+            "suggested_actions".to_string(),
             "duration_ms".to_string(),
         ])
     );

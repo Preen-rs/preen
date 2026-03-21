@@ -5081,9 +5081,17 @@ fn preflight_single(
         action_api_verified: true,
         os_target_verified: true,
         checks: build_plugin_checks(true, true, true, true, true, None),
+        suggested_actions: plugin_preflight_success_actions(spec),
         duration_ms: started.elapsed().as_millis() as u64,
         detail_code: None,
     })
+}
+
+fn plugin_preflight_success_actions(spec: &str) -> Vec<String> {
+    vec![
+        format!("preen plugin test {spec}"),
+        format!("preen plugin install {spec}"),
+    ]
 }
 
 fn print_preflight_output(out: &PluginPreflightOutput) {
@@ -5098,6 +5106,12 @@ fn print_preflight_output(out: &PluginPreflightOutput) {
     println!("duration_ms: {}", out.duration_ms);
     let language = cli_language();
     print_check_rows(&out.checks, &language);
+    if !out.suggested_actions.is_empty() {
+        println!("suggested_actions: count={}", out.suggested_actions.len());
+        for action in &out.suggested_actions {
+            println!("suggested_action: {action}");
+        }
+    }
 }
 
 fn install_plugin_internal_with_verifier(
@@ -5357,6 +5371,7 @@ fn test_plugin_spec(
         action_api_verified: out.action_api_verified,
         os_target_verified: out.os_target_verified,
         checks: out.checks,
+        suggested_actions: out.suggested_actions,
         duration_ms: out.duration_ms,
     };
     if json {
@@ -5377,6 +5392,12 @@ fn test_plugin_spec(
     println!("duration_ms: {}", test.duration_ms);
     let language = cli_language();
     print_check_rows(&test.checks, &language);
+    if !test.suggested_actions.is_empty() {
+        println!("suggested_actions: count={}", test.suggested_actions.len());
+        for action in &test.suggested_actions {
+            println!("suggested_action: {action}");
+        }
+    }
     Ok(())
 }
 
@@ -5576,6 +5597,20 @@ fn format_plugin_test_output(report: &PluginTestOutput, language: &str) -> Strin
         )
         .expect("writing to String should be infallible");
     }
+    if report.suggested_actions.is_empty() {
+        writeln!(&mut out, "suggested_actions: []").expect("writing to String should be infallible");
+    } else {
+        writeln!(
+            &mut out,
+            "suggested_actions: count={}",
+            report.suggested_actions.len()
+        )
+        .expect("writing to String should be infallible");
+        for action in &report.suggested_actions {
+            writeln!(&mut out, "suggested_action: {action}")
+                .expect("writing to String should be infallible");
+        }
+    }
     if report.drifts.is_empty() {
         writeln!(
             &mut out,
@@ -5715,6 +5750,43 @@ fn parse_error_metadata(message: &str) -> (String, Option<String>, String) {
     )
 }
 
+fn plugin_test_suggested_actions(
+    pack_id: &str,
+    overall_passed: bool,
+    detail_code: Option<&str>,
+) -> Vec<String> {
+    let mut actions = Vec::new();
+    if overall_passed {
+        push_unique_action(&mut actions, &format!("preen plugin verify {pack_id}"));
+        push_unique_action(&mut actions, &format!("preen plugin info {pack_id}"));
+        push_unique_action(&mut actions, &format!("preen plugin update {pack_id}"));
+        return actions;
+    }
+
+    push_unique_action(&mut actions, &format!("preen plugin test {pack_id}"));
+    push_unique_action(&mut actions, &format!("preen plugin verify {pack_id}"));
+    push_unique_action(&mut actions, &format!("preen plugin info {pack_id}"));
+    if let Some(code) = detail_code {
+        match code {
+            "test_signature_or_trust_failed" | "verify_signature_or_trust_failed" => {
+                push_unique_action(&mut actions, "preen plugin registry-update");
+                push_unique_action(&mut actions, "preen plugin preflight --all");
+            }
+            "test_resolved_rev_drift"
+            | "test_manifest_hash_drift"
+            | "test_signature_hash_drift"
+            | "test_version_drift" => {
+                push_unique_action(&mut actions, &format!("preen plugin update {pack_id}"));
+            }
+            "test_core_compat_failed" | "test_action_api_unsupported" => {
+                push_unique_action(&mut actions, "preen update");
+            }
+            _ => {}
+        }
+    }
+    actions
+}
+
 fn plugin_checks(
     pack_id: &str,
     lockfile: Option<PathBuf>,
@@ -5829,6 +5901,7 @@ fn plugin_checks_in_dir(
         action_api_verified: true,
         os_target_verified: true,
         checks: build_plugin_checks(true, true, true, true, true, Some(true)),
+        suggested_actions: plugin_test_suggested_actions(pack_id, true, None),
         duration_ms: started.elapsed().as_millis() as u64,
         drifts: Vec::new(),
         detail_code: None,
@@ -5960,6 +6033,8 @@ fn plugin_test_report_in_dir(
     } else {
         plugin_primary_detail_code_from_drifts(&drifts).map(ToOwned::to_owned)
     };
+    let suggested_actions =
+        plugin_test_suggested_actions(&plugin.pack_id, overall_passed, detail_code.as_deref());
 
     Ok(PluginTestOutput {
         pack_id: plugin.pack_id.clone(),
@@ -5981,6 +6056,7 @@ fn plugin_test_report_in_dir(
             os_target_verified,
             Some(version_matches_lock),
         ),
+        suggested_actions,
         duration_ms: started.elapsed().as_millis() as u64,
         drifts,
         detail_code,
@@ -6678,6 +6754,7 @@ pub fn plugin_verify_text_for_test(pack_id: &str, language: &str) -> String {
             action_api_verified: true,
             os_target_verified: true,
             checks: build_plugin_checks(true, true, true, true, true, Some(true)),
+            suggested_actions: plugin_test_suggested_actions(pack_id, true, None),
             duration_ms: 0,
             drifts: Vec::new(),
             detail_code: None,
@@ -6751,6 +6828,7 @@ pub fn plugin_test_json_for_test(pack_id: &str) -> Result<String, String> {
         action_api_verified: true,
         os_target_verified: true,
         checks: build_plugin_checks(true, true, true, true, true, Some(true)),
+        suggested_actions: plugin_test_suggested_actions(pack_id, true, None),
         duration_ms: 0,
         drifts: Vec::new(),
         detail_code: None,
@@ -6784,6 +6862,7 @@ pub fn plugin_test_spec_json_for_test(spec: &str, pack_id: &str) -> Result<Strin
         action_api_verified: true,
         os_target_verified: true,
         checks: build_plugin_checks(true, true, true, true, true, None),
+        suggested_actions: plugin_preflight_success_actions(spec),
         duration_ms: 0,
     })
 }
@@ -6803,6 +6882,7 @@ pub fn plugin_preflight_json_for_test(spec: &str, pack_id: &str) -> Result<Strin
         action_api_verified: true,
         os_target_verified: true,
         checks: build_plugin_checks(true, true, true, true, true, None),
+        suggested_actions: plugin_preflight_success_actions(spec),
         duration_ms: 0,
         detail_code: None,
     })
@@ -6972,6 +7052,7 @@ pub fn primary_hint_for_drift_fields_for_test(fields: &[&str]) -> Option<(String
         action_api_verified: true,
         os_target_verified: true,
         checks: build_plugin_checks(true, true, true, true, true, Some(true)),
+        suggested_actions: plugin_test_suggested_actions("test.pack", drifts.is_empty(), None),
         duration_ms: 0,
         drifts,
         detail_code: None,
