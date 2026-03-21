@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::cmp::Ordering;
 use std::fmt::{Display, Write as FmtWrite};
 use std::fs;
 use std::io::IsTerminal;
@@ -125,8 +126,11 @@ struct PluginInfoOutput {
     pack_id: String,
     version: String,
     rev: String,
+    resolved_rev: String,
     source: String,
     url: String,
+    installed_path: String,
+    installed_path_exists: bool,
     manifest_hash: String,
     signature: String,
     trusted_identity: String,
@@ -144,6 +148,7 @@ struct PluginListItemOutput {
     pack_id: String,
     version: String,
     rev: String,
+    resolved_rev: String,
     source: String,
 }
 
@@ -566,7 +571,21 @@ fn run_plugin(cmd: &PluginCommand, verifier: &dyn SignatureVerifier) -> Result<(
             *verbose,
             verifier,
         ),
-        PluginCommand::List { lockfile, json } => list_plugins(lockfile.clone(), *json),
+        PluginCommand::List {
+            lockfile,
+            query,
+            source,
+            sort,
+            desc,
+            json,
+        } => list_plugins(
+            lockfile.clone(),
+            query.as_deref(),
+            source.as_deref(),
+            *sort,
+            *desc,
+            *json,
+        ),
         PluginCommand::Info {
             pack_id,
             lockfile,
@@ -602,7 +621,14 @@ fn run_plugin(cmd: &PluginCommand, verifier: &dyn SignatureVerifier) -> Result<(
             lockfile,
             json,
         } => remove_plugin(pack_id, lockfile.clone(), *json),
-        PluginCommand::Search { query, json } => search_registry(query.clone(), *json),
+        PluginCommand::Search {
+            query,
+            sort,
+            desc,
+            offset,
+            limit,
+            json,
+        } => search_registry(query.clone(), *sort, *desc, *offset, *limit, *json),
         PluginCommand::RegistryUpdate {
             source,
             signature_source,
@@ -760,6 +786,19 @@ enum CompletionShellArg {
     Bash,
     Zsh,
     Fish,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum PluginListSortArg {
+    PackId,
+    Version,
+    Source,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum RegistrySearchSortArg {
+    PackId,
+    Version,
 }
 
 #[derive(Default)]
@@ -5402,13 +5441,21 @@ fn map_error_with_detail_code(
     err_code(kind, detail_code, plain_message)
 }
 
-fn list_plugins(lockfile: Option<PathBuf>, json: bool) -> Result<(), String> {
+fn list_plugins(
+    lockfile: Option<PathBuf>,
+    query: Option<&str>,
+    source: Option<&str>,
+    sort: PluginListSortArg,
+    desc: bool,
+    json: bool,
+) -> Result<(), String> {
     let lock = load_lockfile(lockfile.as_deref())?;
+    let rows = filter_sort_plugins(lock.plugins, query, source, sort, desc);
     if json {
-        println!("{}", plugin_list_json(&lock.plugins)?);
+        println!("{}", plugin_list_json(&rows)?);
         return Ok(());
     }
-    for plugin in lock.plugins {
+    for plugin in rows {
         println!("{} {} {}", plugin.pack_id, plugin.version, plugin.rev);
     }
     Ok(())
@@ -5428,8 +5475,18 @@ fn info_plugin(pack_id: &str, lockfile: Option<PathBuf>, json: bool) -> Result<(
     println!("pack_id: {}", plugin.pack_id);
     println!("version: {}", plugin.version);
     println!("rev: {}", plugin.rev);
+    println!(
+        "resolved_rev: {}",
+        plugin
+            .resolved_rev
+            .as_deref()
+            .unwrap_or(plugin.rev.as_str())
+    );
     println!("source: {}", plugin.source);
     println!("url: {}", plugin.url);
+    let installed_path = plugin_install_path(&plugin.pack_id)?;
+    println!("installed_path: {}", installed_path.display());
+    println!("installed_path_exists: {}", installed_path.exists());
     println!("manifest_hash: {}", plugin.manifest_hash);
     println!("signature: {}", plugin.signature);
     println!("trusted_identity: {}", plugin.trusted_identity);
@@ -6476,7 +6533,14 @@ fn resolve_registry_plugin(pack_id: &str, version: &str) -> Result<ResolvedRegis
     })
 }
 
-fn search_registry(query: Option<String>, json: bool) -> Result<(), String> {
+fn search_registry(
+    query: Option<String>,
+    sort: RegistrySearchSortArg,
+    desc: bool,
+    offset: usize,
+    limit: Option<usize>,
+    json: bool,
+) -> Result<(), String> {
     let path = registry_index_path()?;
     let content = fs::read_to_string(&path).map_err(|e| {
         err(
@@ -6484,7 +6548,14 @@ fn search_registry(query: Option<String>, json: bool) -> Result<(), String> {
             format!("registry index read failed ({}): {}", path.display(), e),
         )
     })?;
-    let entries = search_registry_entries(&content, query.as_deref())?;
+    let entries = search_registry_entries_with_options(
+        &content,
+        query.as_deref(),
+        sort,
+        desc,
+        offset,
+        limit,
+    )?;
     if json {
         println!("{}", registry_search_json(&entries)?);
         return Ok(());
@@ -6841,6 +6912,58 @@ fn validate_registry_trust_inputs(identity: &str, issuer: &str) -> Result<(), St
     Ok(())
 }
 
+fn filter_sort_plugins(
+    mut plugins: Vec<LockedPlugin>,
+    query: Option<&str>,
+    source: Option<&str>,
+    sort: PluginListSortArg,
+    desc: bool,
+) -> Vec<LockedPlugin> {
+    if let Some(query) = query {
+        let needle = query.to_lowercase();
+        plugins.retain(|plugin| {
+            let haystack = format!(
+                "{} {} {} {}",
+                plugin.pack_id.to_lowercase(),
+                plugin.version.to_lowercase(),
+                plugin.source.to_lowercase(),
+                plugin.url.to_lowercase()
+            );
+            haystack.contains(&needle)
+        });
+    }
+    if let Some(source) = source {
+        let source = source.to_lowercase();
+        plugins.retain(|plugin| plugin.source.to_lowercase() == source);
+    }
+    plugins.sort_by(|left, right| {
+        let order = match sort {
+            PluginListSortArg::PackId => left
+                .pack_id
+                .to_lowercase()
+                .cmp(&right.pack_id.to_lowercase()),
+            PluginListSortArg::Version => left
+                .version
+                .to_lowercase()
+                .cmp(&right.version.to_lowercase()),
+            PluginListSortArg::Source => {
+                left.source.to_lowercase().cmp(&right.source.to_lowercase())
+            }
+        };
+        if order == Ordering::Equal {
+            left.pack_id
+                .to_lowercase()
+                .cmp(&right.pack_id.to_lowercase())
+        } else {
+            order
+        }
+    });
+    if desc {
+        plugins.reverse();
+    }
+    plugins
+}
+
 fn search_registry_entries(
     index_toml: &str,
     query: Option<&str>,
@@ -6874,17 +6997,70 @@ fn search_registry_entries(
     Ok(rows)
 }
 
+fn search_registry_entries_with_options(
+    index_toml: &str,
+    query: Option<&str>,
+    sort: RegistrySearchSortArg,
+    desc: bool,
+    offset: usize,
+    limit: Option<usize>,
+) -> Result<Vec<RegistrySearchOutput>, String> {
+    let mut entries = search_registry_entries(index_toml, query)?;
+    entries.sort_by(|left, right| {
+        let order = match sort {
+            RegistrySearchSortArg::PackId => left
+                .pack_id
+                .to_lowercase()
+                .cmp(&right.pack_id.to_lowercase()),
+            RegistrySearchSortArg::Version => left
+                .latest_version
+                .to_lowercase()
+                .cmp(&right.latest_version.to_lowercase()),
+        };
+        if order == Ordering::Equal {
+            left.pack_id
+                .to_lowercase()
+                .cmp(&right.pack_id.to_lowercase())
+        } else {
+            order
+        }
+    });
+    if desc {
+        entries.reverse();
+    }
+    let entries = if offset >= entries.len() {
+        Vec::new()
+    } else {
+        entries.into_iter().skip(offset).collect::<Vec<_>>()
+    };
+    if let Some(limit) = limit {
+        return Ok(entries.into_iter().take(limit).collect());
+    }
+    Ok(entries)
+}
+
 fn registry_search_json(entries: &[RegistrySearchOutput]) -> Result<String, String> {
     to_json_envelope("plugin.search", entries)
 }
 
+fn plugin_install_path(pack_id: &str) -> Result<PathBuf, String> {
+    Ok(preen_state_dir()?.join("plugins").join(pack_id))
+}
+
 fn plugin_info_json(plugin: &LockedPlugin) -> Result<String, String> {
+    let installed_path = plugin_install_path(&plugin.pack_id)?;
     let out = PluginInfoOutput {
         pack_id: plugin.pack_id.clone(),
         version: plugin.version.clone(),
         rev: plugin.rev.clone(),
+        resolved_rev: plugin
+            .resolved_rev
+            .clone()
+            .unwrap_or_else(|| plugin.rev.clone()),
         source: plugin.source.clone(),
         url: plugin.url.clone(),
+        installed_path: installed_path.display().to_string(),
+        installed_path_exists: installed_path.exists(),
         manifest_hash: plugin.manifest_hash.clone(),
         signature: plugin.signature.clone(),
         trusted_identity: plugin.trusted_identity.clone(),
@@ -6899,6 +7075,10 @@ fn plugin_list_json(plugins: &[LockedPlugin]) -> Result<String, String> {
             pack_id: plugin.pack_id.clone(),
             version: plugin.version.clone(),
             rev: plugin.rev.clone(),
+            resolved_rev: plugin
+                .resolved_rev
+                .clone()
+                .unwrap_or_else(|| plugin.rev.clone()),
             source: plugin.source.clone(),
         });
     }
@@ -7018,6 +7198,61 @@ pub fn search_registry_for_test(
         ));
     }
     Ok(rows)
+}
+
+pub fn search_registry_with_options_for_test(
+    index_toml: &str,
+    query: Option<&str>,
+    sort: &str,
+    desc: bool,
+    offset: usize,
+    limit: Option<usize>,
+) -> Result<Vec<String>, String> {
+    let sort = match sort {
+        "pack_id" => RegistrySearchSortArg::PackId,
+        "version" => RegistrySearchSortArg::Version,
+        other => {
+            return Err(err(
+                CliErrorKind::Validation,
+                format!("unsupported search sort for test: {other}"),
+            ));
+        }
+    };
+    let entries =
+        search_registry_entries_with_options(index_toml, query, sort, desc, offset, limit)?;
+    let mut rows = Vec::with_capacity(entries.len());
+    for entry in entries {
+        rows.push(format!(
+            "{} {} {}",
+            entry.pack_id, entry.latest_version, entry.description
+        ));
+    }
+    Ok(rows)
+}
+
+pub fn list_plugins_with_options_for_test(
+    plugins: &[LockedPlugin],
+    query: Option<&str>,
+    source: Option<&str>,
+    sort: &str,
+    desc: bool,
+) -> Result<Vec<String>, String> {
+    let sort = match sort {
+        "pack_id" => PluginListSortArg::PackId,
+        "version" => PluginListSortArg::Version,
+        "source" => PluginListSortArg::Source,
+        other => {
+            return Err(err(
+                CliErrorKind::Validation,
+                format!("unsupported list sort for test: {other}"),
+            ));
+        }
+    };
+    let rows = filter_sort_plugins(plugins.to_vec(), query, source, sort, desc);
+    Ok(rows
+        .into_iter()
+        .map(|plugin| format!("{} {} {}", plugin.pack_id, plugin.version, plugin.rev))
+        .collect())
 }
 
 pub fn default_signature_source_for_test(source: &str) -> String {
@@ -8478,6 +8713,14 @@ enum PluginCommand {
         #[arg(long)]
         lockfile: Option<PathBuf>,
         #[arg(long)]
+        query: Option<String>,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long, value_enum, default_value_t = PluginListSortArg::PackId)]
+        sort: PluginListSortArg,
+        #[arg(long)]
+        desc: bool,
+        #[arg(long)]
         json: bool,
     },
     Info {
@@ -8523,6 +8766,14 @@ enum PluginCommand {
     },
     Search {
         query: Option<String>,
+        #[arg(long, value_enum, default_value_t = RegistrySearchSortArg::PackId)]
+        sort: RegistrySearchSortArg,
+        #[arg(long)]
+        desc: bool,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long)]
+        limit: Option<usize>,
         #[arg(long)]
         json: bool,
     },

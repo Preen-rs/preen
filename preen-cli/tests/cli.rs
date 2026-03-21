@@ -15,26 +15,26 @@ use preen_cli::{
     enforce_clean_scope_for_test, enforce_installer_scope_for_test,
     enforce_uninstall_scope_for_test, error_json_for_test, format_bytes_for_test,
     hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
-    installer_output_for_test, installer_runtime_error_detail_code_for_test, load_lockfile_at,
-    map_error_with_detail_code_for_test, optimize_output_for_test,
-    optimize_output_with_executor_for_test, optimize_runtime_error_detail_code_for_test,
-    parse_install_spec, parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
-    plugin_install_text_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
-    plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
-    plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
-    plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
-    plugin_update_json_for_test, plugin_update_text_for_test, plugin_verify_for_test,
-    plugin_verify_json_for_test, plugin_verify_text_for_test,
+    installer_output_for_test, installer_runtime_error_detail_code_for_test,
+    list_plugins_with_options_for_test, load_lockfile_at, map_error_with_detail_code_for_test,
+    optimize_output_for_test, optimize_output_with_executor_for_test,
+    optimize_runtime_error_detail_code_for_test, parse_install_spec, parse_plugin_spec,
+    plugin_info_json_for_test, plugin_install_json_for_test, plugin_install_text_for_test,
+    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
+    plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
+    plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
+    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
+    plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
     registry_backup_path_for_test, registry_source_detail_code_for_test,
     registry_update_json_for_test, remove_output_for_test, resolve_registry_for_test, run_typed,
     run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
     save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
-    status_output_for_test, status_should_emit_json_for_test, test_failure_row_for_test,
-    touchid_output_for_test, trust_policy_from_str, uninstall_output_for_test,
-    uninstall_runtime_error_detail_code_for_test, update_output_for_test,
-    validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
+    search_registry_with_options_for_test, status_output_for_test,
+    status_should_emit_json_for_test, test_failure_row_for_test, touchid_output_for_test,
+    trust_policy_from_str, uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
+    update_output_for_test, validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
@@ -439,6 +439,41 @@ latest_version = "0.3.0"
 }
 
 #[test]
+fn search_registry_with_options_for_test_sorts_and_pages() {
+    let index = r#"
+schema_version = 1
+
+[[entries]]
+pack_id = "preen-rs.b"
+name = "B"
+description = "B pack"
+repo_url = "https://github.com/Preen-rs/preen-rulepack-b"
+latest_version = "1.0.0"
+  [[entries.versions]]
+  version = "1.0.0"
+  rev = "bbb"
+
+[[entries]]
+pack_id = "preen-rs.a"
+name = "A"
+description = "A pack"
+repo_url = "https://github.com/Preen-rs/preen-rulepack-a"
+latest_version = "2.0.0"
+  [[entries.versions]]
+  version = "2.0.0"
+  rev = "aaa"
+"#;
+    let rows =
+        search_registry_with_options_for_test(index, None, "pack_id", false, 0, None).unwrap();
+    assert_eq!(rows[0], "preen-rs.a 2.0.0 A pack");
+    assert_eq!(rows[1], "preen-rs.b 1.0.0 B pack");
+
+    let rows =
+        search_registry_with_options_for_test(index, None, "version", true, 0, Some(1)).unwrap();
+    assert_eq!(rows, vec!["preen-rs.a 2.0.0 A pack".to_string()]);
+}
+
+#[test]
 fn search_registry_json_for_test_filters() {
     let index = r#"
 schema_version = 1
@@ -516,6 +551,9 @@ fn plugin_info_json_for_test_contains_fields() {
     assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.info");
     assert_eq!(parsed["data"]["pack_id"].as_str().unwrap(), "test.pack");
     assert_eq!(parsed["data"]["source"].as_str().unwrap(), "git");
+    assert!(parsed["data"]["resolved_rev"].as_str().is_some());
+    assert!(parsed["data"]["installed_path"].as_str().is_some());
+    assert!(parsed["data"]["installed_path_exists"].as_bool().is_some());
 }
 
 #[test]
@@ -537,6 +575,48 @@ fn plugin_list_json_for_test_contains_fields() {
     assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.list");
     assert_eq!(parsed["data"].as_array().unwrap().len(), 1);
     assert_eq!(parsed["data"][0]["pack_id"].as_str().unwrap(), "test.pack");
+    assert!(parsed["data"][0]["resolved_rev"].as_str().is_some());
+}
+
+#[test]
+fn list_plugins_with_options_for_test_filters_and_sorts() {
+    let plugins = vec![
+        LockedPlugin {
+            pack_id: "preen-rs.b".to_string(),
+            source: "git".to_string(),
+            url: "https://example.com/b".to_string(),
+            rev: "bbb".to_string(),
+            resolved_rev: Some("bbb".to_string()),
+            version: "1.0.0".to_string(),
+            manifest_hash: "sha256:b".to_string(),
+            signature: "sha256:b".to_string(),
+            trusted_identity: "https://github.com/Preen-rs/test".to_string(),
+        },
+        LockedPlugin {
+            pack_id: "preen-rs.a".to_string(),
+            source: "registry".to_string(),
+            url: "https://example.com/a".to_string(),
+            rev: "aaa".to_string(),
+            resolved_rev: Some("aaa".to_string()),
+            version: "2.0.0".to_string(),
+            manifest_hash: "sha256:a".to_string(),
+            signature: "sha256:a".to_string(),
+            trusted_identity: "https://github.com/Preen-rs/test".to_string(),
+        },
+    ];
+    let rows = list_plugins_with_options_for_test(&plugins, None, None, "pack_id", false).unwrap();
+    assert_eq!(rows[0], "preen-rs.a 2.0.0 aaa");
+    assert_eq!(rows[1], "preen-rs.b 1.0.0 bbb");
+
+    let rows = list_plugins_with_options_for_test(
+        &plugins,
+        Some("preen-rs"),
+        Some("registry"),
+        "version",
+        true,
+    )
+    .unwrap();
+    assert_eq!(rows, vec!["preen-rs.a 2.0.0 aaa".to_string()]);
 }
 
 #[test]
@@ -2280,6 +2360,24 @@ fn plugin_verbose_option_supports_single_and_all_flows() {
     );
     assert!(Cli::try_parse_from(["preen", "plugin", "preflight", "--all", "--verbose"]).is_ok());
     assert!(Cli::try_parse_from(["preen", "plugin", "test", "--all", "--verbose"]).is_ok());
+}
+
+#[test]
+fn plugin_list_and_search_option_matrix_parses() {
+    assert!(
+        Cli::try_parse_from([
+            "preen", "plugin", "list", "--query", "homebrew", "--source", "registry", "--sort",
+            "version", "--desc",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "preen", "plugin", "search", "brew", "--sort", "pack-id", "--offset", "5", "--limit",
+            "10", "--desc",
+        ])
+        .is_ok()
+    );
 }
 
 #[test]
