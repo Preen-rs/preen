@@ -626,9 +626,15 @@ fn plugin_verify_json_for_test_contains_fields() {
     assert_eq!(parsed["schema_version"].as_u64().unwrap(), 1);
     assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.verify");
     assert_eq!(parsed["data"]["pack_id"].as_str().unwrap(), "test.pack");
+    assert!(parsed["data"]["overall_passed"].as_bool().unwrap());
+    assert!(parsed["data"]["version_matches_lock"].as_bool().unwrap());
     assert!(parsed["data"]["manifest_hash_verified"].as_bool().unwrap());
     assert!(parsed["data"]["signature_hash_verified"].as_bool().unwrap());
     assert!(parsed["data"]["resolved_rev_verified"].as_bool().unwrap());
+    assert!(parsed["data"]["checks"].as_array().is_some());
+    assert!(parsed["data"]["suggested_actions"].as_array().is_some());
+    assert!(parsed["data"]["duration_ms"].as_u64().is_some());
+    assert!(parsed["data"]["drifts"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -840,9 +846,15 @@ fn json_envelopes_have_exact_expected_data_keys() {
         verify_keys,
         BTreeSet::from([
             "pack_id".to_string(),
+            "overall_passed".to_string(),
+            "version_matches_lock".to_string(),
             "manifest_hash_verified".to_string(),
             "signature_hash_verified".to_string(),
             "resolved_rev_verified".to_string(),
+            "checks".to_string(),
+            "suggested_actions".to_string(),
+            "duration_ms".to_string(),
+            "drifts".to_string(),
         ])
     );
 

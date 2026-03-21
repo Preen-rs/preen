@@ -155,9 +155,28 @@ struct PluginListItemOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PluginVerifyOutput {
     pack_id: String,
+    overall_passed: bool,
+    version_matches_lock: bool,
     manifest_hash_verified: bool,
     signature_hash_verified: bool,
     resolved_rev_verified: bool,
+    checks: Vec<PluginCheckStatus>,
+    suggested_actions: Vec<String>,
+    duration_ms: u64,
+    drifts: Vec<PluginTestDrift>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_failure: Option<PluginPrimaryFailureOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PluginPrimaryFailureOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail_code: Option<String>,
+    hint_code: String,
+    hint_action: String,
+    hint_message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -5499,21 +5518,30 @@ fn verify_plugin(
     json: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
-    let checks = plugin_checks(pack_id, lockfile, verifier)?;
+    let language = cli_language();
+    let report = plugin_test_report(pack_id, lockfile, verifier)?;
     if json {
         println!(
             "{}",
-            plugin_verify_json(PluginVerifyOutput {
-                pack_id: checks.pack_id,
-                manifest_hash_verified: checks.manifest_hash_verified,
-                signature_hash_verified: checks.signature_hash_verified,
-                resolved_rev_verified: checks.resolved_rev_verified,
-            })?
+            plugin_verify_json(plugin_verify_output_from_report(&report, &language))?
         );
-        return Ok(());
+    } else {
+        print_plugin_verify_output(&report, &language);
     }
-    let language = cli_language();
-    print_plugin_verify_output(&checks, &language);
+    if !report.overall_passed {
+        let detail_code = report
+            .detail_code
+            .clone()
+            .or_else(|| {
+                plugin_primary_detail_code_from_drifts(&report.drifts).map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| "verify_failed".to_string());
+        return Err(err_code(
+            CliErrorKind::Verification,
+            &detail_code,
+            format!("plugin verify failed for {}", report.pack_id),
+        ));
+    }
     Ok(())
 }
 
@@ -5834,11 +5862,61 @@ fn format_plugin_change_output(
     output
 }
 
-fn format_plugin_test_output(report: &PluginTestOutput, language: &str) -> String {
+fn plugin_primary_failure_output(
+    report: &PluginTestOutput,
+    language: &str,
+) -> Option<PluginPrimaryFailureOutput> {
+    if report.overall_passed {
+        return None;
+    }
+    if let Some(detail_code) = report.detail_code.as_deref() {
+        let hint = plugin_failure_hint_from_detail_code(detail_code);
+        return Some(PluginPrimaryFailureOutput {
+            detail_code: Some(detail_code.to_string()),
+            hint_code: hint.code.to_string(),
+            hint_action: hint.action.to_string(),
+            hint_message: plugin_failure_hint_message(hint.code, language),
+        });
+    }
+    plugin_primary_failure_hint_from_drifts(&report.drifts).map(|hint| PluginPrimaryFailureOutput {
+        detail_code: None,
+        hint_code: hint.code.to_string(),
+        hint_action: hint.action.to_string(),
+        hint_message: plugin_failure_hint_message(hint.code, language),
+    })
+}
+
+fn plugin_verify_output_from_report(
+    report: &PluginTestOutput,
+    language: &str,
+) -> PluginVerifyOutput {
+    PluginVerifyOutput {
+        pack_id: report.pack_id.clone(),
+        overall_passed: report.overall_passed,
+        version_matches_lock: report.version_matches_lock,
+        manifest_hash_verified: report.manifest_hash_verified,
+        signature_hash_verified: report.signature_hash_verified,
+        resolved_rev_verified: report.resolved_rev_verified,
+        checks: report.checks.clone(),
+        suggested_actions: report.suggested_actions.clone(),
+        duration_ms: report.duration_ms,
+        drifts: report.drifts.clone(),
+        detail_code: report.detail_code.clone(),
+        primary_failure: plugin_primary_failure_output(report, language),
+    }
+}
+
+fn format_plugin_report_output(
+    kind: &'static str,
+    report: &PluginTestOutput,
+    language: &str,
+    include_suggested_actions: bool,
+) -> String {
     let mut out = String::new();
     writeln!(
         &mut out,
-        "summary: kind=test pack_id={} overall_passed={} duration_ms={} summary_label={}",
+        "summary: kind={} pack_id={} overall_passed={} duration_ms={} summary_label={}",
+        kind,
         report.pack_id,
         report.overall_passed,
         report.duration_ms,
@@ -5868,19 +5946,21 @@ fn format_plugin_test_output(report: &PluginTestOutput, language: &str) -> Strin
         )
         .expect("writing to String should be infallible");
     }
-    if report.suggested_actions.is_empty() {
-        writeln!(&mut out, "suggested_actions: []")
-            .expect("writing to String should be infallible");
-    } else {
-        writeln!(
-            &mut out,
-            "suggested_actions: count={}",
-            report.suggested_actions.len()
-        )
-        .expect("writing to String should be infallible");
-        for action in &report.suggested_actions {
-            writeln!(&mut out, "suggested_action: {action}")
+    if include_suggested_actions {
+        if report.suggested_actions.is_empty() {
+            writeln!(&mut out, "suggested_actions: []")
                 .expect("writing to String should be infallible");
+        } else {
+            writeln!(
+                &mut out,
+                "suggested_actions: count={}",
+                report.suggested_actions.len()
+            )
+            .expect("writing to String should be infallible");
+            for action in &report.suggested_actions {
+                writeln!(&mut out, "suggested_action: {action}")
+                    .expect("writing to String should be infallible");
+            }
         }
     }
     if report.drifts.is_empty() {
@@ -5900,32 +5980,35 @@ fn format_plugin_test_output(report: &PluginTestOutput, language: &str) -> Strin
             .expect("writing to String should be infallible");
         }
     }
-    if !report.overall_passed {
-        if let Some(detail_code) = report.detail_code.as_deref() {
-            let hint = plugin_failure_hint_from_detail_code(detail_code);
+    if let Some(primary_failure) = plugin_primary_failure_output(report, language) {
+        if let Some(detail_code) = primary_failure.detail_code.as_deref() {
             writeln!(
                 &mut out,
                 "primary_failure: detail_code={} hint_code={} hint_action={} hint_message={} label={}",
                 detail_code,
-                hint.code,
-                hint.action,
-                plugin_failure_hint_message(hint.code, language),
+                primary_failure.hint_code,
+                primary_failure.hint_action,
+                primary_failure.hint_message,
                 cli_label(language, "primary_failure")
             )
             .expect("writing to String should be infallible");
-        } else if let Some(hint) = plugin_primary_failure_hint_from_drifts(&report.drifts) {
+        } else {
             writeln!(
                 &mut out,
                 "primary_failure: hint_code={} hint_action={} hint_message={} label={}",
-                hint.code,
-                hint.action,
-                plugin_failure_hint_message(hint.code, language),
+                primary_failure.hint_code,
+                primary_failure.hint_action,
+                primary_failure.hint_message,
                 cli_label(language, "primary_failure")
             )
             .expect("writing to String should be infallible");
         }
     }
     out
+}
+
+fn format_plugin_test_output(report: &PluginTestOutput, language: &str) -> String {
+    format_plugin_report_output("test", report, language, true)
 }
 
 fn format_test_all_output(out: &PluginTestAllOutput, language: &str, verbose: bool) -> String {
@@ -5982,40 +6065,7 @@ fn format_test_all_output(out: &PluginTestAllOutput, language: &str, verbose: bo
 }
 
 fn format_plugin_verify_output(report: &PluginTestOutput, language: &str) -> String {
-    let mut out = String::new();
-    writeln!(
-        &mut out,
-        "summary: kind=verify pack_id={} overall_passed={} duration_ms={} summary_label={}",
-        report.pack_id,
-        report.overall_passed,
-        report.duration_ms,
-        cli_label(language, "summary")
-    )
-    .expect("writing to String should be infallible");
-    writeln!(
-        &mut out,
-        "verify: version_matches_lock={} manifest_hash_verified={} signature_hash_verified={} resolved_rev_verified={} verify_label={}",
-        report.version_matches_lock,
-        report.manifest_hash_verified,
-        report.signature_hash_verified,
-        report.resolved_rev_verified,
-        cli_label(language, "verify")
-    )
-    .expect("writing to String should be infallible");
-    writeln!(&mut out, "checks: label={}", cli_label(language, "checks"))
-        .expect("writing to String should be infallible");
-    for check in &report.checks {
-        writeln!(
-            &mut out,
-            "check: id={} label={} severity={} passed={}",
-            check_id_key(check.check),
-            plugin_check_label(check.check, language),
-            plugin_check_severity(check.check).as_str(),
-            check.passed
-        )
-        .expect("writing to String should be infallible");
-    }
-    out
+    format_plugin_report_output("verify", report, language, true)
 }
 
 fn print_plugin_verify_output(report: &PluginTestOutput, language: &str) {
@@ -6110,15 +6160,6 @@ fn plugin_test_suggested_actions(
         }
     }
     actions
-}
-
-fn plugin_checks(
-    pack_id: &str,
-    lockfile: Option<PathBuf>,
-    verifier: &dyn SignatureVerifier,
-) -> Result<PluginTestOutput, String> {
-    let base_dir = ensure_install_base_dir()?;
-    plugin_checks_in_dir(pack_id, lockfile.as_deref(), &base_dir, verifier)
 }
 
 fn plugin_checks_in_dir(
@@ -7322,12 +7363,25 @@ pub fn plugin_verify_json_for_test(
     signature_hash_verified: bool,
     resolved_rev_verified: bool,
 ) -> Result<String, String> {
-    plugin_verify_json(PluginVerifyOutput {
+    let report = PluginTestOutput {
         pack_id: pack_id.to_string(),
+        overall_passed: manifest_hash_verified && signature_hash_verified && resolved_rev_verified,
+        version_matches_lock: true,
         manifest_hash_verified,
         signature_hash_verified,
         resolved_rev_verified,
-    })
+        signature_verified: true,
+        trust_verified: true,
+        core_compat_verified: true,
+        action_api_verified: true,
+        os_target_verified: true,
+        checks: build_plugin_checks(true, true, true, true, true, Some(true)),
+        suggested_actions: plugin_test_suggested_actions(pack_id, true, None),
+        duration_ms: 0,
+        drifts: Vec::new(),
+        detail_code: None,
+    };
+    plugin_verify_json(plugin_verify_output_from_report(&report, "en-US"))
 }
 
 pub fn plugin_verify_text_for_test(pack_id: &str, language: &str) -> String {
@@ -7364,12 +7418,7 @@ pub fn plugin_verify_for_test(
 ) -> Result<String, String> {
     let checks = plugin_checks_in_dir(pack_id, lockfile, install_dir, verifier)?;
     if json {
-        return plugin_verify_json(PluginVerifyOutput {
-            pack_id: checks.pack_id,
-            manifest_hash_verified: checks.manifest_hash_verified,
-            signature_hash_verified: checks.signature_hash_verified,
-            resolved_rev_verified: checks.resolved_rev_verified,
-        });
+        return plugin_verify_json(plugin_verify_output_from_report(&checks, language));
     }
     Ok(format_plugin_verify_output(&checks, language))
 }
