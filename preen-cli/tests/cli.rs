@@ -2197,7 +2197,7 @@ fn top_level_system_commands_reject_unknown_flags() {
 }
 
 #[test]
-fn plugin_all_verbose_option_requires_all_flag() {
+fn plugin_verbose_option_supports_single_and_all_flows() {
     assert!(
         Cli::try_parse_from([
             "preen",
@@ -2206,13 +2206,31 @@ fn plugin_all_verbose_option_requires_all_flag() {
             "preen-rs.homebrew@1.0.0",
             "--verbose",
         ])
-        .is_err()
+        .is_ok()
     );
     assert!(
-        Cli::try_parse_from(["preen", "plugin", "test", "preen-rs.homebrew", "--verbose",])
-            .is_err()
+        Cli::try_parse_from(["preen", "plugin", "test", "preen-rs.homebrew", "--verbose",]).is_ok()
     );
-
+    assert!(
+        Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "install",
+            "preen-rs.homebrew@1.0.0",
+            "--verbose",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "update",
+            "preen-rs.homebrew",
+            "--verbose",
+        ])
+        .is_ok()
+    );
     assert!(Cli::try_parse_from(["preen", "plugin", "preflight", "--all", "--verbose"]).is_ok());
     assert!(Cli::try_parse_from(["preen", "plugin", "test", "--all", "--verbose"]).is_ok());
 }

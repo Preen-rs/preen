@@ -543,8 +543,9 @@ fn run_plugin(cmd: &PluginCommand, verifier: &dyn SignatureVerifier) -> Result<(
         PluginCommand::Install {
             spec,
             lockfile,
+            verbose,
             json,
-        } => install_plugin(spec, lockfile.clone(), *json, verifier),
+        } => install_plugin(spec, lockfile.clone(), *json, *verbose, verifier),
         PluginCommand::Preflight {
             spec,
             all,
@@ -587,8 +588,9 @@ fn run_plugin(cmd: &PluginCommand, verifier: &dyn SignatureVerifier) -> Result<(
         PluginCommand::Update {
             pack_id,
             lockfile,
+            verbose,
             json,
-        } => update_plugin(pack_id, lockfile.clone(), *json, verifier),
+        } => update_plugin(pack_id, lockfile.clone(), *json, *verbose, verifier),
         PluginCommand::Remove {
             pack_id,
             lockfile,
@@ -4914,14 +4916,23 @@ fn err_with<E: Display>(kind: CliErrorKind, context: &str, source: E) -> String 
     err(kind, format!("{context}: {source}"))
 }
 
+fn emit_progress(verbose: bool, command: &str, stage: &str, subject: &str) {
+    if !verbose {
+        return;
+    }
+    eprintln!("progress: command={command} stage={stage} subject={subject}");
+}
+
 fn install_plugin(
     spec: &str,
     lockfile: Option<PathBuf>,
     json: bool,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
     let lockfile_path = resolve_lockfile_write_path(lockfile.as_deref())?;
-    let locked = install_plugin_internal_with_verifier(spec, lockfile, verifier)?;
+    let locked =
+        install_plugin_internal_with_verifier(spec, lockfile, "plugin.install", verbose, verifier)?;
     let installed_path = ensure_install_base_dir()?.join(&locked.pack_id);
     let resolved_rev = locked
         .resolved_rev
@@ -4965,7 +4976,7 @@ fn preflight_plugin(
             "spec is required unless --all is set",
         )
     })?;
-    let out = preflight_single(spec, verifier)?;
+    let out = preflight_single(spec, verbose, verifier)?;
     if json {
         println!("{}", plugin_preflight_json(out)?);
         return Ok(());
@@ -5006,7 +5017,7 @@ fn build_preflight_all_output(
     let mut failures = Vec::new();
     for plugin in &lock.plugins {
         let spec = format!("{}@{}", plugin.url, plugin.rev);
-        match preflight_single(&spec, verifier) {
+        match preflight_single(&spec, false, verifier) {
             Ok(out) => results.push(out),
             Err(error) => {
                 let (error_kind, detail_code, message) = parse_error_metadata(&error);
@@ -5033,16 +5044,21 @@ fn build_preflight_all_output(
 
 fn preflight_single(
     spec: &str,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<PluginPreflightOutput, String> {
     let started = Instant::now();
+    emit_progress(verbose, "plugin.preflight", "parse_spec", spec);
     let parsed = parse_plugin_spec(spec)
         .map_err(|e| err_code(CliErrorKind::Validation, "preflight_spec_invalid", e))?;
+    emit_progress(verbose, "plugin.preflight", "resolve_source", spec);
     let (source, url, rev) = resolve_install_source(parsed)?;
     let temp_dir = TempDir::new()
         .map_err(|e| err_with(CliErrorKind::Io, "preflight temp dir create failed", e))?;
     let pack_dir = temp_dir.path().join("repo");
+    emit_progress(verbose, "plugin.preflight", "clone", &url);
     let resolved_rev = clone_rule_pack_at(&url, &rev, &pack_dir, "preflight_clone_failed")?;
+    emit_progress(verbose, "plugin.preflight", "load_pack", &url);
     let loaded = load_rule_pack_from_dir(&pack_dir).map_err(|e| {
         err_code(
             CliErrorKind::Validation,
@@ -5050,6 +5066,12 @@ fn preflight_single(
             format!("load failed: {e:?}"),
         )
     })?;
+    emit_progress(
+        verbose,
+        "plugin.preflight",
+        "validate_manifest",
+        &loaded.manifest.pack_id,
+    );
     validate_os_targets(&loaded)
         .map_err(|e| err_code(CliErrorKind::Validation, "preflight_os_target_failed", e))?;
     loaded
@@ -5070,6 +5092,12 @@ fn preflight_single(
         ));
     }
     let trust = load_trust_policy()?;
+    emit_progress(
+        verbose,
+        "plugin.preflight",
+        "verify_signature",
+        &loaded.manifest.pack_id,
+    );
     verify_rule_pack_with_verifier(&loaded, &trust, verifier).map_err(|e| {
         err_code(
             CliErrorKind::Verification,
@@ -5213,20 +5241,26 @@ fn format_preflight_all_output(
 fn install_plugin_internal_with_verifier(
     spec: &str,
     lockfile: Option<PathBuf>,
+    command: &'static str,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<LockedPlugin, String> {
     let install_dir = ensure_install_base_dir()?;
-    install_plugin_internal_in_dir(spec, lockfile, &install_dir, verifier)
+    install_plugin_internal_in_dir(spec, lockfile, &install_dir, command, verbose, verifier)
 }
 
 fn install_plugin_internal_in_dir(
     spec: &str,
     lockfile: Option<PathBuf>,
     install_dir: &Path,
+    command: &'static str,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<LockedPlugin, String> {
+    emit_progress(verbose, command, "parse_spec", spec);
     let parsed = parse_plugin_spec(spec)
         .map_err(|e| err_code(CliErrorKind::Validation, "install_spec_invalid", e))?;
+    emit_progress(verbose, command, "resolve_source", spec);
     let (source, url, rev) = resolve_install_source(parsed).map_err(|e| {
         map_install_error_with_detail_code(
             e,
@@ -5242,7 +5276,9 @@ fn install_plugin_internal_in_dir(
     let temp_dir = TempDir::new_in(install_dir)
         .map_err(|e| err_with(CliErrorKind::Io, "temp dir create failed", e))?;
     let pack_dir = temp_dir.path().join("repo");
+    emit_progress(verbose, command, "clone", &url);
     let resolved_rev = clone_rule_pack_at(&url, &rev, &pack_dir, "install_clone_failed")?;
+    emit_progress(verbose, command, "load_pack", &url);
     let loaded = load_rule_pack_from_dir(&pack_dir).map_err(|e| {
         err_code(
             CliErrorKind::Validation,
@@ -5250,6 +5286,12 @@ fn install_plugin_internal_in_dir(
             format!("load failed: {e:?}"),
         )
     })?;
+    emit_progress(
+        verbose,
+        command,
+        "validate_manifest",
+        &loaded.manifest.pack_id,
+    );
     validate_os_targets(&loaded)
         .map_err(|e| err_code(CliErrorKind::Validation, "install_os_target_failed", e))?;
     loaded
@@ -5276,6 +5318,12 @@ fn install_plugin_internal_in_dir(
             "install_trust_policy_invalid",
         )
     })?;
+    emit_progress(
+        verbose,
+        command,
+        "verify_signature",
+        &loaded.manifest.pack_id,
+    );
     verify_rule_pack_with_verifier(&loaded, &trust, verifier).map_err(|e| {
         map_install_error_with_detail_code(
             e,
@@ -5283,6 +5331,7 @@ fn install_plugin_internal_in_dir(
             "install_signature_or_trust_failed",
         )
     })?;
+    emit_progress(verbose, command, "hash_artifacts", &loaded.manifest.pack_id);
     let manifest_hash = hash_file(&pack_dir.join("manifest.toml")).map_err(|e| {
         map_install_error_with_detail_code(e, CliErrorKind::Io, "install_manifest_hash_failed")
     })?;
@@ -5295,6 +5344,7 @@ fn install_plugin_internal_in_dir(
         fs::remove_dir_all(&final_dir)
             .map_err(|e| err_with(CliErrorKind::Io, "existing plugin remove failed", e))?;
     }
+    emit_progress(verbose, command, "write_files", &loaded.manifest.pack_id);
     fs::rename(&pack_dir, &final_dir)
         .map_err(|e| err_with(CliErrorKind::Io, "plugin move failed", e))?;
     temp_dir
@@ -5317,6 +5367,7 @@ fn install_plugin_internal_in_dir(
             .unwrap_or_default(),
     };
     upsert_lockfile(&mut lock, locked.clone());
+    emit_progress(verbose, command, "write_lockfile", &locked.pack_id);
     save_lockfile(lockfile.as_deref(), &lock).map_err(|e| {
         map_install_error_with_detail_code(e, CliErrorKind::Io, "install_lockfile_save_failed")
     })?;
@@ -5409,7 +5460,7 @@ fn test_plugin(
         )
     })?;
     if parse_plugin_spec(target).is_ok() {
-        return test_plugin_spec(target, json, verifier);
+        return test_plugin_spec(target, json, verbose, verifier);
     }
     let pack_id = target;
     let checks = plugin_test_report(pack_id, lockfile, verifier)?;
@@ -5510,9 +5561,10 @@ fn is_system_detail_code(code: Option<&str>) -> bool {
 fn test_plugin_spec(
     spec: &str,
     json: bool,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
-    let out = preflight_single(spec, verifier)?;
+    let out = preflight_single(spec, verbose, verifier)?;
     let test = PluginTestSpecOutput {
         overall_passed: true,
         spec: out.spec,
@@ -6265,6 +6317,7 @@ fn update_plugin(
     pack_id: &str,
     lockfile: Option<PathBuf>,
     json: bool,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
     let lockfile_path = resolve_lockfile_write_path(lockfile.as_deref())?;
@@ -6278,6 +6331,8 @@ fn update_plugin(
     let locked = install_plugin_internal_with_verifier(
         &format!("{}@{}", existing.url, existing.rev),
         lockfile,
+        "plugin.update",
+        verbose,
         verifier,
     )?;
     let installed_path = ensure_install_base_dir()?.join(&locked.pack_id);
@@ -7691,6 +7746,8 @@ pub fn install_plugin_in_dir_for_test(
         spec,
         lockfile.map(|p| p.to_path_buf()),
         install_dir,
+        "plugin.install",
+        false,
         verifier,
     )
 }
@@ -8308,13 +8365,15 @@ enum PluginCommand {
         #[arg(long)]
         lockfile: Option<PathBuf>,
         #[arg(long)]
+        verbose: bool,
+        #[arg(long)]
         json: bool,
     },
     Preflight {
         spec: Option<String>,
         #[arg(long, conflicts_with = "spec")]
         all: bool,
-        #[arg(long, requires = "all", conflicts_with = "spec")]
+        #[arg(long)]
         verbose: bool,
         #[arg(long)]
         lockfile: Option<PathBuf>,
@@ -8345,7 +8404,7 @@ enum PluginCommand {
         target: Option<String>,
         #[arg(long, conflicts_with = "target")]
         all: bool,
-        #[arg(long, requires = "all", conflicts_with = "target")]
+        #[arg(long)]
         verbose: bool,
         #[arg(long)]
         lockfile: Option<PathBuf>,
@@ -8356,6 +8415,8 @@ enum PluginCommand {
         pack_id: String,
         #[arg(long)]
         lockfile: Option<PathBuf>,
+        #[arg(long)]
+        verbose: bool,
         #[arg(long)]
         json: bool,
     },
