@@ -155,6 +155,9 @@ struct PluginInstallOutput {
     version: String,
     source: String,
     rev: String,
+    resolved_rev: String,
+    installed_path: String,
+    lockfile_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -4917,12 +4920,21 @@ fn install_plugin(
     json: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
+    let lockfile_path = resolve_lockfile_write_path(lockfile.as_deref())?;
     let locked = install_plugin_internal_with_verifier(spec, lockfile, verifier)?;
+    let installed_path = ensure_install_base_dir()?.join(&locked.pack_id);
+    let resolved_rev = locked
+        .resolved_rev
+        .clone()
+        .unwrap_or_else(|| locked.rev.clone());
     let output = PluginInstallOutput {
         pack_id: locked.pack_id,
         version: locked.version,
         source: locked.source,
         rev: locked.rev,
+        resolved_rev,
+        installed_path: installed_path.display().to_string(),
+        lockfile_path: lockfile_path.display().to_string(),
     };
     if json {
         println!("{}", plugin_install_json(output)?);
@@ -5676,6 +5688,12 @@ fn format_plugin_change_output(
         cli_label(language, "summary")
     )
     .expect("writing to String should be infallible");
+    writeln!(&mut output, "resolved_rev: {}", out.resolved_rev)
+        .expect("writing to String should be infallible");
+    writeln!(&mut output, "installed_path: {}", out.installed_path)
+        .expect("writing to String should be infallible");
+    writeln!(&mut output, "lockfile_path: {}", out.lockfile_path)
+        .expect("writing to String should be infallible");
     let next_steps = [
         format!("preen plugin verify {}", out.pack_id),
         format!("preen plugin test {}", out.pack_id),
@@ -6249,6 +6267,7 @@ fn update_plugin(
     json: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
+    let lockfile_path = resolve_lockfile_write_path(lockfile.as_deref())?;
     let lock = load_lockfile(lockfile.as_deref())?;
     let existing = lock
         .plugins
@@ -6261,11 +6280,19 @@ fn update_plugin(
         lockfile,
         verifier,
     )?;
+    let installed_path = ensure_install_base_dir()?.join(&locked.pack_id);
+    let resolved_rev = locked
+        .resolved_rev
+        .clone()
+        .unwrap_or_else(|| locked.rev.clone());
     let output = PluginInstallOutput {
         pack_id: locked.pack_id,
         version: locked.version,
         source: locked.source,
         rev: locked.rev,
+        resolved_rev,
+        installed_path: installed_path.display().to_string(),
+        lockfile_path: lockfile_path.display().to_string(),
     };
     if json {
         println!("{}", plugin_update_json(output)?);
@@ -7132,11 +7159,17 @@ pub fn plugin_install_json_for_test(
     source: &str,
     rev: &str,
 ) -> Result<String, String> {
+    let state_dir = preen_state_dir()?;
+    let installed_path = state_dir.join("plugins").join(pack_id);
+    let lockfile_path = default_lockfile_path()?;
     plugin_install_json(PluginInstallOutput {
         pack_id: pack_id.to_string(),
         version: version.to_string(),
         source: source.to_string(),
         rev: rev.to_string(),
+        resolved_rev: rev.to_string(),
+        installed_path: installed_path.display().to_string(),
+        lockfile_path: lockfile_path.display().to_string(),
     })
 }
 
@@ -7146,6 +7179,9 @@ pub fn plugin_install_text_for_test(
     source: &str,
     rev: &str,
 ) -> String {
+    let state_dir = preen_state_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let installed_path = state_dir.join("plugins").join(pack_id);
+    let lockfile_path = default_lockfile_path().unwrap_or_else(|_| PathBuf::from("plugins.lock"));
     format_plugin_change_output(
         "install",
         &PluginInstallOutput {
@@ -7153,6 +7189,9 @@ pub fn plugin_install_text_for_test(
             version: version.to_string(),
             source: source.to_string(),
             rev: rev.to_string(),
+            resolved_rev: rev.to_string(),
+            installed_path: installed_path.display().to_string(),
+            lockfile_path: lockfile_path.display().to_string(),
         },
         "en-US",
     )
@@ -7164,11 +7203,17 @@ pub fn plugin_update_json_for_test(
     source: &str,
     rev: &str,
 ) -> Result<String, String> {
+    let state_dir = preen_state_dir()?;
+    let installed_path = state_dir.join("plugins").join(pack_id);
+    let lockfile_path = default_lockfile_path()?;
     plugin_update_json(PluginInstallOutput {
         pack_id: pack_id.to_string(),
         version: version.to_string(),
         source: source.to_string(),
         rev: rev.to_string(),
+        resolved_rev: rev.to_string(),
+        installed_path: installed_path.display().to_string(),
+        lockfile_path: lockfile_path.display().to_string(),
     })
 }
 
@@ -7178,6 +7223,9 @@ pub fn plugin_update_text_for_test(
     source: &str,
     rev: &str,
 ) -> String {
+    let state_dir = preen_state_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let installed_path = state_dir.join("plugins").join(pack_id);
+    let lockfile_path = default_lockfile_path().unwrap_or_else(|_| PathBuf::from("plugins.lock"));
     format_plugin_change_output(
         "update",
         &PluginInstallOutput {
@@ -7185,6 +7233,9 @@ pub fn plugin_update_text_for_test(
             version: version.to_string(),
             source: source.to_string(),
             rev: rev.to_string(),
+            resolved_rev: rev.to_string(),
+            installed_path: installed_path.display().to_string(),
+            lockfile_path: lockfile_path.display().to_string(),
         },
         "en-US",
     )
@@ -7346,11 +7397,15 @@ fn legacy_lockfile_path() -> &'static Path {
 }
 
 fn save_lockfile(path: Option<&Path>, lock: &PluginLockfile) -> Result<(), String> {
-    let path = match path {
-        Some(path) => path.to_path_buf(),
-        None => default_lockfile_path()?,
-    };
+    let path = resolve_lockfile_write_path(path)?;
     save_lockfile_at(&path, lock)
+}
+
+fn resolve_lockfile_write_path(path: Option<&Path>) -> Result<PathBuf, String> {
+    match path {
+        Some(path) => Ok(path.to_path_buf()),
+        None => default_lockfile_path(),
+    }
 }
 
 pub fn save_lockfile_at(path: &Path, lock: &PluginLockfile) -> Result<(), String> {

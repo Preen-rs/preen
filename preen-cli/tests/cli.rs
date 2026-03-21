@@ -622,11 +622,17 @@ fn plugin_install_update_remove_registry_json_helpers() {
     let install_v: Value = serde_json::from_str(&install).unwrap();
     assert_eq!(install_v["kind"].as_str().unwrap(), "plugin.install");
     assert_eq!(install_v["data"]["pack_id"].as_str().unwrap(), "a.pack");
+    assert_eq!(install_v["data"]["resolved_rev"].as_str().unwrap(), "abc");
+    assert!(install_v["data"]["installed_path"].as_str().is_some());
+    assert!(install_v["data"]["lockfile_path"].as_str().is_some());
 
     let update = plugin_update_json_for_test("a.pack", "1.1.0", "registry", "def").unwrap();
     let update_v: Value = serde_json::from_str(&update).unwrap();
     assert_eq!(update_v["kind"].as_str().unwrap(), "plugin.update");
     assert_eq!(update_v["data"]["rev"].as_str().unwrap(), "def");
+    assert_eq!(update_v["data"]["resolved_rev"].as_str().unwrap(), "def");
+    assert!(update_v["data"]["installed_path"].as_str().is_some());
+    assert!(update_v["data"]["lockfile_path"].as_str().is_some());
 
     let remove = plugin_remove_json_for_test("a.pack", true).unwrap();
     let remove_v: Value = serde_json::from_str(&remove).unwrap();
@@ -678,12 +684,18 @@ fn plugin_install_update_remove_registry_json_helpers() {
 fn plugin_install_and_update_text_outputs_include_next_steps() {
     let install = plugin_install_text_for_test("a.pack", "1.0.0", "registry", "abc");
     assert!(install.contains("summary: kind=install"));
+    assert!(install.contains("resolved_rev: abc"));
+    assert!(install.contains("installed_path: "));
+    assert!(install.contains("lockfile_path: "));
     assert!(install.contains("next_step: preen plugin verify a.pack"));
     assert!(install.contains("next_step: preen plugin test a.pack"));
     assert!(install.contains("next_step: preen plugin info a.pack"));
 
     let update = plugin_update_text_for_test("a.pack", "1.1.0", "registry", "def");
     assert!(update.contains("summary: kind=update"));
+    assert!(update.contains("resolved_rev: def"));
+    assert!(update.contains("installed_path: "));
+    assert!(update.contains("lockfile_path: "));
     assert!(update.contains("next_step: preen plugin verify a.pack"));
     assert!(update.contains("next_step: preen plugin test a.pack"));
     assert!(update.contains("next_step: preen plugin info a.pack"));
@@ -706,6 +718,9 @@ fn json_envelopes_have_exact_expected_data_keys() {
             "version".to_string(),
             "source".to_string(),
             "rev".to_string(),
+            "resolved_rev".to_string(),
+            "installed_path".to_string(),
+            "lockfile_path".to_string(),
         ])
     );
 
