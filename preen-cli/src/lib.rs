@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use std::fmt::{Display, Write as FmtWrite};
 use std::fs;
+use std::io::IsTerminal;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -248,6 +249,9 @@ struct OptimizeCommandOutput {
     task_count: usize,
     executed_tasks: Vec<String>,
     affected_items: u64,
+    post_check_run: bool,
+    post_check_overall_passed: Option<bool>,
+    post_check_suggested_actions: Vec<String>,
     warnings: Vec<String>,
     audit_events: usize,
 }
@@ -268,6 +272,7 @@ struct SystemCheckOutput {
     overall_passed: bool,
     checks: Vec<SystemCheckRowOutput>,
     fixes_applied: u64,
+    suggested_actions: Vec<String>,
     warnings: Vec<String>,
 }
 
@@ -282,10 +287,15 @@ struct AnalyzeEntryOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct AnalyzeOutput {
     root: String,
+    path: String,
+    max_depth: usize,
     scanned_entries: usize,
     total_files: u64,
     total_dirs: u64,
     total_size_bytes: u64,
+    total_size: u64,
+    truncated_dirs: u64,
+    entries: Vec<AnalyzeEntryOutput>,
     top_entries: Vec<AnalyzeEntryOutput>,
     warnings: Vec<String>,
 }
@@ -295,6 +305,7 @@ struct AnalyzeStats {
     files: u64,
     dirs: u64,
     size_bytes: u64,
+    truncated_dirs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -320,6 +331,7 @@ struct StatusOutput {
     metrics: SystemMetricsOutput,
     overall_passed: bool,
     checks: Vec<SystemStatusCheckOutput>,
+    suggested_actions: Vec<String>,
     warnings: Vec<String>,
 }
 
@@ -327,11 +339,18 @@ struct StatusOutput {
 struct SystemMetricsOutput {
     cpu_cores: Option<usize>,
     load_avg_1m_milli: Option<u64>,
+    load_avg_5m_milli: Option<u64>,
+    load_avg_15m_milli: Option<u64>,
     uptime_seconds: Option<u64>,
     memory_total_bytes: Option<u64>,
     memory_used_bytes: Option<u64>,
+    memory_used_pct: Option<u64>,
     disk_total_bytes: Option<u64>,
     disk_available_bytes: Option<u64>,
+    disk_free_pct: Option<u64>,
+    process_count: Option<u64>,
+    network_rx_bytes: Option<u64>,
+    network_tx_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -475,9 +494,11 @@ fn run_typed_with_verifier_and_clean_executor(
             json,
         } => run_optimize_with_executor(*dry_run, *confirm, *json, clean_executor)
             .map_err(CliError::from),
-        CliCommand::Analyze { path, json } => {
-            run_analyze(path.clone(), *json).map_err(CliError::from)
-        }
+        CliCommand::Analyze {
+            path,
+            max_depth,
+            json,
+        } => run_analyze(path.clone(), *max_depth, *json).map_err(CliError::from),
         CliCommand::Status { json } => run_status(*json).map_err(CliError::from),
         CliCommand::Check { fix, json } => run_check(*fix, *json).map_err(CliError::from),
         CliCommand::Touchid {
@@ -589,6 +610,48 @@ impl ActionAuditSink for CollectingAuditSink {
     fn record(&self, event: ActionAuditEvent) {
         self.events.lock().unwrap().push(event);
     }
+}
+
+fn new_cli_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| err_with(CliErrorKind::Internal, "tokio runtime init failed", e))
+}
+
+fn execute_action_with_default_policy(
+    runtime: &tokio::runtime::Runtime,
+    manifest: &Manifest,
+    rule: &RuleFile,
+    dry_run: bool,
+    confirm: bool,
+    clean_executor: &dyn ActionExecutorPort,
+    map_runtime_error: fn(RuntimeExecutionError) -> String,
+) -> Result<(u64, u64, Vec<String>, usize), String> {
+    let policy = DefaultSafetyPolicy::default();
+    let sink = CollectingAuditSink::default();
+    let mode = if dry_run {
+        ExecutionMode::DryRun
+    } else {
+        ExecutionMode::Apply
+    };
+    let result = runtime
+        .block_on(execute_action_with_audit(
+            manifest,
+            rule,
+            mode,
+            if confirm { Some("confirmed") } else { None },
+            &policy,
+            clean_executor,
+            Some(&sink),
+        ))
+        .map_err(map_runtime_error)?;
+    Ok((
+        result.affected_items,
+        result.freed_bytes,
+        result.warnings,
+        sink.event_count(),
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -967,29 +1030,18 @@ fn run_installer_output_with_executor(
         },
     };
 
-    let policy = DefaultSafetyPolicy::default();
-    let sink = CollectingAuditSink::default();
-    let mode = if dry_run {
-        ExecutionMode::DryRun
-    } else {
-        ExecutionMode::Apply
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| err_with(CliErrorKind::Internal, "tokio runtime init failed", e))?;
-    let result = runtime
-        .block_on(execute_action_with_audit(
+    let runtime = new_cli_runtime()?;
+    let (affected_items, freed_bytes, runtime_warnings, audit_events) =
+        execute_action_with_default_policy(
+            &runtime,
             &manifest,
             &rule,
-            mode,
-            if confirm { Some("confirmed") } else { None },
-            &policy,
+            dry_run,
+            confirm,
             clean_executor,
-            Some(&sink),
-        ))
-        .map_err(map_installer_runtime_error)?;
-    warnings.extend(result.warnings);
+            map_installer_runtime_error,
+        )?;
+    warnings.extend(runtime_warnings);
 
     Ok(InstallerCommandOutput {
         mode: if dry_run {
@@ -1002,10 +1054,10 @@ fn run_installer_output_with_executor(
         target_count: selected_paths.len(),
         estimated_freed_bytes,
         preview_paths,
-        affected_items: result.affected_items,
-        freed_bytes: result.freed_bytes,
+        affected_items,
+        freed_bytes,
         warnings,
-        audit_events: sink.event_count(),
+        audit_events,
     })
 }
 
@@ -1183,29 +1235,18 @@ fn run_uninstall_output_with_executor(
         },
     };
 
-    let policy = DefaultSafetyPolicy::default();
-    let sink = CollectingAuditSink::default();
-    let mode = if dry_run {
-        ExecutionMode::DryRun
-    } else {
-        ExecutionMode::Apply
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| err_with(CliErrorKind::Internal, "tokio runtime init failed", e))?;
-    let result = runtime
-        .block_on(execute_action_with_audit(
+    let runtime = new_cli_runtime()?;
+    let (affected_items, freed_bytes, runtime_warnings, audit_events) =
+        execute_action_with_default_policy(
+            &runtime,
             &manifest,
             &rule,
-            mode,
-            if confirm { Some("confirmed") } else { None },
-            &policy,
+            dry_run,
+            confirm,
             clean_executor,
-            Some(&sink),
-        ))
-        .map_err(map_uninstall_runtime_error)?;
-    warnings.extend(result.warnings);
+            map_uninstall_runtime_error,
+        )?;
+    warnings.extend(runtime_warnings);
 
     Ok(UninstallCommandOutput {
         mode: if dry_run {
@@ -1219,10 +1260,10 @@ fn run_uninstall_output_with_executor(
         target_count: selected_paths.len(),
         estimated_freed_bytes,
         preview_paths,
-        affected_items: result.affected_items,
-        freed_bytes: result.freed_bytes,
+        affected_items,
+        freed_bytes,
         warnings,
-        audit_events: sink.event_count(),
+        audit_events,
     })
 }
 
@@ -1248,6 +1289,19 @@ fn run_optimize_with_executor(
         }
     }
     println!("Affected items: {}", output.affected_items);
+    println!("Post-check run: {}", output.post_check_run);
+    if let Some(value) = output.post_check_overall_passed {
+        println!("Post-check overall_passed: {value}");
+    }
+    if !output.post_check_suggested_actions.is_empty() {
+        println!(
+            "Post-check suggested actions: {}",
+            output.post_check_suggested_actions.len()
+        );
+        for action in &output.post_check_suggested_actions {
+            println!("- {action}");
+        }
+    }
     if !output.warnings.is_empty() {
         println!("Warnings:");
         for warning in &output.warnings {
@@ -1315,10 +1369,7 @@ fn run_optimize_output_with_executor(
     };
     let policy = DefaultSafetyPolicy::default();
     let sink = CollectingAuditSink::default();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| err_with(CliErrorKind::Internal, "tokio runtime init failed", e))?;
+    let runtime = new_cli_runtime()?;
 
     let mut affected_items = 0_u64;
     let mut warnings = Vec::new();
@@ -1370,6 +1421,23 @@ fn run_optimize_output_with_executor(
         executed_tasks.push(task.label.to_string());
     }
 
+    let (post_check_run, post_check_overall_passed, post_check_suggested_actions) = if dry_run {
+        (false, None, Vec::new())
+    } else {
+        let post_check = run_check_output(false);
+        let suggested_actions = post_check
+            .suggested_actions
+            .into_iter()
+            .filter(|action| action != "preen optimize --dry-run")
+            .collect::<Vec<_>>();
+        if !post_check.overall_passed {
+            warnings.push(
+                "post-optimize check found remaining issues; review suggested actions".to_string(),
+            );
+        }
+        (true, Some(post_check.overall_passed), suggested_actions)
+    };
+
     Ok(OptimizeCommandOutput {
         mode: if dry_run {
             "dry_run".to_string()
@@ -1380,6 +1448,9 @@ fn run_optimize_output_with_executor(
         task_count: tasks.len(),
         executed_tasks,
         affected_items,
+        post_check_run,
+        post_check_overall_passed,
+        post_check_suggested_actions,
         warnings,
         audit_events: sink.event_count(),
     })
@@ -1525,7 +1596,9 @@ fn run_check_output(fix: bool) -> SystemCheckOutput {
             fixed: plugins_dir_fixed,
         });
 
-        let registry_index = state_dir.join("registry-index.toml");
+        let registry_index =
+            registry_index_path().unwrap_or_else(|_| state_dir.join("registry-index.toml"));
+        let mut registry_age_days = None;
         checks.push(SystemCheckRowOutput {
             id: "registry_index_present".to_string(),
             label: "Registry index present".to_string(),
@@ -1541,6 +1614,36 @@ fn run_check_output(fix: bool) -> SystemCheckOutput {
             },
             fixed: false,
         });
+        if registry_index.exists() {
+            match fs::read_to_string(&registry_index) {
+                Ok(content) => match toml::from_str::<RegistryIndex>(&content) {
+                    Ok(index) => {
+                        if let Some(generated_at) = index.generated_at
+                            && let Ok(parsed) = OffsetDateTime::parse(&generated_at, &Rfc3339)
+                        {
+                            let age = OffsetDateTime::now_utc() - parsed;
+                            registry_age_days = Some(age.whole_days());
+                        }
+                    }
+                    Err(err) => warnings.push(format!("registry index parse failed: {err}")),
+                },
+                Err(err) => warnings.push(format!("registry index read failed: {err}")),
+            }
+        }
+        let registry_fresh = registry_age_days
+            .map(|age| age <= DEFAULT_REGISTRY_MAX_AGE_DAYS)
+            .unwrap_or(true);
+        checks.push(SystemCheckRowOutput {
+            id: "registry_index_fresh".to_string(),
+            label: "Registry index fresh".to_string(),
+            severity: "warning".to_string(),
+            passed: registry_fresh,
+            message: match registry_age_days {
+                Some(age) => format!("registry index age: {age} days"),
+                None => "registry index freshness unknown".to_string(),
+            },
+            fixed: false,
+        });
     }
 
     let overall_passed = checks.iter().all(|check| {
@@ -1550,11 +1653,20 @@ fn run_check_output(fix: bool) -> SystemCheckOutput {
             true
         }
     });
+    let state_issue = has_failed_check_rows(&checks, &["state_dir_exists", "state_dir_writable"]);
+    let registry_issue =
+        has_failed_check_rows(&checks, &["registry_index_present", "registry_index_fresh"]);
+    let mut suggested_actions = build_core_maintenance_actions(state_issue, registry_issue, !fix);
+    if overall_passed {
+        push_unique_action(&mut suggested_actions, "preen optimize --dry-run");
+    }
+
     SystemCheckOutput {
         mode,
         overall_passed,
         checks,
         fixes_applied,
+        suggested_actions,
         warnings,
     }
 }
@@ -1577,6 +1689,12 @@ fn print_check_output(out: &SystemCheckOutput) {
         );
     }
     println!("fixes_applied: {}", out.fixes_applied);
+    if !out.suggested_actions.is_empty() {
+        println!("suggested_actions: count={}", out.suggested_actions.len());
+        for action in &out.suggested_actions {
+            println!("suggested_action: {action}");
+        }
+    }
     if !out.warnings.is_empty() {
         println!("warnings: count={}", out.warnings.len());
         for warning in &out.warnings {
@@ -1585,8 +1703,8 @@ fn print_check_output(out: &SystemCheckOutput) {
     }
 }
 
-fn run_analyze(path: Option<PathBuf>, json: bool) -> Result<(), String> {
-    let output = run_analyze_output(path)?;
+fn run_analyze(path: Option<PathBuf>, max_depth: Option<usize>, json: bool) -> Result<(), String> {
+    let output = run_analyze_output(path, max_depth)?;
     if json {
         println!("{}", analyze_json(output.clone())?);
         return Ok(());
@@ -1595,9 +1713,12 @@ fn run_analyze(path: Option<PathBuf>, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn run_analyze_output(path: Option<PathBuf>) -> Result<AnalyzeOutput, String> {
+fn run_analyze_output(
+    path: Option<PathBuf>,
+    max_depth_override: Option<usize>,
+) -> Result<AnalyzeOutput, String> {
     let mut warnings = Vec::new();
-    let root = resolve_analyze_root(path)?;
+    let root = normalize_analyze_root(resolve_analyze_root(path)?)?;
     if !root.exists() {
         return Err(err_code(
             CliErrorKind::NotFound,
@@ -1613,9 +1734,15 @@ fn run_analyze_output(path: Option<PathBuf>) -> Result<AnalyzeOutput, String> {
         ));
     }
 
-    let max_depth = analyze_max_depth();
+    let max_depth = analyze_max_depth(max_depth_override);
     let mut scanned_entries = 0_usize;
     let mut top_entries = Vec::new();
+    let mut aggregate_stats = AnalyzeStats {
+        files: 0,
+        dirs: 1,
+        size_bytes: 0,
+        truncated_dirs: 0,
+    };
     let read_dir = fs::read_dir(&root).map_err(|e| {
         err_code(
             CliErrorKind::Io,
@@ -1644,7 +1771,15 @@ fn run_analyze_output(path: Option<PathBuf>) -> Result<AnalyzeOutput, String> {
             }
         };
         if metadata.file_type().is_symlink() {
-            warnings.push(format!("analyze skipped symlink: {}", child_path.display()));
+            let link_size = metadata.len();
+            aggregate_stats.files += 1;
+            aggregate_stats.size_bytes += link_size;
+            top_entries.push(AnalyzeEntryOutput {
+                name: child.file_name().to_string_lossy().to_string(),
+                path: child_path.display().to_string(),
+                item_type: "symlink".to_string(),
+                size_bytes: link_size,
+            });
             continue;
         }
         let stats = if metadata.is_dir() {
@@ -1654,14 +1789,20 @@ fn run_analyze_output(path: Option<PathBuf>) -> Result<AnalyzeOutput, String> {
                 files: 1,
                 dirs: 0,
                 size_bytes: metadata.len(),
+                truncated_dirs: 0,
             }
         } else {
             AnalyzeStats {
                 files: 0,
                 dirs: 0,
                 size_bytes: 0,
+                truncated_dirs: 0,
             }
         };
+        aggregate_stats.files += stats.files;
+        aggregate_stats.dirs += stats.dirs;
+        aggregate_stats.size_bytes += stats.size_bytes;
+        aggregate_stats.truncated_dirs += stats.truncated_dirs;
         let item_type = if metadata.is_dir() {
             "dir"
         } else if metadata.is_file() {
@@ -1684,14 +1825,19 @@ fn run_analyze_output(path: Option<PathBuf>) -> Result<AnalyzeOutput, String> {
             .then_with(|| left.path.cmp(&right.path))
     });
     top_entries.truncate(analyze_top_entries());
-
-    let root_stats = analyze_path_stats(&root, max_depth, &mut warnings);
+    let warnings = dedupe_warnings_with_limit(warnings, analyze_warning_limit());
+    let root_display = root.display().to_string();
     Ok(AnalyzeOutput {
-        root: root.display().to_string(),
+        root: root_display.clone(),
+        path: root_display,
+        max_depth,
         scanned_entries,
-        total_files: root_stats.files,
-        total_dirs: root_stats.dirs,
-        total_size_bytes: root_stats.size_bytes,
+        total_files: aggregate_stats.files,
+        total_dirs: aggregate_stats.dirs,
+        total_size_bytes: aggregate_stats.size_bytes,
+        total_size: aggregate_stats.size_bytes,
+        truncated_dirs: aggregate_stats.truncated_dirs,
+        entries: top_entries.clone(),
         top_entries,
         warnings,
     })
@@ -1715,6 +1861,20 @@ fn resolve_analyze_root(path: Option<PathBuf>) -> Result<PathBuf, String> {
     })
 }
 
+fn normalize_analyze_root(root: PathBuf) -> Result<PathBuf, String> {
+    if root.is_absolute() {
+        return Ok(root);
+    }
+    let cwd = std::env::current_dir().map_err(|error| {
+        err_code(
+            CliErrorKind::Io,
+            "analyze_cwd_unavailable",
+            format!("analyze current directory resolve failed: {error}"),
+        )
+    })?;
+    Ok(cwd.join(root))
+}
+
 fn analyze_path_stats(path: &Path, max_depth: usize, warnings: &mut Vec<String>) -> AnalyzeStats {
     fn walk(
         path: &Path,
@@ -1733,16 +1893,17 @@ fn analyze_path_stats(path: &Path, max_depth: usize, warnings: &mut Vec<String>)
                     files: 0,
                     dirs: 0,
                     size_bytes: 0,
+                    truncated_dirs: 0,
                 };
             }
         };
 
         if metadata.file_type().is_symlink() {
-            warnings.push(format!("analyze skipped symlink: {}", path.display()));
             return AnalyzeStats {
-                files: 0,
+                files: 1,
                 dirs: 0,
-                size_bytes: 0,
+                size_bytes: metadata.len(),
+                truncated_dirs: 0,
             };
         }
 
@@ -1751,6 +1912,7 @@ fn analyze_path_stats(path: &Path, max_depth: usize, warnings: &mut Vec<String>)
                 files: 1,
                 dirs: 0,
                 size_bytes: metadata.len(),
+                truncated_dirs: 0,
             };
         }
 
@@ -1759,6 +1921,7 @@ fn analyze_path_stats(path: &Path, max_depth: usize, warnings: &mut Vec<String>)
                 files: 0,
                 dirs: 0,
                 size_bytes: 0,
+                truncated_dirs: 0,
             };
         }
 
@@ -1766,8 +1929,10 @@ fn analyze_path_stats(path: &Path, max_depth: usize, warnings: &mut Vec<String>)
             files: 0,
             dirs: 1,
             size_bytes: 0,
+            truncated_dirs: 0,
         };
         if depth >= max_depth {
+            stats.truncated_dirs = 1;
             return stats;
         }
 
@@ -1793,6 +1958,7 @@ fn analyze_path_stats(path: &Path, max_depth: usize, warnings: &mut Vec<String>)
             stats.files += child_stats.files;
             stats.dirs += child_stats.dirs;
             stats.size_bytes += child_stats.size_bytes;
+            stats.truncated_dirs += child_stats.truncated_dirs;
         }
         stats
     }
@@ -1800,7 +1966,10 @@ fn analyze_path_stats(path: &Path, max_depth: usize, warnings: &mut Vec<String>)
     walk(path, 0, max_depth, warnings)
 }
 
-fn analyze_max_depth() -> usize {
+fn analyze_max_depth(override_value: Option<usize>) -> usize {
+    if let Some(value) = override_value.filter(|value| *value > 0) {
+        return value;
+    }
     std::env::var("PREEN_ANALYZE_MAX_DEPTH")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -1816,6 +1985,28 @@ fn analyze_top_entries() -> usize {
         .unwrap_or(DEFAULT_ANALYZE_TOP_ENTRIES)
 }
 
+fn analyze_warning_limit() -> usize {
+    std::env::var("PREEN_ANALYZE_WARNING_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(100)
+}
+
+fn dedupe_warnings_with_limit(warnings: Vec<String>, limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for warning in warnings {
+        if seen.insert(warning.clone()) {
+            out.push(warning);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
 fn analyze_json(out: AnalyzeOutput) -> Result<String, String> {
     to_json_envelope("system.analyze", out)
 }
@@ -1823,10 +2014,12 @@ fn analyze_json(out: AnalyzeOutput) -> Result<String, String> {
 fn print_analyze_output(out: &AnalyzeOutput) {
     println!("summary: kind=system_analyze");
     println!("root: {}", out.root);
+    println!("max_depth: {}", out.max_depth);
     println!("scanned_entries: {}", out.scanned_entries);
     println!("total_files: {}", out.total_files);
     println!("total_dirs: {}", out.total_dirs);
     println!("total_size: {}", format_bytes(out.total_size_bytes));
+    println!("truncated_dirs: {}", out.truncated_dirs);
     println!("entries: label=Top entries");
     for entry in &out.top_entries {
         println!(
@@ -1847,12 +2040,28 @@ fn print_analyze_output(out: &AnalyzeOutput) {
 
 fn run_status(json: bool) -> Result<(), String> {
     let output = run_status_output()?;
-    if json {
+    if should_emit_status_json(json) {
         println!("{}", status_json(output.clone())?);
         return Ok(());
     }
     print_status_output(&output);
     Ok(())
+}
+
+fn should_emit_status_json(json_flag: bool) -> bool {
+    if json_flag {
+        return true;
+    }
+    if let Ok(value) = std::env::var("PREEN_STATUS_FORCE_JSON") {
+        let normalized = value.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "1" | "true" | "yes" | "on") {
+            return true;
+        }
+        if matches!(normalized.as_str(), "0" | "false" | "no" | "off") {
+            return false;
+        }
+    }
+    !std::io::stdout().is_terminal()
 }
 
 fn run_status_output() -> Result<StatusOutput, String> {
@@ -1939,11 +2148,11 @@ fn run_status_output() -> Result<StatusOutput, String> {
             Ok(content) => match toml::from_str::<RegistryIndex>(&content) {
                 Ok(index) => {
                     registry_generated_at = index.generated_at.clone();
-                    if let Some(generated_at) = index.generated_at {
-                        if let Ok(parsed) = OffsetDateTime::parse(&generated_at, &Rfc3339) {
-                            let age = OffsetDateTime::now_utc() - parsed;
-                            registry_age_days = Some(age.whole_days());
-                        }
+                    if let Some(generated_at) = index.generated_at
+                        && let Ok(parsed) = OffsetDateTime::parse(&generated_at, &Rfc3339)
+                    {
+                        let age = OffsetDateTime::now_utc() - parsed;
+                        registry_age_days = Some(age.whole_days());
                     }
                 }
                 Err(error) => warnings.push(format!("registry index parse failed: {error}")),
@@ -2024,6 +2233,7 @@ fn run_status_output() -> Result<StatusOutput, String> {
         .iter()
         .all(|check| check.severity != "critical" || check.passed);
     let health_score = status_health_score(&checks);
+    let suggested_actions = build_status_suggested_actions(&checks, &metrics);
 
     Ok(StatusOutput {
         mode: "status".to_string(),
@@ -2038,48 +2248,139 @@ fn run_status_output() -> Result<StatusOutput, String> {
         metrics,
         overall_passed,
         checks,
+        suggested_actions,
         warnings,
     })
+}
+
+fn build_status_suggested_actions(
+    checks: &[SystemStatusCheckOutput],
+    metrics: &SystemMetricsOutput,
+) -> Vec<String> {
+    let state_issue = has_failed_check_status(checks, &["state_dir_exists", "state_dir_writable"]);
+    let registry_issue =
+        has_failed_check_status(checks, &["registry_index_present", "registry_index_fresh"]);
+    let mut actions = build_core_maintenance_actions(state_issue, registry_issue, true);
+
+    if let Some(free_pct) = metrics.disk_free_pct
+        && free_pct < 15
+    {
+        push_unique_action(&mut actions, "preen analyze --json");
+        push_unique_action(&mut actions, "preen clean --dry-run");
+        push_unique_action(&mut actions, "preen purge --dry-run");
+    }
+
+    if let Some(memory_used_pct) = metrics.memory_used_pct
+        && memory_used_pct > 90
+    {
+        push_unique_action(&mut actions, "preen optimize --dry-run");
+    }
+
+    if let (Some(load), Some(cores)) = (metrics.load_avg_1m_milli, metrics.cpu_cores) {
+        let threshold = (cores as u64).saturating_mul(2000);
+        if load > threshold {
+            push_unique_action(&mut actions, "preen optimize --dry-run");
+        }
+    }
+
+    actions
+}
+
+fn push_unique_action(actions: &mut Vec<String>, action: &str) {
+    if !actions.iter().any(|existing| existing == action) {
+        actions.push(action.to_string());
+    }
+}
+
+fn build_core_maintenance_actions(
+    state_issue: bool,
+    registry_issue: bool,
+    suggest_fix_command: bool,
+) -> Vec<String> {
+    let mut actions = Vec::new();
+    if state_issue {
+        if suggest_fix_command {
+            push_unique_action(&mut actions, "preen check --fix");
+        } else {
+            push_unique_action(&mut actions, "preen check --json");
+        }
+    }
+    if registry_issue {
+        push_unique_action(&mut actions, "preen plugin registry-update");
+    }
+    actions
+}
+
+fn has_failed_check_rows(checks: &[SystemCheckRowOutput], ids: &[&str]) -> bool {
+    checks
+        .iter()
+        .any(|check| ids.contains(&check.id.as_str()) && !check.passed)
+}
+
+fn has_failed_check_status(checks: &[SystemStatusCheckOutput], ids: &[&str]) -> bool {
+    checks
+        .iter()
+        .any(|check| ids.contains(&check.id.as_str()) && !check.passed)
 }
 
 fn collect_system_metrics(state_dir: &Path, warnings: &mut Vec<String>) -> SystemMetricsOutput {
     let cpu_cores = std::thread::available_parallelism()
         .ok()
         .map(|value| value.get());
-    let load_avg_1m_milli = collect_load_avg_1m_milli(warnings);
+    let (load_avg_1m_milli, load_avg_5m_milli, load_avg_15m_milli) =
+        collect_load_avg_milli(warnings);
     let uptime_seconds = collect_uptime_seconds(warnings);
     let (memory_total_bytes, memory_used_bytes) = collect_memory_bytes(warnings);
     let (disk_total_bytes, disk_available_bytes) = collect_disk_bytes(state_dir, warnings);
+    let process_count = collect_process_count(warnings);
+    let (network_rx_bytes, network_tx_bytes) = collect_network_bytes(warnings);
+    let memory_used_pct = compute_percent(memory_used_bytes, memory_total_bytes);
+    let disk_free_pct = compute_percent(disk_available_bytes, disk_total_bytes);
     SystemMetricsOutput {
         cpu_cores,
         load_avg_1m_milli,
+        load_avg_5m_milli,
+        load_avg_15m_milli,
         uptime_seconds,
         memory_total_bytes,
         memory_used_bytes,
+        memory_used_pct,
         disk_total_bytes,
         disk_available_bytes,
+        disk_free_pct,
+        process_count,
+        network_rx_bytes,
+        network_tx_bytes,
     }
 }
 
-fn collect_load_avg_1m_milli(warnings: &mut Vec<String>) -> Option<u64> {
+fn collect_load_avg_milli(warnings: &mut Vec<String>) -> (Option<u64>, Option<u64>, Option<u64>) {
     if let Ok(value) = std::env::var("PREEN_STATUS_LOAD_1M_MILLI")
         && let Ok(parsed) = value.trim().parse::<u64>()
     {
-        return Some(parsed);
+        let load_5m = std::env::var("PREEN_STATUS_LOAD_5M_MILLI")
+            .ok()
+            .and_then(|item| item.trim().parse::<u64>().ok());
+        let load_15m = std::env::var("PREEN_STATUS_LOAD_15M_MILLI")
+            .ok()
+            .and_then(|item| item.trim().parse::<u64>().ok());
+        return (Some(parsed), load_5m, load_15m);
     }
 
     if cfg!(target_os = "linux") {
         match fs::read_to_string("/proc/loadavg") {
             Ok(value) => {
-                if let Some(first) = value.split_whitespace().next()
-                    && let Ok(parsed) = first.parse::<f64>()
-                {
-                    return Some((parsed * 1000.0).round() as u64);
+                let mut parts = value.split_whitespace();
+                let load_1m = parts.next().and_then(parse_float_to_milli);
+                let load_5m = parts.next().and_then(parse_float_to_milli);
+                let load_15m = parts.next().and_then(parse_float_to_milli);
+                if load_1m.is_some() || load_5m.is_some() || load_15m.is_some() {
+                    return (load_1m, load_5m, load_15m);
                 }
             }
             Err(error) => warnings.push(format!("status loadavg read failed: {error}")),
         }
-        return None;
+        return (None, None, None);
     }
 
     if cfg!(target_os = "macos") {
@@ -2089,8 +2390,12 @@ fn collect_load_avg_1m_milli(warnings: &mut Vec<String>) -> Option<u64> {
         match output {
             Ok(value) if value.status.success() => {
                 let text = String::from_utf8_lossy(&value.stdout);
-                if let Some(parsed) = parse_first_float(&text) {
-                    return Some((parsed * 1000.0).round() as u64);
+                let floats = parse_floats(&text, 3);
+                if !floats.is_empty() {
+                    let load_1m = floats.first().copied();
+                    let load_5m = floats.get(1).copied();
+                    let load_15m = floats.get(2).copied();
+                    return (load_1m, load_5m, load_15m);
                 }
             }
             Ok(value) => warnings.push(format!(
@@ -2100,7 +2405,7 @@ fn collect_load_avg_1m_milli(warnings: &mut Vec<String>) -> Option<u64> {
             Err(error) => warnings.push(format!("status loadavg command failed: {error}")),
         }
     }
-    None
+    (None, None, None)
 }
 
 fn collect_uptime_seconds(warnings: &mut Vec<String>) -> Option<u64> {
@@ -2276,6 +2581,114 @@ fn collect_disk_bytes(state_dir: &Path, warnings: &mut Vec<String>) -> (Option<u
     (None, None)
 }
 
+fn collect_process_count(warnings: &mut Vec<String>) -> Option<u64> {
+    if let Ok(value) = std::env::var("PREEN_STATUS_PROCESS_COUNT")
+        && let Ok(parsed) = value.trim().parse::<u64>()
+    {
+        return Some(parsed);
+    }
+
+    if cfg!(target_os = "linux") {
+        match fs::read_dir("/proc") {
+            Ok(entries) => {
+                let count = entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name.chars().all(|ch| ch.is_ascii_digit()))
+                    .count();
+                return Some(count as u64);
+            }
+            Err(error) => warnings.push(format!("status process count read failed: {error}")),
+        }
+        return None;
+    }
+
+    if cfg!(target_os = "macos") {
+        let output = ProcessCommand::new("ps")
+            .args(["-A", "-o", "pid="])
+            .output();
+        match output {
+            Ok(value) if value.status.success() => {
+                let count = String::from_utf8_lossy(&value.stdout)
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .count();
+                return Some(count as u64);
+            }
+            Ok(value) => warnings.push(format!(
+                "status process count command failed: {}",
+                String::from_utf8_lossy(&value.stderr).trim()
+            )),
+            Err(error) => warnings.push(format!("status process count command failed: {error}")),
+        }
+    }
+    None
+}
+
+fn collect_network_bytes(warnings: &mut Vec<String>) -> (Option<u64>, Option<u64>) {
+    if let Ok(rx) = std::env::var("PREEN_STATUS_NET_RX_BYTES")
+        && let Ok(rx_bytes) = rx.trim().parse::<u64>()
+    {
+        let tx_bytes = std::env::var("PREEN_STATUS_NET_TX_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok());
+        return (Some(rx_bytes), tx_bytes);
+    }
+
+    if cfg!(target_os = "linux") {
+        match fs::read_to_string("/proc/net/dev") {
+            Ok(content) => {
+                let mut rx_sum = 0_u64;
+                let mut tx_sum = 0_u64;
+                for line in content.lines().skip(2) {
+                    let Some((iface, values)) = line.split_once(':') else {
+                        continue;
+                    };
+                    if iface.trim() == "lo" {
+                        continue;
+                    }
+                    let cols: Vec<&str> = values.split_whitespace().collect();
+                    if cols.len() < 16 {
+                        continue;
+                    }
+                    let rx = cols
+                        .first()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    let tx = cols
+                        .get(8)
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    rx_sum = rx_sum.saturating_add(rx);
+                    tx_sum = tx_sum.saturating_add(tx);
+                }
+                return (Some(rx_sum), Some(tx_sum));
+            }
+            Err(error) => warnings.push(format!("status network read failed: {error}")),
+        }
+        return (None, None);
+    }
+
+    if cfg!(target_os = "macos") {
+        let output = ProcessCommand::new("netstat").args(["-ib"]).output();
+        match output {
+            Ok(value) if value.status.success() => {
+                let text = String::from_utf8_lossy(&value.stdout);
+                if let Some((rx, tx)) = parse_netstat_interface_bytes(&text) {
+                    return (Some(rx), Some(tx));
+                }
+            }
+            Ok(value) => warnings.push(format!(
+                "status network command failed: {}",
+                String::from_utf8_lossy(&value.stderr).trim()
+            )),
+            Err(error) => warnings.push(format!("status network command failed: {error}")),
+        }
+    }
+
+    (None, None)
+}
+
 fn parse_meminfo_kb(content: &str, key: &str) -> Option<u64> {
     content.lines().find_map(|line| {
         if !line.starts_with(key) {
@@ -2306,22 +2719,79 @@ fn parse_df_kbytes(content: &str) -> Option<(u64, u64)> {
     Some((total, available))
 }
 
-fn parse_first_float(content: &str) -> Option<f64> {
+fn parse_floats(content: &str, max_items: usize) -> Vec<u64> {
+    let mut out = Vec::new();
     let mut token = String::new();
     for ch in content.chars() {
         if ch.is_ascii_digit() || ch == '.' {
             token.push(ch);
         } else if !token.is_empty() {
-            if let Ok(parsed) = token.parse::<f64>() {
-                return Some(parsed);
+            if let Some(value) = parse_float_to_milli(&token) {
+                out.push(value);
+                if out.len() >= max_items {
+                    break;
+                }
             }
             token.clear();
         }
     }
-    if token.is_empty() {
-        return None;
+    if out.len() < max_items
+        && !token.is_empty()
+        && let Some(value) = parse_float_to_milli(&token)
+    {
+        out.push(value);
     }
-    token.parse::<f64>().ok()
+    out
+}
+
+fn parse_float_to_milli(value: &str) -> Option<u64> {
+    value
+        .parse::<f64>()
+        .ok()
+        .map(|parsed| (parsed * 1000.0).round() as u64)
+}
+
+fn parse_netstat_interface_bytes(content: &str) -> Option<(u64, u64)> {
+    let mut lines = content.lines();
+    let header = lines.next()?;
+    let columns: Vec<&str> = header.split_whitespace().collect();
+    let ibytes_idx = columns.iter().position(|column| *column == "Ibytes")?;
+    let obytes_idx = columns.iter().position(|column| *column == "Obytes")?;
+
+    let mut rx_sum = 0_u64;
+    let mut tx_sum = 0_u64;
+    for line in lines {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() <= obytes_idx {
+            continue;
+        }
+        let name = cols.first().copied().unwrap_or_default();
+        if name.starts_with("lo") {
+            continue;
+        }
+        let Some(rx) = cols
+            .get(ibytes_idx)
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let Some(tx) = cols
+            .get(obytes_idx)
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        rx_sum = rx_sum.saturating_add(rx);
+        tx_sum = tx_sum.saturating_add(tx);
+    }
+    Some((rx_sum, tx_sum))
+}
+
+fn compute_percent(numerator: Option<u64>, denominator: Option<u64>) -> Option<u64> {
+    match (numerator, denominator) {
+        (Some(a), Some(b)) if b > 0 => Some(((a as f64 / b as f64) * 100.0).round() as u64),
+        _ => None,
+    }
 }
 
 fn parse_boot_time_seconds(content: &str) -> Option<u64> {
@@ -2388,6 +2858,12 @@ fn print_status_output(out: &StatusOutput) {
     if let Some(value) = out.metrics.load_avg_1m_milli {
         println!("metrics_load_avg_1m: {}", format_load_milli(value));
     }
+    if let Some(value) = out.metrics.load_avg_5m_milli {
+        println!("metrics_load_avg_5m: {}", format_load_milli(value));
+    }
+    if let Some(value) = out.metrics.load_avg_15m_milli {
+        println!("metrics_load_avg_15m: {}", format_load_milli(value));
+    }
     if let Some(value) = out.metrics.uptime_seconds {
         println!("metrics_uptime_seconds: {value}");
     }
@@ -2397,11 +2873,26 @@ fn print_status_output(out: &StatusOutput) {
     if let Some(value) = out.metrics.memory_used_bytes {
         println!("metrics_memory_used: {}", format_bytes(value));
     }
+    if let Some(value) = out.metrics.memory_used_pct {
+        println!("metrics_memory_used_pct: {value}");
+    }
     if let Some(value) = out.metrics.disk_total_bytes {
         println!("metrics_disk_total: {}", format_bytes(value));
     }
     if let Some(value) = out.metrics.disk_available_bytes {
         println!("metrics_disk_available: {}", format_bytes(value));
+    }
+    if let Some(value) = out.metrics.disk_free_pct {
+        println!("metrics_disk_free_pct: {value}");
+    }
+    if let Some(value) = out.metrics.process_count {
+        println!("metrics_process_count: {value}");
+    }
+    if let Some(value) = out.metrics.network_rx_bytes {
+        println!("metrics_network_rx_bytes: {value}");
+    }
+    if let Some(value) = out.metrics.network_tx_bytes {
+        println!("metrics_network_tx_bytes: {value}");
     }
     println!("checks: label=Checks");
     for check in &out.checks {
@@ -2409,6 +2900,12 @@ fn print_status_output(out: &StatusOutput) {
             "check: id={} label={} severity={} passed={} message={}",
             check.id, check.label, check.severity, check.passed, check.message
         );
+    }
+    if !out.suggested_actions.is_empty() {
+        println!("suggested_actions: count={}", out.suggested_actions.len());
+        for action in &out.suggested_actions {
+            println!("suggested_action: {action}");
+        }
     }
     if !out.warnings.is_empty() {
         println!("warnings: count={}", out.warnings.len());
@@ -3026,6 +3523,28 @@ fn run_remove(dry_run: bool, json: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn collect_remove_candidate(
+    path: PathBuf,
+    dry_run: bool,
+    detected_paths: &mut Vec<String>,
+    removed_paths: &mut Vec<String>,
+    skipped_paths: &mut Vec<String>,
+) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let display = path.display().to_string();
+    detected_paths.push(display.clone());
+    if dry_run {
+        skipped_paths.push(display);
+    } else {
+        remove_path_recursively(&path)?;
+        removed_paths.push(display);
+    }
+    Ok(())
+}
+
 fn run_remove_output(dry_run: bool) -> Result<RemoveOutput, String> {
     let executable = std::env::current_exe()
         .map(|path| path.display().to_string())
@@ -3036,27 +3555,20 @@ fn run_remove_output(dry_run: bool) -> Result<RemoveOutput, String> {
     let mut skipped_paths = Vec::new();
     let mut warnings = Vec::new();
 
-    let state_dir = resolve_remove_state_dir()?;
-    if state_dir.exists() {
-        detected_paths.push(state_dir.display().to_string());
-        if dry_run {
-            skipped_paths.push(state_dir.display().to_string());
-        } else {
-            remove_path_recursively(&state_dir)?;
-            removed_paths.push(state_dir.display().to_string());
-        }
-    }
-
-    let cache_dir = resolve_remove_cache_dir()?;
-    if cache_dir.exists() {
-        detected_paths.push(cache_dir.display().to_string());
-        if dry_run {
-            skipped_paths.push(cache_dir.display().to_string());
-        } else {
-            remove_path_recursively(&cache_dir)?;
-            removed_paths.push(cache_dir.display().to_string());
-        }
-    }
+    collect_remove_candidate(
+        resolve_remove_state_dir()?,
+        dry_run,
+        &mut detected_paths,
+        &mut removed_paths,
+        &mut skipped_paths,
+    )?;
+    collect_remove_candidate(
+        resolve_remove_cache_dir()?,
+        dry_run,
+        &mut detected_paths,
+        &mut removed_paths,
+        &mut skipped_paths,
+    )?;
 
     if detected_paths.is_empty() {
         warnings.push("no managed Preen paths detected".to_string());
@@ -3242,10 +3754,7 @@ fn run_clean_output_with_executor(
         ));
     }
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| err_with(CliErrorKind::Internal, "tokio runtime init failed", e))?;
+    let runtime = new_cli_runtime()?;
     let scan_result = runtime
         .block_on(scan_clean_candidates(&clean_paths))
         .map_err(|e| err_with(CliErrorKind::Internal, "clean scan failed", e))?;
@@ -3335,24 +3844,16 @@ fn run_clean_output_with_executor(
         },
     };
 
-    let policy = DefaultSafetyPolicy::default();
-    let sink = CollectingAuditSink::default();
-    let mode = if dry_run {
-        ExecutionMode::DryRun
-    } else {
-        ExecutionMode::Apply
-    };
-    let result = runtime
-        .block_on(execute_action_with_audit(
+    let (affected_items, freed_bytes, runtime_warnings, audit_events) =
+        execute_action_with_default_policy(
+            &runtime,
             &manifest,
             &rule,
-            mode,
-            if confirm { Some("confirmed") } else { None },
-            &policy,
+            dry_run,
+            confirm,
             clean_executor,
-            Some(&sink),
-        ))
-        .map_err(map_clean_runtime_error)?;
+            map_clean_runtime_error,
+        )?;
 
     Ok(CleanCommandOutput {
         mode: if dry_run {
@@ -3365,11 +3866,11 @@ fn run_clean_output_with_executor(
         target_count: selected_paths.len(),
         estimated_freed_bytes,
         preview_paths: preview,
-        affected_items: result.affected_items,
-        freed_bytes: result.freed_bytes,
+        affected_items,
+        freed_bytes,
         risk_summary,
-        warnings: result.warnings,
-        audit_events: sink.event_count(),
+        warnings: runtime_warnings,
+        audit_events,
     })
 }
 
@@ -3476,28 +3977,17 @@ fn run_purge_output_with_executor(
         },
     };
 
-    let policy = DefaultSafetyPolicy::default();
-    let sink = CollectingAuditSink::default();
-    let mode = if dry_run {
-        ExecutionMode::DryRun
-    } else {
-        ExecutionMode::Apply
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| err_with(CliErrorKind::Internal, "tokio runtime init failed", e))?;
-    let result = runtime
-        .block_on(execute_action_with_audit(
+    let runtime = new_cli_runtime()?;
+    let (affected_items, freed_bytes, runtime_warnings, audit_events) =
+        execute_action_with_default_policy(
+            &runtime,
             &manifest,
             &rule,
-            mode,
-            if confirm { Some("confirmed") } else { None },
-            &policy,
+            dry_run,
+            confirm,
             clean_executor,
-            Some(&sink),
-        ))
-        .map_err(map_purge_runtime_error)?;
+            map_purge_runtime_error,
+        )?;
 
     Ok(PurgeCommandOutput {
         mode: if dry_run {
@@ -3510,92 +4000,46 @@ fn run_purge_output_with_executor(
         target_count: selected_paths.len(),
         estimated_freed_bytes,
         preview_paths,
-        affected_items: result.affected_items,
-        freed_bytes: result.freed_bytes,
-        warnings: result.warnings,
-        audit_events: sink.event_count(),
+        affected_items,
+        freed_bytes,
+        warnings: runtime_warnings,
+        audit_events,
     })
 }
 
-fn map_clean_runtime_error(error: RuntimeExecutionError) -> String {
+fn map_runtime_error_with_prefix(error: RuntimeExecutionError, prefix: &str) -> String {
     match error {
         RuntimeExecutionError::Plan(plan_error) => err_code(
             CliErrorKind::Validation,
-            &format!("clean_{}", plan_error_detail_code(&plan_error)),
+            &format!("{prefix}_{}", plan_error_detail_code(&plan_error)),
             plan_error.to_string(),
         ),
         RuntimeExecutionError::Execute(execution_error) => err_code(
             CliErrorKind::Internal,
-            &format!("clean_{}", execution_error_detail_code(&execution_error)),
+            &format!("{prefix}_{}", execution_error_detail_code(&execution_error)),
             execution_error.to_string(),
         ),
     }
+}
+
+fn map_clean_runtime_error(error: RuntimeExecutionError) -> String {
+    map_runtime_error_with_prefix(error, "clean")
 }
 
 fn map_purge_runtime_error(error: RuntimeExecutionError) -> String {
-    match error {
-        RuntimeExecutionError::Plan(plan_error) => err_code(
-            CliErrorKind::Validation,
-            &format!("purge_{}", plan_error_detail_code(&plan_error)),
-            plan_error.to_string(),
-        ),
-        RuntimeExecutionError::Execute(execution_error) => err_code(
-            CliErrorKind::Internal,
-            &format!("purge_{}", execution_error_detail_code(&execution_error)),
-            execution_error.to_string(),
-        ),
-    }
+    map_runtime_error_with_prefix(error, "purge")
 }
 
 fn map_installer_runtime_error(error: RuntimeExecutionError) -> String {
-    match error {
-        RuntimeExecutionError::Plan(plan_error) => err_code(
-            CliErrorKind::Validation,
-            &format!("installer_{}", plan_error_detail_code(&plan_error)),
-            plan_error.to_string(),
-        ),
-        RuntimeExecutionError::Execute(execution_error) => err_code(
-            CliErrorKind::Internal,
-            &format!(
-                "installer_{}",
-                execution_error_detail_code(&execution_error)
-            ),
-            execution_error.to_string(),
-        ),
-    }
+    map_runtime_error_with_prefix(error, "installer")
 }
 
 fn map_uninstall_runtime_error(error: RuntimeExecutionError) -> String {
-    match error {
-        RuntimeExecutionError::Plan(plan_error) => err_code(
-            CliErrorKind::Validation,
-            &format!("uninstall_{}", plan_error_detail_code(&plan_error)),
-            plan_error.to_string(),
-        ),
-        RuntimeExecutionError::Execute(execution_error) => err_code(
-            CliErrorKind::Internal,
-            &format!(
-                "uninstall_{}",
-                execution_error_detail_code(&execution_error)
-            ),
-            execution_error.to_string(),
-        ),
-    }
+    map_runtime_error_with_prefix(error, "uninstall")
 }
 
 fn map_optimize_runtime_error(error: RuntimeExecutionError) -> String {
-    match error {
-        RuntimeExecutionError::Plan(plan_error) => err_code(
-            CliErrorKind::Validation,
-            &format!("optimize_{}", plan_error_detail_code(&plan_error)),
-            plan_error.to_string(),
-        ),
-        RuntimeExecutionError::Execute(execution_error) => err_code(
-            CliErrorKind::Internal,
-            &format!("optimize_{}", execution_error_detail_code(&execution_error)),
-            execution_error.to_string(),
-        ),
-    }
+    map_runtime_error_with_prefix(error, "optimize")
 }
 
 fn clean_json(out: CleanCommandOutput) -> Result<String, String> {
@@ -3714,7 +4158,7 @@ fn resolve_uninstall_roots() -> Vec<String> {
 
     #[cfg(target_os = "macos")]
     {
-        return vec![
+        vec![
             home.join("Applications").to_string_lossy().to_string(),
             home.join("Library")
                 .join("Application Support")
@@ -3728,7 +4172,7 @@ fn resolve_uninstall_roots() -> Vec<String> {
                 .join("Preferences")
                 .to_string_lossy()
                 .to_string(),
-        ];
+        ]
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -4014,39 +4458,38 @@ fn scan_installer_candidates(
         if !root_path.exists() {
             continue;
         }
-        discover_installer_targets_under(
-            &root_path,
-            0,
+        let mut state = InstallerScanState {
             max_depth,
             min_size_bytes,
-            &mut seen,
-            &mut out,
-            &mut scanned_files,
-            &mut warnings,
-        );
+            seen: &mut seen,
+            out: &mut out,
+            scanned_files: &mut scanned_files,
+            warnings: &mut warnings,
+        };
+        discover_installer_targets_under(&root_path, 0, &mut state);
     }
 
     out.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
     (out, scanned_files, warnings)
 }
 
-fn discover_installer_targets_under(
-    root: &Path,
-    depth: usize,
+struct InstallerScanState<'a> {
     max_depth: usize,
     min_size_bytes: u64,
-    seen: &mut std::collections::HashSet<PathBuf>,
-    out: &mut Vec<CleanSelectedItem>,
-    scanned_files: &mut usize,
-    warnings: &mut Vec<String>,
-) {
-    if depth > max_depth {
+    seen: &'a mut std::collections::HashSet<PathBuf>,
+    out: &'a mut Vec<CleanSelectedItem>,
+    scanned_files: &'a mut usize,
+    warnings: &'a mut Vec<String>,
+}
+
+fn discover_installer_targets_under(root: &Path, depth: usize, state: &mut InstallerScanState<'_>) {
+    if depth > state.max_depth {
         return;
     }
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(e) => {
-            warnings.push(format!(
+            state.warnings.push(format!(
                 "installer scan skipped unreadable directory: {} ({e})",
                 root.display()
             ));
@@ -4066,16 +4509,7 @@ fn discover_installer_targets_under(
         }
 
         if file_type.is_dir() {
-            discover_installer_targets_under(
-                &path,
-                depth + 1,
-                max_depth,
-                min_size_bytes,
-                seen,
-                out,
-                scanned_files,
-                warnings,
-            );
+            discover_installer_targets_under(&path, depth + 1, state);
             continue;
         }
 
@@ -4083,11 +4517,11 @@ fn discover_installer_targets_under(
             continue;
         }
 
-        *scanned_files += 1;
+        *state.scanned_files += 1;
         let Ok(metadata) = fs::metadata(&path) else {
             continue;
         };
-        if metadata.len() < min_size_bytes {
+        if metadata.len() < state.min_size_bytes {
             continue;
         }
         if !is_installer_file(&path) {
@@ -4095,8 +4529,8 @@ fn discover_installer_targets_under(
         }
 
         let canonical = fs::canonicalize(&path).unwrap_or(path.clone());
-        if seen.insert(canonical.clone()) {
-            out.push(CleanSelectedItem {
+        if state.seen.insert(canonical.clone()) {
+            state.out.push(CleanSelectedItem {
                 path: canonical.to_string_lossy().to_string(),
                 size: metadata.len(),
             });
@@ -4144,38 +4578,37 @@ fn scan_uninstall_candidates(
         if !root_path.exists() {
             continue;
         }
-        discover_uninstall_targets_under(
-            &root_path,
-            0,
+        let mut state = UninstallScanState {
             max_depth,
-            &target_key,
-            &mut seen,
-            &mut out,
-            &mut scanned_entries,
-            &mut warnings,
-        );
+            target_key: &target_key,
+            seen: &mut seen,
+            out: &mut out,
+            scanned_entries: &mut scanned_entries,
+            warnings: &mut warnings,
+        };
+        discover_uninstall_targets_under(&root_path, 0, &mut state);
     }
     out.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
     (out, scanned_entries, warnings)
 }
 
-fn discover_uninstall_targets_under(
-    root: &Path,
-    depth: usize,
+struct UninstallScanState<'a> {
     max_depth: usize,
-    target_key: &str,
-    seen: &mut std::collections::HashSet<PathBuf>,
-    out: &mut Vec<CleanSelectedItem>,
-    scanned_entries: &mut usize,
-    warnings: &mut Vec<String>,
-) {
-    if depth > max_depth {
+    target_key: &'a str,
+    seen: &'a mut std::collections::HashSet<PathBuf>,
+    out: &'a mut Vec<CleanSelectedItem>,
+    scanned_entries: &'a mut usize,
+    warnings: &'a mut Vec<String>,
+}
+
+fn discover_uninstall_targets_under(root: &Path, depth: usize, state: &mut UninstallScanState<'_>) {
+    if depth > state.max_depth {
         return;
     }
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(e) => {
-            warnings.push(format!(
+            state.warnings.push(format!(
                 "uninstall scan skipped unreadable directory: {} ({e})",
                 root.display()
             ));
@@ -4192,12 +4625,12 @@ fn discover_uninstall_targets_under(
         if file_type.is_symlink() {
             continue;
         }
-        *scanned_entries += 1;
+        *state.scanned_entries += 1;
 
-        if uninstall_target_matches(&path, target_key) {
+        if uninstall_target_matches(&path, state.target_key) {
             let canonical = fs::canonicalize(&path).unwrap_or(path.clone());
-            if seen.insert(canonical.clone()) {
-                out.push(CleanSelectedItem {
+            if state.seen.insert(canonical.clone()) {
+                state.out.push(CleanSelectedItem {
                     path: canonical.to_string_lossy().to_string(),
                     size: calculate_path_size(&canonical),
                 });
@@ -4205,16 +4638,7 @@ fn discover_uninstall_targets_under(
         }
 
         if file_type.is_dir() {
-            discover_uninstall_targets_under(
-                &path,
-                depth + 1,
-                max_depth,
-                target_key,
-                seen,
-                out,
-                scanned_entries,
-                warnings,
-            );
+            discover_uninstall_targets_under(&path, depth + 1, state);
         }
     }
 }
@@ -4392,7 +4816,7 @@ fn enforce_scope_with_prefix(
                 format!("selected {prefix} path must be absolute: {path}"),
             ));
         }
-        if candidate == PathBuf::from("/") {
+        if candidate == Path::new("/") {
             return Err(err_code(
                 CliErrorKind::Validation,
                 &format!("{prefix}_path_scope_violation"),
@@ -4478,15 +4902,19 @@ fn install_plugin(
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
     let locked = install_plugin_internal_with_verifier(spec, lockfile, verifier)?;
+    let output = PluginInstallOutput {
+        pack_id: locked.pack_id,
+        version: locked.version,
+        source: locked.source,
+        rev: locked.rev,
+    };
     if json {
-        println!(
+        println!("{}", plugin_install_json(output)?);
+    } else {
+        let language = cli_language();
+        print!(
             "{}",
-            plugin_install_json(PluginInstallOutput {
-                pack_id: locked.pack_id,
-                version: locked.version,
-                source: locked.source,
-                rev: locked.rev,
-            })?
+            format_plugin_change_output("install", &output, &language)
         );
     }
     Ok(())
@@ -5084,6 +5512,36 @@ fn print_plugin_test_output(report: &PluginTestOutput, language: &str) {
     print!("{}", format_plugin_test_output(report, language));
 }
 
+fn format_plugin_change_output(
+    kind: &'static str,
+    out: &PluginInstallOutput,
+    language: &str,
+) -> String {
+    let mut output = String::new();
+    writeln!(
+        &mut output,
+        "summary: kind={} pack_id={} version={} source={} rev={} summary_label={}",
+        kind,
+        out.pack_id,
+        out.version,
+        out.source,
+        out.rev,
+        cli_label(language, "summary")
+    )
+    .expect("writing to String should be infallible");
+    let next_steps = [
+        format!("preen plugin verify {}", out.pack_id),
+        format!("preen plugin test {}", out.pack_id),
+        format!("preen plugin info {}", out.pack_id),
+    ];
+    writeln!(&mut output, "next_steps: count={}", next_steps.len())
+        .expect("writing to String should be infallible");
+    for step in next_steps {
+        writeln!(&mut output, "next_step: {step}").expect("writing to String should be infallible");
+    }
+    output
+}
+
 fn format_plugin_test_output(report: &PluginTestOutput, language: &str) -> String {
     let mut out = String::new();
     writeln!(
@@ -5547,15 +6005,19 @@ fn update_plugin(
         lockfile,
         verifier,
     )?;
+    let output = PluginInstallOutput {
+        pack_id: locked.pack_id,
+        version: locked.version,
+        source: locked.source,
+        rev: locked.rev,
+    };
     if json {
-        println!(
+        println!("{}", plugin_update_json(output)?);
+    } else {
+        let language = cli_language();
+        print!(
             "{}",
-            plugin_update_json(PluginInstallOutput {
-                pack_id: locked.pack_id,
-                version: locked.version,
-                source: locked.source,
-                rev: locked.rev,
-            })?
+            format_plugin_change_output("update", &output, &language)
         );
     }
     Ok(())
@@ -6414,6 +6876,24 @@ pub fn plugin_install_json_for_test(
     })
 }
 
+pub fn plugin_install_text_for_test(
+    pack_id: &str,
+    version: &str,
+    source: &str,
+    rev: &str,
+) -> String {
+    format_plugin_change_output(
+        "install",
+        &PluginInstallOutput {
+            pack_id: pack_id.to_string(),
+            version: version.to_string(),
+            source: source.to_string(),
+            rev: rev.to_string(),
+        },
+        "en-US",
+    )
+}
+
 pub fn plugin_update_json_for_test(
     pack_id: &str,
     version: &str,
@@ -6426,6 +6906,24 @@ pub fn plugin_update_json_for_test(
         source: source.to_string(),
         rev: rev.to_string(),
     })
+}
+
+pub fn plugin_update_text_for_test(
+    pack_id: &str,
+    version: &str,
+    source: &str,
+    rev: &str,
+) -> String {
+    format_plugin_change_output(
+        "update",
+        &PluginInstallOutput {
+            pack_id: pack_id.to_string(),
+            version: version.to_string(),
+            source: source.to_string(),
+            rev: rev.to_string(),
+        },
+        "en-US",
+    )
 }
 
 pub fn plugin_remove_json_for_test(pack_id: &str, removed: bool) -> Result<String, String> {
@@ -6731,6 +7229,17 @@ pub fn optimize_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_js
         .map_err(|e| err_with(CliErrorKind::Internal, "optimize output parse failed", e))
 }
 
+pub fn optimize_output_with_executor_for_test(
+    dry_run: bool,
+    confirm: bool,
+    clean_executor: &dyn ActionExecutorPort,
+) -> Result<serde_json::Value, String> {
+    let output = run_optimize_output_with_executor(dry_run, confirm, clean_executor)?;
+    let json = optimize_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "optimize output parse failed", e))
+}
+
 pub fn check_output_for_test(fix: bool) -> Result<serde_json::Value, String> {
     let output = run_check_output(fix);
     let json = check_json(output)?;
@@ -6739,7 +7248,17 @@ pub fn check_output_for_test(fix: bool) -> Result<serde_json::Value, String> {
 }
 
 pub fn analyze_output_for_test(path: Option<&Path>) -> Result<serde_json::Value, String> {
-    let output = run_analyze_output(path.map(|value| value.to_path_buf()))?;
+    let output = run_analyze_output(path.map(|value| value.to_path_buf()), None)?;
+    let json = analyze_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "analyze output parse failed", e))
+}
+
+pub fn analyze_output_with_depth_for_test(
+    path: Option<&Path>,
+    max_depth: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let output = run_analyze_output(path.map(|value| value.to_path_buf()), max_depth)?;
     let json = analyze_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "analyze output parse failed", e))
@@ -6750,6 +7269,10 @@ pub fn status_output_for_test() -> Result<serde_json::Value, String> {
     let json = status_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "status output parse failed", e))
+}
+
+pub fn status_should_emit_json_for_test(json_flag: bool) -> bool {
+    should_emit_status_json(json_flag)
 }
 
 pub fn touchid_output_for_test(
@@ -7393,6 +7916,8 @@ enum CliCommand {
     },
     Analyze {
         path: Option<PathBuf>,
+        #[arg(long)]
+        max_depth: Option<usize>,
         #[arg(long)]
         json: bool,
     },

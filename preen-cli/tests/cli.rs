@@ -8,29 +8,31 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use clap::Parser;
 use preen_cli::{
-    Cli, CliError, CliErrorKind, analyze_output_for_test, check_output_for_test,
-    check_registry_freshness_for_test, clean_runtime_error_detail_code_for_test,
-    clean_selection_summary_for_test, cli_label_for_test, clone_rule_pack_for_test,
-    completion_output_for_test, default_signature_source_for_test, enforce_clean_scope_for_test,
-    enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
-    format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
-    install_plugin_in_dir_for_test, installer_output_for_test,
-    installer_runtime_error_detail_code_for_test, load_lockfile_at, optimize_output_for_test,
+    Cli, CliError, CliErrorKind, analyze_output_for_test, analyze_output_with_depth_for_test,
+    check_output_for_test, check_registry_freshness_for_test,
+    clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test, cli_label_for_test,
+    clone_rule_pack_for_test, completion_output_for_test, default_signature_source_for_test,
+    enforce_clean_scope_for_test, enforce_installer_scope_for_test,
+    enforce_uninstall_scope_for_test, error_json_for_test, format_bytes_for_test,
+    hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
+    installer_output_for_test, installer_runtime_error_detail_code_for_test, load_lockfile_at,
+    optimize_output_for_test, optimize_output_with_executor_for_test,
     optimize_runtime_error_detail_code_for_test, parse_install_spec, parse_plugin_spec,
-    plugin_info_json_for_test, plugin_install_json_for_test, plugin_list_json_for_test,
-    plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
+    plugin_info_json_for_test, plugin_install_json_for_test, plugin_install_text_for_test,
+    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
     plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
     plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
-    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_verify_for_test,
-    plugin_verify_json_for_test, plugin_verify_text_for_test,
+    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
+    plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, purge_output_for_test, registry_backup_path_for_test,
     registry_update_json_for_test, remove_output_for_test, resolve_registry_for_test, run_typed,
     run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
     save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
-    status_output_for_test, test_failure_row_for_test, touchid_output_for_test,
-    trust_policy_from_str, uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
-    update_output_for_test, validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
+    status_output_for_test, status_should_emit_json_for_test, test_failure_row_for_test,
+    touchid_output_for_test, trust_policy_from_str, uninstall_output_for_test,
+    uninstall_runtime_error_detail_code_for_test, update_output_for_test,
+    validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
@@ -77,6 +79,22 @@ impl ActionExecutorPort for ForcedCleanErrorExecutor {
         _plan: &ExecutionPlan,
     ) -> Result<ActionExecutionResult, ActionExecutionError> {
         Err(self.error.clone())
+    }
+}
+
+struct AlwaysSuccessExecutor;
+
+#[async_trait]
+impl ActionExecutorPort for AlwaysSuccessExecutor {
+    async fn execute(
+        &self,
+        _plan: &ExecutionPlan,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        Ok(ActionExecutionResult {
+            affected_items: 1,
+            freed_bytes: 0,
+            warnings: Vec::new(),
+        })
     }
 }
 
@@ -654,6 +672,21 @@ fn plugin_install_update_remove_registry_json_helpers() {
 }
 
 #[test]
+fn plugin_install_and_update_text_outputs_include_next_steps() {
+    let install = plugin_install_text_for_test("a.pack", "1.0.0", "registry", "abc");
+    assert!(install.contains("summary: kind=install"));
+    assert!(install.contains("next_step: preen plugin verify a.pack"));
+    assert!(install.contains("next_step: preen plugin test a.pack"));
+    assert!(install.contains("next_step: preen plugin info a.pack"));
+
+    let update = plugin_update_text_for_test("a.pack", "1.1.0", "registry", "def");
+    assert!(update.contains("summary: kind=update"));
+    assert!(update.contains("next_step: preen plugin verify a.pack"));
+    assert!(update.contains("next_step: preen plugin test a.pack"));
+    assert!(update.contains("next_step: preen plugin info a.pack"));
+}
+
+#[test]
 fn json_envelopes_have_exact_expected_data_keys() {
     let install = plugin_install_json_for_test("a.pack", "1.0.0", "registry", "abc").unwrap();
     let install_v: Value = serde_json::from_str(&install).unwrap();
@@ -980,12 +1013,79 @@ fn optimize_dry_run_json_happy_path() {
     let output = optimize_output_for_test(true, false).unwrap();
     assert_eq!(output["kind"].as_str(), Some("system.optimize"));
     assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+    assert_eq!(output["data"]["post_check_run"].as_bool(), Some(false));
+    assert!(output["data"]["post_check_overall_passed"].is_null());
     assert!(output["data"]["task_count"].as_u64().unwrap_or(0) >= 1);
     let executed = output["data"]["executed_tasks"]
         .as_array()
         .cloned()
         .unwrap_or_default();
     assert!(!executed.is_empty());
+}
+
+#[test]
+fn optimize_apply_runs_post_check_and_reports_remaining_issues() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output =
+            optimize_output_with_executor_for_test(false, true, &AlwaysSuccessExecutor).unwrap();
+        assert_eq!(output["kind"].as_str(), Some("system.optimize"));
+        assert_eq!(output["data"]["mode"].as_str(), Some("apply"));
+        assert_eq!(output["data"]["post_check_run"].as_bool(), Some(true));
+        assert_eq!(
+            output["data"]["post_check_overall_passed"].as_bool(),
+            Some(false)
+        );
+        let actions = output["data"]["post_check_suggested_actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let contains = |command: &str| actions.iter().any(|value| value.as_str() == Some(command));
+        assert!(contains("preen check --fix"));
+        assert!(contains("preen plugin registry-update"));
+        let warnings = output["data"]["warnings"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let has_post_check_warning = warnings.iter().any(|value| {
+            value
+                .as_str()
+                .unwrap_or_default()
+                .contains("post-optimize check")
+        });
+        assert!(has_post_check_warning);
+    });
+}
+
+#[test]
+fn optimize_apply_filters_recursive_optimize_suggestion_from_post_check() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let state_dir = plugin_install_base_dir_from_env()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let plugins_dir = state_dir.join("plugins");
+        fs::create_dir_all(&plugins_dir).unwrap();
+
+        let generated_at = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let registry_index =
+            format!("schema_version = 1\ngenerated_at = \"{generated_at}\"\nentries = []\n");
+        fs::write(state_dir.join("registry-index.toml"), registry_index).unwrap();
+
+        let output =
+            optimize_output_with_executor_for_test(false, true, &AlwaysSuccessExecutor).unwrap();
+        assert_eq!(output["data"]["post_check_run"].as_bool(), Some(true));
+        assert_eq!(
+            output["data"]["post_check_overall_passed"].as_bool(),
+            Some(true)
+        );
+        let actions = output["data"]["post_check_suggested_actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(actions.is_empty());
+    });
 }
 
 #[test]
@@ -1000,6 +1100,13 @@ fn check_json_happy_path_without_fix() {
             system_check_passed_from_json(&output["data"], "state_dir_exists"),
             Some(false)
         );
+        let actions = output["data"]["suggested_actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let contains = |command: &str| actions.iter().any(|value| value.as_str() == Some(command));
+        assert!(contains("preen check --fix"));
+        assert!(contains("preen plugin registry-update"));
     });
 }
 
@@ -1019,6 +1126,13 @@ fn check_fix_json_creates_state_and_plugin_dirs() {
             system_check_passed_from_json(&output["data"], "plugins_dir_exists"),
             Some(true)
         );
+        let actions = output["data"]["suggested_actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let contains = |command: &str| actions.iter().any(|value| value.as_str() == Some(command));
+        assert!(contains("preen plugin registry-update"));
+        assert!(contains("preen optimize --dry-run"));
     });
 }
 
@@ -1038,9 +1152,65 @@ fn analyze_json_happy_path_with_explicit_root() {
         Some(root.to_string_lossy().as_ref())
     );
     assert!(output["data"]["scanned_entries"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(
+        output["data"]["path"].as_str(),
+        output["data"]["root"].as_str()
+    );
+    assert!(output["data"]["max_depth"].as_u64().is_some());
     assert!(output["data"]["total_files"].as_u64().unwrap_or(0) >= 2);
+    assert_eq!(
+        output["data"]["total_size"].as_u64(),
+        output["data"]["total_size_bytes"].as_u64()
+    );
     assert!(output["data"]["total_size_bytes"].as_u64().unwrap_or(0) >= 640);
+    assert!(output["data"]["entries"].as_array().is_some());
     assert!(output["data"]["top_entries"].as_array().is_some());
+}
+
+#[test]
+fn analyze_max_depth_override_reports_truncated_dirs() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("a").join("b")).unwrap();
+    fs::write(root.join("a").join("b").join("deep.bin"), vec![0_u8; 64]).unwrap();
+
+    let output = analyze_output_with_depth_for_test(Some(root), Some(1)).unwrap();
+    assert_eq!(output["data"]["max_depth"].as_u64(), Some(1));
+    assert!(output["data"]["truncated_dirs"].as_u64().unwrap_or(0) >= 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn analyze_includes_symlink_entries_without_skip_warning() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::write(root.join("target.bin"), vec![1_u8; 32]).unwrap();
+    symlink(root.join("target.bin"), root.join("target.link")).unwrap();
+
+    let output = analyze_output_for_test(Some(root)).unwrap();
+    let entries = output["data"]["entries"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let has_symlink = entries.iter().any(|entry| {
+        entry["item_type"].as_str() == Some("symlink")
+            && entry["name"].as_str() == Some("target.link")
+    });
+    assert!(has_symlink);
+
+    let warnings = output["data"]["warnings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let has_skip_warning = warnings.iter().any(|warning| {
+        warning
+            .as_str()
+            .unwrap_or_default()
+            .contains("analyze skipped symlink")
+    });
+    assert!(!has_skip_warning);
 }
 
 #[test]
@@ -1106,6 +1276,7 @@ fn status_json_happy_path_with_temp_user_env() {
         assert!(output["data"]["state_dir"].as_str().is_some());
         assert!(output["data"]["checks"].as_array().is_some());
         assert!(output["data"]["metrics"].as_object().is_some());
+        assert!(output["data"]["suggested_actions"].as_array().is_some());
         assert!(output["data"]["plugin_count"].as_u64().is_some());
     });
 }
@@ -1127,6 +1298,120 @@ fn status_json_health_score_is_bounded() {
         let output = status_output_for_test().unwrap();
         let score = output["data"]["health_score"].as_u64().unwrap_or(101);
         assert!(score <= 100);
+    });
+}
+
+#[test]
+fn status_json_uses_env_overrides_for_extended_metrics() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_STATUS_LOAD_1M_MILLI", "1200");
+            std::env::set_var("PREEN_STATUS_LOAD_5M_MILLI", "900");
+            std::env::set_var("PREEN_STATUS_LOAD_15M_MILLI", "700");
+            std::env::set_var("PREEN_STATUS_MEMORY_TOTAL_BYTES", "1000");
+            std::env::set_var("PREEN_STATUS_MEMORY_USED_BYTES", "250");
+            std::env::set_var("PREEN_STATUS_DISK_TOTAL_BYTES", "2000");
+            std::env::set_var("PREEN_STATUS_DISK_AVAILABLE_BYTES", "1500");
+            std::env::set_var("PREEN_STATUS_PROCESS_COUNT", "42");
+            std::env::set_var("PREEN_STATUS_NET_RX_BYTES", "1234");
+            std::env::set_var("PREEN_STATUS_NET_TX_BYTES", "5678");
+        }
+        let output = status_output_for_test().unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_STATUS_LOAD_1M_MILLI");
+            std::env::remove_var("PREEN_STATUS_LOAD_5M_MILLI");
+            std::env::remove_var("PREEN_STATUS_LOAD_15M_MILLI");
+            std::env::remove_var("PREEN_STATUS_MEMORY_TOTAL_BYTES");
+            std::env::remove_var("PREEN_STATUS_MEMORY_USED_BYTES");
+            std::env::remove_var("PREEN_STATUS_DISK_TOTAL_BYTES");
+            std::env::remove_var("PREEN_STATUS_DISK_AVAILABLE_BYTES");
+            std::env::remove_var("PREEN_STATUS_PROCESS_COUNT");
+            std::env::remove_var("PREEN_STATUS_NET_RX_BYTES");
+            std::env::remove_var("PREEN_STATUS_NET_TX_BYTES");
+        }
+
+        let metrics = &output["data"]["metrics"];
+        assert_eq!(metrics["load_avg_1m_milli"].as_u64(), Some(1200));
+        assert_eq!(metrics["load_avg_5m_milli"].as_u64(), Some(900));
+        assert_eq!(metrics["load_avg_15m_milli"].as_u64(), Some(700));
+        assert_eq!(metrics["memory_used_pct"].as_u64(), Some(25));
+        assert_eq!(metrics["disk_free_pct"].as_u64(), Some(75));
+        assert_eq!(metrics["process_count"].as_u64(), Some(42));
+        assert_eq!(metrics["network_rx_bytes"].as_u64(), Some(1234));
+        assert_eq!(metrics["network_tx_bytes"].as_u64(), Some(5678));
+    });
+}
+
+#[test]
+fn status_force_json_env_can_disable_auto_json() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_STATUS_FORCE_JSON", "0");
+    }
+    assert!(!status_should_emit_json_for_test(false));
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_STATUS_FORCE_JSON");
+    }
+}
+
+#[test]
+fn status_suggested_actions_include_registry_update_when_registry_missing() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = status_output_for_test().unwrap();
+        let actions = output["data"]["suggested_actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let has_registry_update = actions
+            .iter()
+            .any(|value| value.as_str() == Some("preen plugin registry-update"));
+        assert!(has_registry_update);
+    });
+}
+
+#[test]
+fn status_suggested_actions_include_cleanup_and_optimize_for_pressure() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_STATUS_MEMORY_TOTAL_BYTES", "100");
+            std::env::set_var("PREEN_STATUS_MEMORY_USED_BYTES", "95");
+            std::env::set_var("PREEN_STATUS_DISK_TOTAL_BYTES", "100");
+            std::env::set_var("PREEN_STATUS_DISK_AVAILABLE_BYTES", "5");
+            std::env::set_var("PREEN_STATUS_LOAD_1M_MILLI", "10000");
+            std::env::set_var("PREEN_STATUS_PROCESS_COUNT", "42");
+            std::env::set_var("PREEN_STATUS_NET_RX_BYTES", "1234");
+            std::env::set_var("PREEN_STATUS_NET_TX_BYTES", "5678");
+        }
+        let output = status_output_for_test().unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_STATUS_MEMORY_TOTAL_BYTES");
+            std::env::remove_var("PREEN_STATUS_MEMORY_USED_BYTES");
+            std::env::remove_var("PREEN_STATUS_DISK_TOTAL_BYTES");
+            std::env::remove_var("PREEN_STATUS_DISK_AVAILABLE_BYTES");
+            std::env::remove_var("PREEN_STATUS_LOAD_1M_MILLI");
+            std::env::remove_var("PREEN_STATUS_PROCESS_COUNT");
+            std::env::remove_var("PREEN_STATUS_NET_RX_BYTES");
+            std::env::remove_var("PREEN_STATUS_NET_TX_BYTES");
+        }
+
+        let actions = output["data"]["suggested_actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let contains = |command: &str| actions.iter().any(|value| value.as_str() == Some(command));
+        assert!(contains("preen analyze --json"));
+        assert!(contains("preen clean --dry-run"));
+        assert!(contains("preen purge --dry-run"));
+        assert!(contains("preen optimize --dry-run"));
     });
 }
 
@@ -1833,6 +2118,7 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "optimize", "--dry-run", "--json"],
         vec!["preen", "optimize", "--confirm", "--json"],
         vec!["preen", "analyze", "/tmp", "--json"],
+        vec!["preen", "analyze", "/tmp", "--max-depth", "3", "--json"],
         vec!["preen", "status", "--json"],
         vec!["preen", "purge", "--dry-run", "--json"],
         vec!["preen", "purge", "--confirm", "--json"],
