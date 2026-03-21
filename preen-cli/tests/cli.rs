@@ -343,6 +343,19 @@ fn init_preflight_git_repo_with_old_tag(base: &Path) -> String {
     "v0.0.1".to_string()
 }
 
+fn git_rev_parse(repo: &Path, rev: &str) -> String {
+    let out = Command::new("git")
+        .args(["-C", repo.to_str().unwrap(), "rev-parse", rev])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git rev-parse failed for {rev}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 #[test]
 fn parse_install_spec_ok() {
     let (url, rev) = parse_install_spec("https://github.com/Preen-rs/foo@v1.2.3").unwrap();
@@ -2713,6 +2726,36 @@ fn run_typed_install_local_git_verification_failure_has_install_detail_code() {
             Some("install_signature_or_trust_failed")
         );
     });
+}
+
+#[test]
+fn install_plugin_in_dir_local_git_old_tag_resolves_to_tag_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("plugin-repo");
+    let rev = init_preflight_git_repo_with_old_tag(&repo);
+    let expected_commit = git_rev_parse(&repo, &rev);
+
+    let lockfile = tmp.path().join("preen-plugins.lock");
+    let install_dir = tmp.path().join("installed-plugins");
+    let spec = format!("file://{}@{}", repo.display(), rev);
+
+    let locked =
+        install_plugin_in_dir_for_test(&spec, Some(&lockfile), &install_dir, &AlwaysOkVerifier)
+            .unwrap();
+    assert_eq!(
+        locked.resolved_rev.as_deref(),
+        Some(expected_commit.as_str())
+    );
+
+    let checked_out = git_rev_parse(&install_dir.join("test.pack"), "HEAD");
+    assert_eq!(checked_out, expected_commit);
+
+    let lock = load_lockfile_at(&lockfile).unwrap();
+    assert_eq!(lock.plugins.len(), 1);
+    assert_eq!(
+        lock.plugins[0].resolved_rev.as_deref(),
+        Some(expected_commit.as_str())
+    );
 }
 
 #[test]
