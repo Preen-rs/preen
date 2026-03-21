@@ -2182,6 +2182,27 @@ fn top_level_system_commands_reject_unknown_flags() {
 }
 
 #[test]
+fn plugin_all_verbose_option_requires_all_flag() {
+    assert!(
+        Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "preflight",
+            "preen-rs.homebrew@1.0.0",
+            "--verbose",
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["preen", "plugin", "test", "preen-rs.homebrew", "--verbose",])
+            .is_err()
+    );
+
+    assert!(Cli::try_parse_from(["preen", "plugin", "preflight", "--all", "--verbose"]).is_ok());
+    assert!(Cli::try_parse_from(["preen", "plugin", "test", "--all", "--verbose"]).is_ok());
+}
+
+#[test]
 fn clean_rejects_dry_run_with_confirm_conflict() {
     let parsed = Cli::try_parse_from(["preen", "clean", "--dry-run", "--confirm"]);
     assert!(parsed.is_err());
@@ -3817,8 +3838,14 @@ latest_version = "0.1.0"
     manifest.push_str("\n# tampered\n");
     fs::write(&manifest_path, manifest).unwrap();
 
-    let json =
-        plugin_test_all_for_test(Some(&lockfile), &install_dir, true, &AlwaysOkVerifier).unwrap();
+    let json = plugin_test_all_for_test(
+        Some(&lockfile),
+        &install_dir,
+        true,
+        false,
+        &AlwaysOkVerifier,
+    )
+    .unwrap();
     let parsed: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.test_all");
     assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
@@ -4172,7 +4199,8 @@ fn preflight_all_json_includes_clone_failure_detail_code() {
     };
     save_lockfile_at(&lockfile, &lock).unwrap();
 
-    let json = plugin_preflight_all_for_test(Some(&lockfile), &AlwaysOkVerifier).unwrap();
+    let json =
+        plugin_preflight_all_for_test(Some(&lockfile), true, false, &AlwaysOkVerifier).unwrap();
     let parsed: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.preflight_all");
     assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
@@ -4209,7 +4237,8 @@ fn preflight_all_json_includes_signature_or_trust_detail_code() {
     };
     save_lockfile_at(&lockfile, &lock).unwrap();
 
-    let json = plugin_preflight_all_for_test(Some(&lockfile), &AlwaysFailVerifier).unwrap();
+    let json =
+        plugin_preflight_all_for_test(Some(&lockfile), true, false, &AlwaysFailVerifier).unwrap();
     let parsed: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.preflight_all");
     assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
@@ -4224,6 +4253,116 @@ fn preflight_all_json_includes_signature_or_trust_detail_code() {
         hint_for_detail_code_for_test(failures[0]["detail_code"].as_str().unwrap());
     assert_eq!(code, "trust_or_signature_failed");
     assert_eq!(priority, 0);
+}
+
+#[test]
+fn preflight_all_text_failure_first_and_verbose_modes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("plugin-repo");
+    let rev = init_preflight_git_repo(&repo);
+    let lockfile = tmp.path().join("preen-plugins.lock");
+    let lock = PluginLockfile {
+        schema_version: PluginLockfile::SCHEMA_V1,
+        plugins: vec![
+            LockedPlugin {
+                pack_id: "ok.pack".to_string(),
+                source: "git".to_string(),
+                url: format!("file://{}", repo.display()),
+                rev,
+                resolved_rev: None,
+                version: "0.1.0".to_string(),
+                manifest_hash: "sha256:deadbeef".to_string(),
+                signature: "sha256:cafebabe".to_string(),
+                trusted_identity:
+                    "https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0"
+                        .to_string(),
+            },
+            LockedPlugin {
+                pack_id: "bad.pack".to_string(),
+                source: "git".to_string(),
+                url: "file:///definitely/missing/repo".to_string(),
+                rev: "deadbeef".to_string(),
+                resolved_rev: None,
+                version: "0.1.0".to_string(),
+                manifest_hash: "sha256:deadbeef".to_string(),
+                signature: "sha256:cafebabe".to_string(),
+                trusted_identity: "https://github.com/Preen-rs/test".to_string(),
+            },
+        ],
+    };
+    save_lockfile_at(&lockfile, &lock).unwrap();
+
+    let text =
+        plugin_preflight_all_for_test(Some(&lockfile), false, false, &AlwaysOkVerifier).unwrap();
+    assert!(text.contains("summary: kind=preflight_all"));
+    assert!(text.contains("failure: spec=file:///definitely/missing/repo@deadbeef"));
+    assert!(text.contains("passed_results_hidden: 1"));
+    assert!(!text.contains("summary: kind=preflight overall_passed=true"));
+
+    let verbose_text =
+        plugin_preflight_all_for_test(Some(&lockfile), false, true, &AlwaysOkVerifier).unwrap();
+    assert!(verbose_text.contains("summary: kind=preflight_all"));
+    assert!(verbose_text.contains("summary: kind=preflight overall_passed=true"));
+    assert!(!verbose_text.contains("passed_results_hidden:"));
+}
+
+#[test]
+fn plugin_test_all_text_failure_first_and_verbose_modes() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let install_dir = tmp.path().join("plugins");
+        fs::create_dir_all(&install_dir).unwrap();
+        let lockfile = tmp.path().join("preen-plugins.lock");
+
+        let installed = install_plugin_in_dir_for_test(
+            &format!("file://{}@{}", repo.display(), rev),
+            Some(&lockfile),
+            &install_dir,
+            &AlwaysOkVerifier,
+        )
+        .unwrap();
+        let mut lock = load_lockfile_at(&lockfile).unwrap();
+        lock.plugins.push(LockedPlugin {
+            pack_id: "missing.pack".to_string(),
+            source: "git".to_string(),
+            url: "file:///definitely/missing/repo".to_string(),
+            rev: "deadbeef".to_string(),
+            resolved_rev: None,
+            version: "0.1.0".to_string(),
+            manifest_hash: "sha256:deadbeef".to_string(),
+            signature: "sha256:cafebabe".to_string(),
+            trusted_identity: installed.trusted_identity,
+        });
+        save_lockfile_at(&lockfile, &lock).unwrap();
+
+        let text = plugin_test_all_for_test(
+            Some(&lockfile),
+            &install_dir,
+            false,
+            false,
+            &AlwaysOkVerifier,
+        )
+        .unwrap();
+        assert!(text.contains("summary: kind=test_all"));
+        assert!(text.contains("failure: pack_id=missing.pack"));
+        assert!(text.contains("passed_results_hidden: 1"));
+        assert!(!text.contains("summary: kind=test pack_id=test.pack overall_passed=true"));
+
+        let verbose_text = plugin_test_all_for_test(
+            Some(&lockfile),
+            &install_dir,
+            false,
+            true,
+            &AlwaysOkVerifier,
+        )
+        .unwrap();
+        assert!(verbose_text.contains("summary: kind=test_all"));
+        assert!(verbose_text.contains("summary: kind=test pack_id=test.pack overall_passed=true"));
+        assert!(!verbose_text.contains("passed_results_hidden:"));
+    });
 }
 
 #[test]

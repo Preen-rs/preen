@@ -547,7 +547,15 @@ fn run_plugin(cmd: &PluginCommand, verifier: &dyn SignatureVerifier) -> Result<(
             all,
             lockfile,
             json,
-        } => preflight_plugin(spec.as_deref(), *all, lockfile.clone(), *json, verifier),
+            verbose,
+        } => preflight_plugin(
+            spec.as_deref(),
+            *all,
+            lockfile.clone(),
+            *json,
+            *verbose,
+            verifier,
+        ),
         PluginCommand::List { lockfile, json } => list_plugins(lockfile.clone(), *json),
         PluginCommand::Info {
             pack_id,
@@ -564,7 +572,15 @@ fn run_plugin(cmd: &PluginCommand, verifier: &dyn SignatureVerifier) -> Result<(
             all,
             lockfile,
             json,
-        } => test_plugin(target.as_deref(), *all, lockfile.clone(), *json, verifier),
+            verbose,
+        } => test_plugin(
+            target.as_deref(),
+            *all,
+            lockfile.clone(),
+            *json,
+            *verbose,
+            verifier,
+        ),
         PluginCommand::Update {
             pack_id,
             lockfile,
@@ -4925,10 +4941,11 @@ fn preflight_plugin(
     all: bool,
     lockfile: Option<PathBuf>,
     json: bool,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
     if all {
-        return preflight_all_plugins(lockfile, json, verifier);
+        return preflight_all_plugins(lockfile, json, verbose, verifier);
     }
     let spec = spec.ok_or_else(|| {
         err(
@@ -4948,6 +4965,7 @@ fn preflight_plugin(
 fn preflight_all_plugins(
     lockfile: Option<PathBuf>,
     json: bool,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
     let out = build_preflight_all_output(lockfile.as_deref(), verifier)?;
@@ -4955,27 +4973,7 @@ fn preflight_all_plugins(
         println!("{}", plugin_preflight_all_json(out.clone())?);
     } else {
         let language = cli_language();
-        println!(
-            "summary: kind=preflight_all overall_passed={} total={} passed={} failed={} summary_label={}",
-            out.overall_passed,
-            out.total,
-            out.passed,
-            out.failed,
-            cli_label(&language, "summary")
-        );
-        for result in &out.results {
-            print_preflight_output(result);
-        }
-        if out.failures.is_empty() {
-            println!(
-                "failures: [] failures_label={}",
-                cli_label(&language, "failures")
-            );
-        } else {
-            for failure in &out.failures {
-                println!("{}", format_preflight_failure_row(failure, &language));
-            }
-        }
+        print!("{}", format_preflight_all_output(&out, &language, verbose));
     }
     if !out.overall_passed {
         return Err(err_code(
@@ -5095,23 +5093,109 @@ fn plugin_preflight_success_actions(spec: &str) -> Vec<String> {
 }
 
 fn print_preflight_output(out: &PluginPreflightOutput) {
-    println!("summary: kind=preflight overall_passed=true");
-    println!("spec: {}", out.spec);
-    println!("source: {}", out.source);
-    println!("url: {}", out.url);
-    println!("requested_rev: {}", out.requested_rev);
-    println!("resolved_rev: {}", out.resolved_rev);
-    println!("pack_id: {}", out.pack_id);
-    println!("version: {}", out.version);
-    println!("duration_ms: {}", out.duration_ms);
     let language = cli_language();
-    print_check_rows(&out.checks, &language);
-    if !out.suggested_actions.is_empty() {
-        println!("suggested_actions: count={}", out.suggested_actions.len());
+    print!("{}", format_preflight_output(out, &language));
+}
+
+fn format_preflight_output(out: &PluginPreflightOutput, language: &str) -> String {
+    let mut text = String::new();
+    writeln!(&mut text, "summary: kind=preflight overall_passed=true")
+        .expect("writing to String should be infallible");
+    writeln!(&mut text, "spec: {}", out.spec).expect("writing to String should be infallible");
+    writeln!(&mut text, "source: {}", out.source).expect("writing to String should be infallible");
+    writeln!(&mut text, "url: {}", out.url).expect("writing to String should be infallible");
+    writeln!(&mut text, "requested_rev: {}", out.requested_rev)
+        .expect("writing to String should be infallible");
+    writeln!(&mut text, "resolved_rev: {}", out.resolved_rev)
+        .expect("writing to String should be infallible");
+    writeln!(&mut text, "pack_id: {}", out.pack_id)
+        .expect("writing to String should be infallible");
+    writeln!(&mut text, "version: {}", out.version)
+        .expect("writing to String should be infallible");
+    writeln!(&mut text, "duration_ms: {}", out.duration_ms)
+        .expect("writing to String should be infallible");
+    writeln!(&mut text, "checks: label={}", cli_label(language, "checks"))
+        .expect("writing to String should be infallible");
+    for check in &out.checks {
+        writeln!(
+            &mut text,
+            "check: id={} label={} severity={} passed={}",
+            check_id_key(check.check),
+            plugin_check_label(check.check, language),
+            plugin_check_severity(check.check).as_str(),
+            check.passed
+        )
+        .expect("writing to String should be infallible");
+    }
+    if out.suggested_actions.is_empty() {
+        writeln!(&mut text, "suggested_actions: []")
+            .expect("writing to String should be infallible");
+    } else {
+        writeln!(
+            &mut text,
+            "suggested_actions: count={}",
+            out.suggested_actions.len()
+        )
+        .expect("writing to String should be infallible");
         for action in &out.suggested_actions {
-            println!("suggested_action: {action}");
+            writeln!(&mut text, "suggested_action: {action}")
+                .expect("writing to String should be infallible");
         }
     }
+    text
+}
+
+fn format_preflight_all_output(
+    out: &PluginPreflightAllOutput,
+    language: &str,
+    verbose: bool,
+) -> String {
+    let mut text = String::new();
+    writeln!(
+        &mut text,
+        "summary: kind=preflight_all overall_passed={} total={} passed={} failed={} summary_label={}",
+        out.overall_passed,
+        out.total,
+        out.passed,
+        out.failed,
+        cli_label(language, "summary")
+    )
+    .expect("writing to String should be infallible");
+    if out.failures.is_empty() {
+        writeln!(
+            &mut text,
+            "failures: [] failures_label={}",
+            cli_label(language, "failures")
+        )
+        .expect("writing to String should be infallible");
+    } else {
+        for failure in &out.failures {
+            writeln!(
+                &mut text,
+                "{}",
+                format_preflight_failure_row(failure, language)
+            )
+            .expect("writing to String should be infallible");
+        }
+    }
+    if !verbose {
+        let hidden = out.results.len();
+        if hidden > 0 {
+            writeln!(
+                &mut text,
+                "passed_results_hidden: {} rerun_with=preen plugin preflight --all --verbose",
+                hidden
+            )
+            .expect("writing to String should be infallible");
+        }
+        return text;
+    }
+
+    for result in &out.results {
+        write!(&mut text, "{}", format_preflight_output(result, language))
+            .expect("writing to String should be infallible");
+    }
+    text
 }
 
 fn install_plugin_internal_with_verifier(
@@ -5300,10 +5384,11 @@ fn test_plugin(
     all: bool,
     lockfile: Option<PathBuf>,
     json: bool,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
     if all {
-        return test_all_plugins(lockfile, json, verifier);
+        return test_all_plugins(lockfile, json, verbose, verifier);
     }
     let target = pack_id.ok_or_else(|| {
         err(
@@ -5464,6 +5549,7 @@ fn test_plugin_spec(
 fn test_all_plugins(
     lockfile: Option<PathBuf>,
     json: bool,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
     let out = build_test_all_output(lockfile.as_deref(), None, verifier)?;
@@ -5471,27 +5557,7 @@ fn test_all_plugins(
         println!("{}", plugin_test_all_json(out.clone())?);
     } else {
         let language = cli_language();
-        println!(
-            "summary: kind=test_all overall_passed={} total={} passed={} failed={} summary_label={}",
-            out.overall_passed,
-            out.total,
-            out.passed,
-            out.failed,
-            cli_label(&language, "summary")
-        );
-        for result in &out.results {
-            print_plugin_test_output(result, &language);
-        }
-        if out.failures.is_empty() {
-            println!(
-                "failures: [] failures_label={}",
-                cli_label(&language, "failures")
-            );
-        } else {
-            for failure in &out.failures {
-                println!("{}", format_test_failure_row(failure, &language));
-            }
-        }
+        print!("{}", format_test_all_output(&out, &language, verbose));
     }
     if !out.overall_passed {
         return Err(err_code(
@@ -5715,6 +5781,59 @@ fn format_plugin_test_output(report: &PluginTestOutput, language: &str) -> Strin
         }
     }
     out
+}
+
+fn format_test_all_output(out: &PluginTestAllOutput, language: &str, verbose: bool) -> String {
+    let mut text = String::new();
+    writeln!(
+        &mut text,
+        "summary: kind=test_all overall_passed={} total={} passed={} failed={} summary_label={}",
+        out.overall_passed,
+        out.total,
+        out.passed,
+        out.failed,
+        cli_label(language, "summary")
+    )
+    .expect("writing to String should be infallible");
+    if out.failures.is_empty() {
+        writeln!(
+            &mut text,
+            "failures: [] failures_label={}",
+            cli_label(language, "failures")
+        )
+        .expect("writing to String should be infallible");
+    } else {
+        for failure in &out.failures {
+            writeln!(&mut text, "{}", format_test_failure_row(failure, language))
+                .expect("writing to String should be infallible");
+        }
+    }
+    if verbose {
+        for result in &out.results {
+            write!(&mut text, "{}", format_plugin_test_output(result, language))
+                .expect("writing to String should be infallible");
+        }
+        return text;
+    }
+
+    let mut shown_failed_reports = 0usize;
+    for result in &out.results {
+        if !result.overall_passed {
+            shown_failed_reports += 1;
+            write!(&mut text, "{}", format_plugin_test_output(result, language))
+                .expect("writing to String should be infallible");
+        }
+    }
+    let hidden = out.results.len().saturating_sub(shown_failed_reports);
+    if hidden > 0 {
+        writeln!(
+            &mut text,
+            "passed_results_hidden: {} rerun_with=preen plugin test --all --verbose",
+            hidden
+        )
+        .expect("writing to String should be infallible");
+    }
+    text
 }
 
 fn format_plugin_verify_output(report: &PluginTestOutput, language: &str) -> String {
@@ -6863,16 +6982,14 @@ pub fn plugin_test_all_for_test(
     lockfile: Option<&Path>,
     install_dir: &Path,
     json: bool,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<String, String> {
     let out = build_test_all_output(lockfile, Some(install_dir), verifier)?;
     if json {
         return plugin_test_all_json(out);
     }
-    Ok(format!(
-        "summary: kind=test_all overall_passed={} total={} passed={} failed={}",
-        out.overall_passed, out.total, out.passed, out.failed
-    ))
+    Ok(format_test_all_output(&out, "en-US", verbose))
 }
 
 pub fn plugin_test_json_for_test(pack_id: &str) -> Result<String, String> {
@@ -6962,9 +7079,15 @@ pub fn plugin_preflight_all_json_for_test() -> Result<String, String> {
 
 pub fn plugin_preflight_all_for_test(
     lockfile: Option<&Path>,
+    json: bool,
+    verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<String, String> {
-    plugin_preflight_all_json(build_preflight_all_output(lockfile, verifier)?)
+    let out = build_preflight_all_output(lockfile, verifier)?;
+    if json {
+        return plugin_preflight_all_json(out);
+    }
+    Ok(format_preflight_all_output(&out, "en-US", verbose))
 }
 
 pub fn preflight_failure_row_for_test(
@@ -8136,6 +8259,8 @@ enum PluginCommand {
         spec: Option<String>,
         #[arg(long, conflicts_with = "spec")]
         all: bool,
+        #[arg(long, requires = "all", conflicts_with = "spec")]
+        verbose: bool,
         #[arg(long)]
         lockfile: Option<PathBuf>,
         #[arg(long)]
@@ -8165,6 +8290,8 @@ enum PluginCommand {
         target: Option<String>,
         #[arg(long, conflicts_with = "target")]
         all: bool,
+        #[arg(long, requires = "all", conflicts_with = "target")]
+        verbose: bool,
         #[arg(long)]
         lockfile: Option<PathBuf>,
         #[arg(long)]
