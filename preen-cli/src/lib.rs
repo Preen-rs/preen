@@ -111,6 +111,12 @@ struct ErrorOutput {
     error_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint_message: Option<String>,
     message: String,
 }
 
@@ -6954,11 +6960,26 @@ fn to_json_envelope<T: Serialize>(kind: &'static str, data: T) -> Result<String,
 }
 
 fn error_json(err: &CliError) -> Result<String, String> {
+    let language = cli_language();
+    let mut hint_code = None;
+    let mut hint_action = None;
+    let mut hint_message = None;
+    if let Some(detail_code) = err.detail_code.as_deref()
+        && !is_system_detail_code(Some(detail_code))
+    {
+        let hint = plugin_failure_hint_from_detail_code(detail_code);
+        hint_code = Some(hint.code.to_string());
+        hint_action = Some(hint.action.to_string());
+        hint_message = Some(plugin_failure_hint_message(hint.code, &language));
+    }
     to_json_envelope(
         "error",
         ErrorOutput {
             error_kind: err.kind.as_str().to_string(),
             detail_code: err.detail_code.clone(),
+            hint_code,
+            hint_action,
+            hint_message,
             message: err.message.clone(),
         },
     )

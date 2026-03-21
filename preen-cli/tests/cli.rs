@@ -921,6 +921,29 @@ fn error_json_for_test_includes_detail_code_when_present() {
         parsed["data"]["detail_code"].as_str().unwrap(),
         "preflight_spec_invalid"
     );
+    assert_eq!(parsed["data"]["hint_code"].as_str(), Some("invalid_spec"));
+    assert_eq!(
+        parsed["data"]["hint_action"].as_str(),
+        Some("use_format_url_at_tag_or_commit")
+    );
+    assert!(parsed["data"]["hint_message"].as_str().is_some());
+}
+
+#[test]
+fn error_json_for_test_omits_hint_for_system_detail_code() {
+    let json = error_json_for_test(
+        "__preen_kind:unsupported__preen_code:command_not_implemented__remove command is not implemented yet",
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["kind"].as_str().unwrap(), "error");
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("command_not_implemented")
+    );
+    assert!(parsed["data"]["hint_code"].is_null());
+    assert!(parsed["data"]["hint_action"].is_null());
+    assert!(parsed["data"]["hint_message"].is_null());
 }
 
 #[test]
@@ -2359,6 +2382,31 @@ fn format_error_respects_json_flag() {
     assert!(plain_out.contains("kind=trust"));
     assert!(plain_out.contains("kind_label="));
     assert!(plain_out.contains("message="));
+}
+
+#[test]
+fn format_error_json_includes_registry_hint_fields() {
+    let json_cli = Cli::try_parse_from(["preen", "plugin", "registry-update", "--json"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Verification,
+        detail_code: Some("registry_signature_verify_failed".to_string()),
+        message: "registry signature verification failed: SignatureInvalid(\"manifest certificate is missing\")".to_string(),
+    };
+    let json_out = json_cli.format_error(&err);
+    let parsed: Value = serde_json::from_str(&json_out).unwrap();
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("registry_signature_verify_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_code"].as_str(),
+        Some("trust_or_signature_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_action"].as_str(),
+        Some("check_sigstore_identity_and_trust_policy")
+    );
+    assert!(parsed["data"]["hint_message"].as_str().is_some());
 }
 
 #[test]
