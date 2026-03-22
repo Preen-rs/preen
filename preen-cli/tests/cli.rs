@@ -2776,6 +2776,104 @@ fn format_error_localizes_clean_confirmation_in_de() {
 }
 
 #[test]
+fn format_error_localizes_prefixed_system_detail_codes_in_de() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_LANG", "de-DE");
+    }
+    let cli = Cli::try_parse_from(["preen", "status"]).unwrap();
+
+    let cases = [
+        (
+            "purge_confirmation_required",
+            "Purge-Anwenden benoetigt --confirm.",
+        ),
+        (
+            "installer_path_scope_violation",
+            "Ausgewaehlter Installer Pfad liegt ausserhalb",
+        ),
+        (
+            "uninstall_command_timeout",
+            "Uninstall-Befehl hat das Zeitlimit ueberschritten.",
+        ),
+        (
+            "optimize_no_tasks",
+            "Optimize hat auf diesem Betriebssystem keine unterstuetzten Aufgaben.",
+        ),
+        (
+            "analyze_root_not_found",
+            "Analyze-Wurzel wurde nicht gefunden.",
+        ),
+        (
+            "status_state_dir_unavailable",
+            "State-Verzeichnis fuer Status ist nicht verfuegbar.",
+        ),
+        (
+            "completion_shell_unknown",
+            "Shell fuer Completion konnte nicht erkannt werden.",
+        ),
+        (
+            "remove_path_resolve_failed",
+            "Remove-Pfadauflosung ist fehlgeschlagen.",
+        ),
+    ];
+
+    for (detail_code, expected_text) in cases {
+        let err = CliError {
+            kind: CliErrorKind::Validation,
+            detail_code: Some(detail_code.to_string()),
+            message: "original fallback message".to_string(),
+        };
+        let out = cli.format_error(&err);
+        assert!(out.contains(&format!("detail_code={detail_code}")));
+        assert!(
+            out.contains(expected_text),
+            "missing localized text for {detail_code}: {out}"
+        );
+        assert!(
+            !out.contains("hint_code="),
+            "system error should not include plugin hint"
+        );
+    }
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_LANG");
+    }
+}
+
+#[test]
+fn format_error_json_for_system_prefixed_codes_omits_plugin_hint_fields() {
+    let cli = Cli::try_parse_from(["preen", "status", "--json"]).unwrap();
+    let detail_codes = [
+        "clean_confirmation_required",
+        "purge_path_scope_violation",
+        "installer_command_timeout",
+        "uninstall_command_non_zero",
+        "optimize_command_denied",
+        "analyze_root_not_directory",
+        "status_state_dir_unavailable",
+        "completion_read_failed",
+        "remove_execution_failed",
+    ];
+
+    for detail_code in detail_codes {
+        let err = CliError {
+            kind: CliErrorKind::Validation,
+            detail_code: Some(detail_code.to_string()),
+            message: "original fallback message".to_string(),
+        };
+        let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+        assert_eq!(parsed["kind"].as_str(), Some("error"));
+        assert_eq!(parsed["data"]["detail_code"].as_str(), Some(detail_code));
+        assert!(parsed["data"]["hint_code"].is_null());
+        assert!(parsed["data"]["hint_action"].is_null());
+        assert!(parsed["data"]["hint_message"].is_null());
+    }
+}
+
+#[test]
 fn format_error_system_locale_fallback_to_en_us() {
     let _guard = ENV_LOCK.lock().unwrap();
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
