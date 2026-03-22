@@ -3118,16 +3118,32 @@ fn format_error_localizes_prefixed_system_detail_codes_in_de() {
             "Purge-Anwenden benoetigt --confirm.",
         ),
         (
+            "purge_command_timeout",
+            "Purge-Befehl hat das Zeitlimit ueberschritten.",
+        ),
+        (
             "installer_path_scope_violation",
             "Ausgewaehlter Installer Pfad liegt ausserhalb",
+        ),
+        (
+            "installer_command_timeout",
+            "Installer-Befehl hat das Zeitlimit ueberschritten.",
         ),
         (
             "uninstall_command_timeout",
             "Uninstall-Befehl hat das Zeitlimit ueberschritten.",
         ),
         (
+            "uninstall_command_denied",
+            "Uninstall-Befehl wurde durch Allowlist abgelehnt.",
+        ),
+        (
             "optimize_no_tasks",
             "Optimize hat auf diesem Betriebssystem keine unterstuetzten Aufgaben.",
+        ),
+        (
+            "optimize_command_non_zero",
+            "Optimize-Befehl endete mit einem Fehlerstatus.",
         ),
         (
             "analyze_root_not_found",
@@ -3176,10 +3192,14 @@ fn format_error_json_for_system_prefixed_codes_omits_plugin_hint_fields() {
     let cli = Cli::try_parse_from(["preen", "status", "--json"]).unwrap();
     let detail_codes = [
         "clean_confirmation_required",
+        "purge_command_timeout",
         "purge_path_scope_violation",
         "installer_command_timeout",
+        "installer_command_non_zero",
+        "uninstall_command_denied",
         "uninstall_command_non_zero",
         "optimize_command_denied",
+        "optimize_command_non_zero",
         "analyze_root_not_directory",
         "status_state_dir_unavailable",
         "completion_read_failed",
