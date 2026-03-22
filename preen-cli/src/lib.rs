@@ -8105,6 +8105,10 @@ pub fn uninstall_runtime_error_detail_code_for_test(
     decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
 }
 
+pub fn is_git_filter_unsupported_error_for_test(message: &str) -> bool {
+    is_git_filter_unsupported_error(message)
+}
+
 pub fn optimize_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {
     let encoded = map_optimize_runtime_error(error);
     decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
@@ -8190,8 +8194,8 @@ fn clone_rule_pack_at(
 fn git_clone_checkout(url: &str, rev: &str, dest: &Path, shallow: bool) -> Result<String, String> {
     let dest_str = dest.to_string_lossy().to_string();
     if shallow {
-        run_git(&["clone", "--depth", "1", "--no-checkout", url, &dest_str])?;
-        run_git_in(dest, &["fetch", "--depth", "1", "origin", rev])?;
+        run_git_clone_shallow_with_filter_fallback(url, &dest_str)?;
+        run_git_fetch_shallow_with_filter_fallback(dest, rev)?;
         run_git_in(dest, &["checkout", "--detach", "FETCH_HEAD"])?;
     } else {
         run_git(&["clone", url, &dest_str])?;
@@ -8243,6 +8247,73 @@ fn run_git_in(repo: &Path, args: &[&str]) -> Result<(), String> {
         CliErrorKind::Internal,
         format!("git command failed in repo: {cmd}: {stderr}"),
     ))
+}
+
+fn run_git_clone_shallow_with_filter_fallback(url: &str, dest: &str) -> Result<(), String> {
+    let filtered = [
+        "clone",
+        "--filter=blob:none",
+        "--depth",
+        "1",
+        "--no-checkout",
+        url,
+        dest,
+    ];
+    match run_git(&filtered) {
+        Ok(()) => Ok(()),
+        Err(filtered_err) => {
+            if !is_git_filter_unsupported_error(&filtered_err) {
+                return Err(filtered_err);
+            }
+            run_git(&["clone", "--depth", "1", "--no-checkout", url, dest]).map_err(
+                |fallback_err| {
+                    err(
+                        CliErrorKind::Internal,
+                        format!(
+                            "git clone with --filter failed and fallback without --filter failed: filtered={filtered_err}; fallback={fallback_err}"
+                        ),
+                    )
+                },
+            )
+        }
+    }
+}
+
+fn run_git_fetch_shallow_with_filter_fallback(repo: &Path, rev: &str) -> Result<(), String> {
+    let filtered = ["fetch", "--filter=blob:none", "--depth", "1", "origin", rev];
+    match run_git_in(repo, &filtered) {
+        Ok(()) => Ok(()),
+        Err(filtered_err) => {
+            if !is_git_filter_unsupported_error(&filtered_err) {
+                return Err(filtered_err);
+            }
+            run_git_in(repo, &["fetch", "--depth", "1", "origin", rev]).map_err(|fallback_err| {
+                err(
+                    CliErrorKind::Internal,
+                    format!(
+                        "git fetch with --filter failed and fallback without --filter failed: filtered={filtered_err}; fallback={fallback_err}"
+                    ),
+                )
+            })
+        }
+    }
+}
+
+fn is_git_filter_unsupported_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "does not support filter",
+        "server does not support filter",
+        "filtering not recognized by server",
+        "filtering not supported",
+        "unsupported filter",
+        "unrecognized option `filter`",
+        "unknown option `filter`",
+        "unknown option --filter",
+        "invalid filter-spec",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
 }
 
 fn git_resolve_head(path: &Path) -> Result<String, String> {

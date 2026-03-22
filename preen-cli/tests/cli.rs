@@ -16,15 +16,16 @@ use preen_cli::{
     enforce_uninstall_scope_for_test, error_json_for_test, format_bytes_for_test,
     hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
     installer_output_for_test, installer_runtime_error_detail_code_for_test,
-    list_plugins_with_options_for_test, load_lockfile_at, map_error_with_detail_code_for_test,
-    optimize_output_for_test, optimize_output_with_executor_for_test,
-    optimize_runtime_error_detail_code_for_test, parse_install_spec, parse_plugin_spec,
-    plugin_info_json_for_test, plugin_install_json_for_test, plugin_install_text_for_test,
-    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
-    plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
-    plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
-    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
-    plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
+    is_git_filter_unsupported_error_for_test, list_plugins_with_options_for_test, load_lockfile_at,
+    map_error_with_detail_code_for_test, optimize_output_for_test,
+    optimize_output_with_executor_for_test, optimize_runtime_error_detail_code_for_test,
+    parse_install_spec, parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
+    plugin_install_text_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
+    plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
+    plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
+    plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
+    plugin_update_json_for_test, plugin_update_text_for_test, plugin_verify_for_test,
+    plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
     registry_backup_path_for_test, registry_source_detail_code_for_test,
@@ -2668,6 +2669,29 @@ fn run_typed_returns_detail_code_for_install_clone_failure() {
     let err = CliError::from(err);
     assert_eq!(err.kind, CliErrorKind::Internal);
     assert_eq!(err.detail_code.as_deref(), Some("install_clone_failed"));
+}
+
+#[test]
+fn git_filter_unsupported_detection_recognizes_common_messages() {
+    assert!(is_git_filter_unsupported_error_for_test(
+        "fatal: the server does not support filter"
+    ));
+    assert!(is_git_filter_unsupported_error_for_test(
+        "git command failed in repo: fetch --filter=blob:none: fatal: invalid filter-spec 'blob:none'"
+    ));
+    assert!(is_git_filter_unsupported_error_for_test(
+        "error: unknown option --filter"
+    ));
+}
+
+#[test]
+fn git_filter_unsupported_detection_ignores_unrelated_clone_errors() {
+    assert!(!is_git_filter_unsupported_error_for_test(
+        "git command failed: clone --filter=blob:none --depth 1 --no-checkout https://github.com/org/missing.git /tmp/x: fatal: repository not found"
+    ));
+    assert!(!is_git_filter_unsupported_error_for_test(
+        "git command failed in repo: fetch --depth 1 origin v1.0.0: fatal: couldn't find remote ref v1.0.0"
+    ));
 }
 
 #[test]
