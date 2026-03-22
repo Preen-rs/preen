@@ -50,6 +50,37 @@ impl OsActionExecutor {
         })
     }
 
+    fn count_scan_matches(
+        path: &Path,
+        remaining: usize,
+    ) -> Result<(u64, bool), ActionExecutionError> {
+        if remaining == 0 {
+            return Ok((0, true));
+        }
+        if path.is_file() {
+            return Ok((1, false));
+        }
+        if !path.is_dir() {
+            return Ok((0, false));
+        }
+
+        let mut count: usize = 0;
+        let mut truncated = false;
+        for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
+            if entry.path() == path {
+                continue;
+            }
+            if entry.file_type().is_file() {
+                count += 1;
+                if count >= remaining {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        Ok((count as u64, truncated))
+    }
+
     fn parse_command_allowlist(plan: &ExecutionPlan) -> Vec<String> {
         let mut values = Vec::new();
         let mut has_param_allowlist = false;
@@ -183,7 +214,10 @@ impl ActionExecutorPort for OsActionExecutor {
         let action_type = &plan.request.action.action_type;
         if !matches!(
             action_type,
-            ActionType::TrashPaths | ActionType::DeletePaths | ActionType::RunCommand
+            ActionType::TrashPaths
+                | ActionType::DeletePaths
+                | ActionType::RunCommand
+                | ActionType::ScanPaths
         ) {
             return Err(ActionExecutionError::UnsupportedAction {
                 action: format!("{action_type:?}"),
@@ -192,6 +226,39 @@ impl ActionExecutorPort for OsActionExecutor {
 
         if matches!(action_type, ActionType::RunCommand) {
             return Self::execute_run_command(plan).await;
+        }
+
+        if matches!(action_type, ActionType::ScanPaths) {
+            let mut affected_items: u64 = 0;
+            let mut warnings: Vec<String> = Vec::new();
+            let max_items = plan
+                .request
+                .action
+                .max_items
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(usize::MAX);
+            for raw in &plan.request.action.paths {
+                let path = Self::expand_path(raw);
+                if !path.exists() {
+                    warnings.push(format!("path not found: {}", path.display()));
+                    continue;
+                }
+                let remaining = max_items.saturating_sub(affected_items as usize);
+                let (count, truncated) = Self::count_scan_matches(&path, remaining)?;
+                affected_items = affected_items.saturating_add(count);
+                if truncated {
+                    warnings.push(format!(
+                        "scan result truncated at max_items={max_items} for {}",
+                        path.display()
+                    ));
+                    break;
+                }
+            }
+            return Ok(ActionExecutionResult {
+                affected_items,
+                freed_bytes: 0,
+                warnings,
+            });
         }
 
         let mut affected_items: u64 = 0;

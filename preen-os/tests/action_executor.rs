@@ -140,12 +140,59 @@ async fn apply_deletepaths_removes_target() {
 
 #[tokio::test]
 async fn unsupported_action_returns_error() {
-    let plan = sample_plan(ActionType::ScanPaths, ExecutionMode::DryRun, vec![]);
+    let plan = sample_plan(ActionType::AppUninstall, ExecutionMode::DryRun, vec![]);
     let err = OsActionExecutor.execute(&plan).await.unwrap_err();
     assert!(matches!(
         err,
         ActionExecutionError::UnsupportedAction { .. }
     ));
+}
+
+#[tokio::test]
+async fn scan_paths_counts_files_without_modifying_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("nested")).unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    fs::write(dir.path().join("nested").join("b.txt"), b"b").unwrap();
+
+    let plan = sample_plan(
+        ActionType::ScanPaths,
+        ExecutionMode::DryRun,
+        vec![dir.path().to_string_lossy().to_string()],
+    );
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert_eq!(out.freed_bytes, 0);
+    assert!(out.warnings.is_empty());
+    assert!(dir.path().join("a.txt").exists());
+    assert!(dir.path().join("nested").join("b.txt").exists());
+}
+
+#[tokio::test]
+async fn scan_paths_respects_max_items_and_reports_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    fs::write(dir.path().join("b.txt"), b"b").unwrap();
+    fs::write(dir.path().join("c.txt"), b"c").unwrap();
+    let plan = sample_plan_with(
+        ActionType::ScanPaths,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+        Vec::new(),
+        HashMap::new(),
+        Some(10),
+    );
+    let mut limited = plan.clone();
+    limited.request.action.max_items = Some(2);
+
+    let out = OsActionExecutor.execute(&limited).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert_eq!(out.freed_bytes, 0);
+    assert_eq!(out.warnings.len(), 1);
+    assert!(out.warnings[0].contains("truncated"));
+    assert!(dir.path().join("a.txt").exists());
+    assert!(dir.path().join("b.txt").exists());
+    assert!(dir.path().join("c.txt").exists());
 }
 
 #[tokio::test]
