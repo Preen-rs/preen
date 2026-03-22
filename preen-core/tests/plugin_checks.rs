@@ -50,6 +50,10 @@ fn plugin_failure_hint_supports_mapping_and_locale_message() {
     let load_hint = plugin_failure_hint_from_detail_code("verify_pack_load_failed");
     assert_eq!(load_hint.code, "pack_load_failed");
     assert_eq!(load_hint.priority, 2);
+
+    let clone_hint = plugin_failure_hint_from_detail_code("install_source_fetch_failed");
+    assert_eq!(clone_hint.code, "source_checkout_failed");
+    assert_eq!(clone_hint.priority, 2);
 }
 
 #[test]
@@ -82,6 +86,13 @@ fn plugin_localized_error_message_uses_detail_code_and_fallback() {
 
     let en = plugin_localized_error_message(None, "plugin not found", "en-US");
     assert!(en.contains("Plugin not found"));
+
+    let install_source = plugin_localized_error_message(
+        Some("install_source_checkout_failed"),
+        "checkout failed",
+        "en-US",
+    );
+    assert!(install_source.contains("Git checkout failed"));
 
     let passthrough = plugin_localized_error_message(None, "custom failure", "de-DE");
     assert_eq!(passthrough, "custom failure");

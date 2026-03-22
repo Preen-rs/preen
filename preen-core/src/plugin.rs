@@ -327,7 +327,16 @@ pub fn plugin_failure_hint_from_detail_code(code: &str) -> PluginFailureHint {
             action: "use_format_url_at_tag_or_commit",
             priority: 3,
         },
-        "preflight_clone_failed" | "install_clone_failed" => PluginFailureHint {
+        "preflight_clone_failed"
+        | "install_clone_failed"
+        | "preflight_source_clone_failed"
+        | "preflight_source_fetch_failed"
+        | "preflight_source_checkout_failed"
+        | "preflight_source_git_resolve_failed"
+        | "install_source_clone_failed"
+        | "install_source_fetch_failed"
+        | "install_source_checkout_failed"
+        | "install_source_git_resolve_failed" => PluginFailureHint {
             code: "source_checkout_failed",
             action: "validate_git_url_and_pinned_rev",
             priority: 2,
@@ -548,12 +557,20 @@ pub fn plugin_localized_error_message(
                 locale = locale
             )
             .to_string(),
-            "preflight_clone_failed" => rust_i18n::t!(
+            "preflight_clone_failed"
+            | "preflight_source_clone_failed"
+            | "preflight_source_fetch_failed"
+            | "preflight_source_checkout_failed"
+            | "preflight_source_git_resolve_failed" => rust_i18n::t!(
                 "plugin.errors.detail.preflight_clone_failed",
                 locale = locale
             )
             .to_string(),
-            "install_clone_failed" => {
+            "install_clone_failed"
+            | "install_source_clone_failed"
+            | "install_source_fetch_failed"
+            | "install_source_checkout_failed"
+            | "install_source_git_resolve_failed" => {
                 rust_i18n::t!("plugin.errors.detail.install_clone_failed", locale = locale)
                     .to_string()
             }

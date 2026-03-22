@@ -5125,7 +5125,7 @@ fn preflight_single(
         .map_err(|e| err_with(CliErrorKind::Io, "preflight temp dir create failed", e))?;
     let pack_dir = temp_dir.path().join("repo");
     emit_progress(verbose, "plugin.preflight", "clone", &url);
-    let resolved_rev = clone_rule_pack_at(&url, &rev, &pack_dir, "preflight_clone_failed")?;
+    let resolved_rev = clone_rule_pack_at(&url, &rev, &pack_dir, "preflight")?;
     emit_progress(verbose, "plugin.preflight", "load_pack", &url);
     let loaded = load_rule_pack_from_dir(&pack_dir).map_err(|e| {
         err_code(
@@ -5345,7 +5345,7 @@ fn install_plugin_internal_in_dir(
         .map_err(|e| err_with(CliErrorKind::Io, "temp dir create failed", e))?;
     let pack_dir = temp_dir.path().join("repo");
     emit_progress(verbose, command, "clone", &url);
-    let resolved_rev = clone_rule_pack_at(&url, &rev, &pack_dir, "install_clone_failed")?;
+    let resolved_rev = clone_rule_pack_at(&url, &rev, &pack_dir, "install")?;
     emit_progress(verbose, command, "load_pack", &url);
     let loaded = load_rule_pack_from_dir(&pack_dir).map_err(|e| {
         err_code(
@@ -8109,13 +8109,17 @@ pub fn is_git_filter_unsupported_error_for_test(message: &str) -> bool {
     is_git_filter_unsupported_error(message)
 }
 
+pub fn map_clone_error_detail_code_for_test(scope: &str, message: &str) -> &'static str {
+    map_clone_error_detail_code(scope, message)
+}
+
 pub fn optimize_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {
     let encoded = map_optimize_runtime_error(error);
     decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
 }
 
 pub fn clone_rule_pack_for_test(url: &str, rev: &str, dest: &Path) -> Result<String, String> {
-    clone_rule_pack_at(url, rev, dest, "install_clone_failed")
+    clone_rule_pack_at(url, rev, dest, "install")
 }
 
 pub fn install_plugin_in_dir_for_test(
@@ -8186,9 +8190,12 @@ fn clone_rule_pack_at(
     url: &str,
     rev: &str,
     dest: &Path,
-    detail_code: &'static str,
+    scope: &'static str,
 ) -> Result<String, String> {
-    git_clone_at(url, rev, dest).map_err(|e| err_code(CliErrorKind::Internal, detail_code, e))
+    git_clone_at(url, rev, dest).map_err(|e| {
+        let detail_code = map_clone_error_detail_code(scope, &e);
+        err_code(CliErrorKind::Internal, detail_code, e)
+    })
 }
 
 fn git_clone_checkout(url: &str, rev: &str, dest: &Path, shallow: bool) -> Result<String, String> {
@@ -8314,6 +8321,59 @@ fn is_git_filter_unsupported_error(message: &str) -> bool {
     ]
     .iter()
     .any(|pattern| lower.contains(pattern))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloneFailureStage {
+    Clone,
+    Fetch,
+    Checkout,
+    Resolve,
+    Unknown,
+}
+
+fn map_clone_error_detail_code(scope: &str, message: &str) -> &'static str {
+    let stage = detect_clone_failure_stage(message);
+    match (scope, stage) {
+        ("install", CloneFailureStage::Clone) => "install_source_clone_failed",
+        ("install", CloneFailureStage::Fetch) => "install_source_fetch_failed",
+        ("install", CloneFailureStage::Checkout) => "install_source_checkout_failed",
+        ("install", CloneFailureStage::Resolve) => "install_source_git_resolve_failed",
+        ("preflight", CloneFailureStage::Clone) => "preflight_source_clone_failed",
+        ("preflight", CloneFailureStage::Fetch) => "preflight_source_fetch_failed",
+        ("preflight", CloneFailureStage::Checkout) => "preflight_source_checkout_failed",
+        ("preflight", CloneFailureStage::Resolve) => "preflight_source_git_resolve_failed",
+        ("install", CloneFailureStage::Unknown) => "install_clone_failed",
+        ("preflight", CloneFailureStage::Unknown) => "preflight_clone_failed",
+        _ => "install_clone_failed",
+    }
+}
+
+fn detect_clone_failure_stage(message: &str) -> CloneFailureStage {
+    let (_, _, plain) = parse_error_metadata(message);
+    let lower = plain.to_ascii_lowercase();
+    if lower.contains("git command failed in repo: checkout ") {
+        return CloneFailureStage::Checkout;
+    }
+    if lower.contains("git command failed in repo: fetch ") {
+        return CloneFailureStage::Fetch;
+    }
+    if lower.contains("git command failed: clone ") {
+        return CloneFailureStage::Clone;
+    }
+    if lower.contains("rev-parse") {
+        return CloneFailureStage::Resolve;
+    }
+    if lower.contains("fetch") {
+        return CloneFailureStage::Fetch;
+    }
+    if lower.contains("clone") {
+        return CloneFailureStage::Clone;
+    }
+    if lower.contains("checkout") {
+        return CloneFailureStage::Checkout;
+    }
+    CloneFailureStage::Unknown
 }
 
 fn git_resolve_head(path: &Path) -> Result<String, String> {

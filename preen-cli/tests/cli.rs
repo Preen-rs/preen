@@ -17,15 +17,15 @@ use preen_cli::{
     hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
     installer_output_for_test, installer_runtime_error_detail_code_for_test,
     is_git_filter_unsupported_error_for_test, list_plugins_with_options_for_test, load_lockfile_at,
-    map_error_with_detail_code_for_test, optimize_output_for_test,
-    optimize_output_with_executor_for_test, optimize_runtime_error_detail_code_for_test,
-    parse_install_spec, parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
-    plugin_install_text_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
-    plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
-    plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
-    plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
-    plugin_update_json_for_test, plugin_update_text_for_test, plugin_verify_for_test,
-    plugin_verify_json_for_test, plugin_verify_text_for_test,
+    map_clone_error_detail_code_for_test, map_error_with_detail_code_for_test,
+    optimize_output_for_test, optimize_output_with_executor_for_test,
+    optimize_runtime_error_detail_code_for_test, parse_install_spec, parse_plugin_spec,
+    plugin_info_json_for_test, plugin_install_json_for_test, plugin_install_text_for_test,
+    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
+    plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
+    plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
+    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
+    plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
     registry_backup_path_for_test, registry_source_detail_code_for_test,
@@ -2668,7 +2668,10 @@ fn run_typed_returns_detail_code_for_install_clone_failure() {
     .unwrap_err();
     let err = CliError::from(err);
     assert_eq!(err.kind, CliErrorKind::Internal);
-    assert_eq!(err.detail_code.as_deref(), Some("install_clone_failed"));
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("install_source_clone_failed")
+    );
 }
 
 #[test]
@@ -2692,6 +2695,63 @@ fn git_filter_unsupported_detection_ignores_unrelated_clone_errors() {
     assert!(!is_git_filter_unsupported_error_for_test(
         "git command failed in repo: fetch --depth 1 origin v1.0.0: fatal: couldn't find remote ref v1.0.0"
     ));
+}
+
+#[test]
+fn map_clone_error_detail_code_identifies_clone_fetch_checkout_resolve_stages() {
+    assert_eq!(
+        map_clone_error_detail_code_for_test(
+            "install",
+            "__preen_kind:internal__git command failed: clone --depth 1 --no-checkout https://example/repo /tmp/repo: fatal: repository not found"
+        ),
+        "install_source_clone_failed"
+    );
+    assert_eq!(
+        map_clone_error_detail_code_for_test(
+            "install",
+            "__preen_kind:internal__git command failed in repo: fetch --depth 1 origin v1.0.0: fatal: couldn't find remote ref v1.0.0"
+        ),
+        "install_source_fetch_failed"
+    );
+    assert_eq!(
+        map_clone_error_detail_code_for_test(
+            "install",
+            "__preen_kind:internal__git command failed in repo: checkout --detach FETCH_HEAD: error: pathspec 'FETCH_HEAD' did not match any file(s) known to git"
+        ),
+        "install_source_checkout_failed"
+    );
+    assert_eq!(
+        map_clone_error_detail_code_for_test(
+            "preflight",
+            "__preen_kind:internal__git rev-parse failed"
+        ),
+        "preflight_source_git_resolve_failed"
+    );
+}
+
+#[test]
+fn map_clone_error_detail_code_falls_back_for_unknown_scope_or_message() {
+    assert_eq!(
+        map_clone_error_detail_code_for_test(
+            "install",
+            "__preen_kind:internal__unexpected failure"
+        ),
+        "install_clone_failed"
+    );
+    assert_eq!(
+        map_clone_error_detail_code_for_test(
+            "preflight",
+            "__preen_kind:internal__unexpected failure"
+        ),
+        "preflight_clone_failed"
+    );
+    assert_eq!(
+        map_clone_error_detail_code_for_test(
+            "unknown",
+            "__preen_kind:internal__unexpected failure"
+        ),
+        "install_clone_failed"
+    );
 }
 
 #[test]
@@ -4815,7 +4875,7 @@ fn preflight_all_json_includes_clone_failure_detail_code() {
     assert_eq!(failures.len(), 1);
     assert_eq!(
         failures[0]["detail_code"].as_str(),
-        Some("preflight_clone_failed")
+        Some("preflight_source_clone_failed")
     );
 }
 
