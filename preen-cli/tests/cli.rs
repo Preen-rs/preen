@@ -225,6 +225,28 @@ fn with_clean_path_override<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
+fn with_purge_path_override<T>(f: impl FnOnce() -> T) -> T {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let purge_target = workspace.join("node_modules");
+    fs::create_dir_all(&purge_target).unwrap();
+    fs::write(purge_target.join("placeholder.js"), b"const x = 1;").unwrap();
+    let old = std::env::var_os("PREEN_PURGE_PATHS");
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_PURGE_PATHS", workspace.as_os_str());
+    }
+    let out = f();
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        match old {
+            Some(v) => std::env::set_var("PREEN_PURGE_PATHS", v),
+            None => std::env::remove_var("PREEN_PURGE_PATHS"),
+        }
+    }
+    out
+}
+
 fn clean_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
     let _guard = ENV_LOCK.lock().unwrap();
     with_clean_path_override(|| {
@@ -238,6 +260,33 @@ fn clean_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
         .unwrap_err();
         serde_json::from_str(&cli.format_error(&err)).unwrap()
     })
+}
+
+fn purge_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_purge_path_override(|| {
+        let cli = Cli::try_parse_from(["preen", "purge", "--confirm", "--json"]).unwrap();
+        let executor = ForcedCleanErrorExecutor { error };
+        let err = run_typed_with_verifier_and_clean_executor_for_test(
+            cli.clone(),
+            &AlwaysOkVerifier,
+            &executor,
+        )
+        .unwrap_err();
+        serde_json::from_str(&cli.format_error(&err)).unwrap()
+    })
+}
+
+fn optimize_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+    let cli = Cli::try_parse_from(["preen", "optimize", "--confirm", "--json"]).unwrap();
+    let executor = ForcedCleanErrorExecutor { error };
+    let err = run_typed_with_verifier_and_clean_executor_for_test(
+        cli.clone(),
+        &AlwaysOkVerifier,
+        &executor,
+    )
+    .unwrap_err();
+    serde_json::from_str(&cli.format_error(&err)).unwrap()
 }
 
 fn check_passed_from_json(data: &Value, check_id: &str) -> Option<bool> {
@@ -2276,6 +2325,40 @@ fn clean_json_maps_command_non_zero_detail_code() {
         parsed["data"]["detail_code"].as_str().unwrap(),
         "clean_command_non_zero"
     );
+}
+
+#[test]
+fn purge_json_maps_command_timeout_detail_code_without_plugin_hints() {
+    let parsed = purge_error_json_for_forced_executor(ActionExecutionError::CommandTimeout {
+        command: "purge command".to_string(),
+        timeout_sec: 9,
+    });
+    assert_eq!(parsed["kind"].as_str().unwrap(), "error");
+    assert_eq!(parsed["data"]["error_kind"].as_str().unwrap(), "internal");
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "purge_command_timeout"
+    );
+    assert!(parsed["data"]["hint_code"].is_null());
+    assert!(parsed["data"]["hint_action"].is_null());
+    assert!(parsed["data"]["hint_message"].is_null());
+}
+
+#[test]
+fn optimize_json_maps_command_non_zero_detail_code_without_plugin_hints() {
+    let parsed = optimize_error_json_for_forced_executor(ActionExecutionError::CommandNonZero {
+        command: "optimize command".to_string(),
+        code: Some(7),
+    });
+    assert_eq!(parsed["kind"].as_str().unwrap(), "error");
+    assert_eq!(parsed["data"]["error_kind"].as_str().unwrap(), "internal");
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "optimize_command_non_zero"
+    );
+    assert!(parsed["data"]["hint_code"].is_null());
+    assert!(parsed["data"]["hint_action"].is_null());
+    assert!(parsed["data"]["hint_message"].is_null());
 }
 
 #[test]
