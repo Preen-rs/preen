@@ -3,10 +3,11 @@ use preen_core::action_runtime::{
     ActionExecutionError, ActionExecutionResult, ActionExecutorPort, ExecutionMode, ExecutionPlan,
 };
 use preen_core::plugin::ActionType;
+use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::process::Command as TokioCommand;
 use walkdir::WalkDir;
 
@@ -50,15 +51,19 @@ impl OsActionExecutor {
         })
     }
 
-    fn count_scan_matches(
+    fn count_matching_files<F>(
         path: &Path,
         remaining: usize,
-    ) -> Result<(u64, bool), ActionExecutionError> {
+        mut matcher: F,
+    ) -> Result<(u64, bool), ActionExecutionError>
+    where
+        F: FnMut(&Path) -> Result<bool, ActionExecutionError>,
+    {
         if remaining == 0 {
             return Ok((0, true));
         }
         if path.is_file() {
-            return Ok((1, false));
+            return Ok((u64::from(matcher(path)?), false));
         }
         if !path.is_dir() {
             return Ok((0, false));
@@ -70,7 +75,7 @@ impl OsActionExecutor {
             if entry.path() == path {
                 continue;
             }
-            if entry.file_type().is_file() {
+            if entry.file_type().is_file() && matcher(entry.path())? {
                 count += 1;
                 if count >= remaining {
                     truncated = true;
@@ -79,6 +84,55 @@ impl OsActionExecutor {
             }
         }
         Ok((count as u64, truncated))
+    }
+
+    fn parse_max_items(plan: &ExecutionPlan) -> usize {
+        plan.request
+            .action
+            .max_items
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(usize::MAX)
+    }
+
+    fn parse_required_param<'a>(
+        plan: &'a ExecutionPlan,
+        keys: &[&str],
+        missing_message: &'static str,
+    ) -> Result<&'a str, ActionExecutionError> {
+        for key in keys {
+            if let Some(value) = plan.request.action.params.get(*key) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed);
+                }
+            }
+        }
+        Err(ActionExecutionError::Failed {
+            message: missing_message.to_string(),
+        })
+    }
+
+    fn parse_regex(plan: &ExecutionPlan) -> Result<Regex, ActionExecutionError> {
+        let pattern = Self::parse_required_param(
+            plan,
+            &["pattern", "regex"],
+            "match_regex requires params.pattern",
+        )?;
+        Regex::new(pattern).map_err(|e| ActionExecutionError::Failed {
+            message: format!("match_regex invalid pattern: {e}"),
+        })
+    }
+
+    fn parse_days(plan: &ExecutionPlan) -> Result<u64, ActionExecutionError> {
+        let raw = Self::parse_required_param(
+            plan,
+            &["days", "older_than_days", "age_days"],
+            "older_than_days requires params.days",
+        )?;
+        raw.parse::<u64>()
+            .map_err(|_| ActionExecutionError::Failed {
+                message: format!("older_than_days invalid days value: {raw}"),
+            })
     }
 
     fn parse_command_allowlist(plan: &ExecutionPlan) -> Vec<String> {
@@ -203,6 +257,86 @@ impl OsActionExecutor {
             warnings: Vec::new(),
         })
     }
+
+    fn execute_match_regex(
+        plan: &ExecutionPlan,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        let regex = Self::parse_regex(plan)?;
+        let max_items = Self::parse_max_items(plan);
+        let mut affected_items: u64 = 0;
+        let mut warnings: Vec<String> = Vec::new();
+
+        for raw in &plan.request.action.paths {
+            let path = Self::expand_path(raw);
+            if !path.exists() {
+                warnings.push(format!("path not found: {}", path.display()));
+                continue;
+            }
+            let remaining = max_items.saturating_sub(affected_items as usize);
+            let (count, truncated) = Self::count_matching_files(&path, remaining, |candidate| {
+                Ok(regex.is_match(&candidate.to_string_lossy()))
+            })?;
+            affected_items = affected_items.saturating_add(count);
+            if truncated {
+                warnings.push(format!(
+                    "scan result truncated at max_items={max_items} for {}",
+                    path.display()
+                ));
+                break;
+            }
+        }
+
+        Ok(ActionExecutionResult {
+            affected_items,
+            freed_bytes: 0,
+            warnings,
+        })
+    }
+
+    fn execute_older_than_days(
+        plan: &ExecutionPlan,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        let days = Self::parse_days(plan)?;
+        let max_items = Self::parse_max_items(plan);
+        let mut affected_items: u64 = 0;
+        let mut warnings: Vec<String> = Vec::new();
+        let seconds = days.saturating_mul(24_u64 * 60 * 60);
+        let threshold = Duration::from_secs(seconds);
+
+        for raw in &plan.request.action.paths {
+            let path = Self::expand_path(raw);
+            if !path.exists() {
+                warnings.push(format!("path not found: {}", path.display()));
+                continue;
+            }
+            let remaining = max_items.saturating_sub(affected_items as usize);
+            let (count, truncated) = Self::count_matching_files(&path, remaining, |candidate| {
+                let modified = fs::metadata(candidate)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|e| ActionExecutionError::Failed {
+                        message: format!("older_than_days metadata failed: {candidate:?}: {e}"),
+                    })?;
+                let age = SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or_else(|_| Duration::from_secs(0));
+                Ok(age > threshold)
+            })?;
+            affected_items = affected_items.saturating_add(count);
+            if truncated {
+                warnings.push(format!(
+                    "scan result truncated at max_items={max_items} for {}",
+                    path.display()
+                ));
+                break;
+            }
+        }
+
+        Ok(ActionExecutionResult {
+            affected_items,
+            freed_bytes: 0,
+            warnings,
+        })
+    }
 }
 
 #[async_trait]
@@ -218,6 +352,8 @@ impl ActionExecutorPort for OsActionExecutor {
                 | ActionType::DeletePaths
                 | ActionType::RunCommand
                 | ActionType::ScanPaths
+                | ActionType::MatchRegex
+                | ActionType::OlderThanDays
         ) {
             return Err(ActionExecutionError::UnsupportedAction {
                 action: format!("{action_type:?}"),
@@ -231,12 +367,7 @@ impl ActionExecutorPort for OsActionExecutor {
         if matches!(action_type, ActionType::ScanPaths) {
             let mut affected_items: u64 = 0;
             let mut warnings: Vec<String> = Vec::new();
-            let max_items = plan
-                .request
-                .action
-                .max_items
-                .and_then(|value| usize::try_from(value).ok())
-                .unwrap_or(usize::MAX);
+            let max_items = Self::parse_max_items(plan);
             for raw in &plan.request.action.paths {
                 let path = Self::expand_path(raw);
                 if !path.exists() {
@@ -244,7 +375,9 @@ impl ActionExecutorPort for OsActionExecutor {
                     continue;
                 }
                 let remaining = max_items.saturating_sub(affected_items as usize);
-                let (count, truncated) = Self::count_scan_matches(&path, remaining)?;
+                let (count, truncated) = Self::count_matching_files(&path, remaining, |_| {
+                    Ok::<bool, ActionExecutionError>(true)
+                })?;
                 affected_items = affected_items.saturating_add(count);
                 if truncated {
                     warnings.push(format!(
@@ -259,6 +392,14 @@ impl ActionExecutorPort for OsActionExecutor {
                 freed_bytes: 0,
                 warnings,
             });
+        }
+
+        if matches!(action_type, ActionType::MatchRegex) {
+            return Self::execute_match_regex(plan);
+        }
+
+        if matches!(action_type, ActionType::OlderThanDays) {
+            return Self::execute_older_than_days(plan);
         }
 
         let mut affected_items: u64 = 0;

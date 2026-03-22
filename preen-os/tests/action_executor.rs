@@ -196,6 +196,169 @@ async fn scan_paths_respects_max_items_and_reports_truncation() {
 }
 
 #[tokio::test]
+async fn match_regex_counts_only_matching_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("keep.log"), b"a").unwrap();
+    fs::write(dir.path().join("skip.tmp"), b"b").unwrap();
+    let mut params = HashMap::new();
+    params.insert("pattern".to_string(), r"\.log$".to_string());
+    let plan = sample_plan_with(
+        ActionType::MatchRegex,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+        Vec::new(),
+        params,
+        Some(10),
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert_eq!(out.freed_bytes, 0);
+    assert!(out.warnings.is_empty());
+}
+
+#[tokio::test]
+async fn match_regex_respects_max_items_and_reports_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.log"), b"a").unwrap();
+    fs::write(dir.path().join("b.log"), b"b").unwrap();
+    fs::write(dir.path().join("c.log"), b"c").unwrap();
+    let mut params = HashMap::new();
+    params.insert("pattern".to_string(), r"\.log$".to_string());
+    let mut plan = sample_plan_with(
+        ActionType::MatchRegex,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+        Vec::new(),
+        params,
+        Some(10),
+    );
+    plan.request.action.max_items = Some(2);
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert_eq!(out.freed_bytes, 0);
+    assert_eq!(out.warnings.len(), 1);
+    assert!(out.warnings[0].contains("truncated"));
+}
+
+#[tokio::test]
+async fn match_regex_requires_pattern_param() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.log"), b"a").unwrap();
+    let plan = sample_plan_with(
+        ActionType::MatchRegex,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+        Vec::new(),
+        HashMap::new(),
+        Some(10),
+    );
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::Failed { .. }));
+    assert!(err.to_string().contains("requires params.pattern"));
+}
+
+#[tokio::test]
+async fn match_regex_rejects_invalid_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.log"), b"a").unwrap();
+    let mut params = HashMap::new();
+    params.insert("pattern".to_string(), "(".to_string());
+    let plan = sample_plan_with(
+        ActionType::MatchRegex,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+        Vec::new(),
+        params,
+        Some(10),
+    );
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::Failed { .. }));
+    assert!(err.to_string().contains("invalid pattern"));
+}
+
+#[tokio::test]
+async fn older_than_days_days_zero_counts_all_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    fs::write(dir.path().join("b.txt"), b"b").unwrap();
+    let mut params = HashMap::new();
+    params.insert("days".to_string(), "0".to_string());
+    let plan = sample_plan_with(
+        ActionType::OlderThanDays,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+        Vec::new(),
+        params,
+        Some(10),
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert_eq!(out.freed_bytes, 0);
+    assert!(out.warnings.is_empty());
+}
+
+#[tokio::test]
+async fn older_than_days_large_days_matches_none() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    fs::write(dir.path().join("b.txt"), b"b").unwrap();
+    let mut params = HashMap::new();
+    params.insert("days".to_string(), "10000".to_string());
+    let plan = sample_plan_with(
+        ActionType::OlderThanDays,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+        Vec::new(),
+        params,
+        Some(10),
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 0);
+    assert_eq!(out.freed_bytes, 0);
+    assert!(out.warnings.is_empty());
+}
+
+#[tokio::test]
+async fn older_than_days_requires_days_param() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    let plan = sample_plan_with(
+        ActionType::OlderThanDays,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+        Vec::new(),
+        HashMap::new(),
+        Some(10),
+    );
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::Failed { .. }));
+    assert!(err.to_string().contains("requires params.days"));
+}
+
+#[tokio::test]
+async fn older_than_days_rejects_invalid_days_param() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    let mut params = HashMap::new();
+    params.insert("days".to_string(), "abc".to_string());
+    let plan = sample_plan_with(
+        ActionType::OlderThanDays,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+        Vec::new(),
+        params,
+        Some(10),
+    );
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::Failed { .. }));
+    assert!(err.to_string().contains("invalid days value"));
+}
+
+#[tokio::test]
 async fn run_command_dry_run_reports_warning() {
     let mut params = HashMap::new();
     params.insert("allowlist".to_string(), "echo".to_string());
