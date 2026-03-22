@@ -1628,31 +1628,7 @@ fn check_json(out: SystemCheckOutput) -> Result<String, String> {
 }
 
 fn print_check_output(out: &SystemCheckOutput) {
-    println!(
-        "summary: kind=system_check overall_passed={}",
-        out.overall_passed
-    );
-    println!("mode: {}", out.mode);
-    println!("checks: label=Checks");
-    for check in &out.checks {
-        println!(
-            "check: id={} label={} severity={} passed={} fixed={} message={}",
-            check.id, check.label, check.severity, check.passed, check.fixed, check.message
-        );
-    }
-    println!("fixes_applied: {}", out.fixes_applied);
-    if !out.suggested_actions.is_empty() {
-        println!("suggested_actions: count={}", out.suggested_actions.len());
-        for action in &out.suggested_actions {
-            println!("suggested_action: {action}");
-        }
-    }
-    if !out.warnings.is_empty() {
-        println!("warnings: count={}", out.warnings.len());
-        for warning in &out.warnings {
-            println!("warning: {warning}");
-        }
-    }
+    print!("{}", check_text(out));
 }
 
 fn run_analyze(path: Option<PathBuf>, max_depth: Option<usize>, json: bool) -> Result<(), String> {
@@ -1964,30 +1940,7 @@ fn analyze_json(out: AnalyzeOutput) -> Result<String, String> {
 }
 
 fn print_analyze_output(out: &AnalyzeOutput) {
-    println!("summary: kind=system_analyze");
-    println!("root: {}", out.root);
-    println!("max_depth: {}", out.max_depth);
-    println!("scanned_entries: {}", out.scanned_entries);
-    println!("total_files: {}", out.total_files);
-    println!("total_dirs: {}", out.total_dirs);
-    println!("total_size: {}", format_bytes(out.total_size_bytes));
-    println!("truncated_dirs: {}", out.truncated_dirs);
-    println!("entries: label=Top entries");
-    for entry in &out.top_entries {
-        println!(
-            "entry: name={} type={} size={} path={}",
-            entry.name,
-            entry.item_type,
-            format_bytes(entry.size_bytes),
-            entry.path
-        );
-    }
-    if !out.warnings.is_empty() {
-        println!("warnings: count={}", out.warnings.len());
-        for warning in &out.warnings {
-            println!("warning: {warning}");
-        }
-    }
+    print!("{}", analyze_text(out));
 }
 
 fn run_status(json: bool) -> Result<(), String> {
@@ -2784,87 +2737,7 @@ fn status_json(out: StatusOutput) -> Result<String, String> {
 }
 
 fn print_status_output(out: &StatusOutput) {
-    println!(
-        "summary: kind=system_status overall_passed={} health_score={}",
-        out.overall_passed, out.health_score
-    );
-    println!("mode: {}", out.mode);
-    println!("os: {}", out.os);
-    println!("arch: {}", out.arch);
-    println!("state_dir: {}", out.state_dir);
-    if let Some(plugin_count) = out.plugin_count {
-        println!("plugins: count={plugin_count}");
-    } else {
-        println!("plugins: count=unknown");
-    }
-    println!("registry_index_present: {}", out.registry_index_present);
-    if let Some(generated_at) = &out.registry_generated_at {
-        println!("registry_generated_at: {generated_at}");
-    }
-    if let Some(age_days) = out.registry_age_days {
-        println!("registry_age_days: {age_days}");
-    }
-    if let Some(value) = out.metrics.cpu_cores {
-        println!("metrics_cpu_cores: {value}");
-    }
-    if let Some(value) = out.metrics.load_avg_1m_milli {
-        println!("metrics_load_avg_1m: {}", format_load_milli(value));
-    }
-    if let Some(value) = out.metrics.load_avg_5m_milli {
-        println!("metrics_load_avg_5m: {}", format_load_milli(value));
-    }
-    if let Some(value) = out.metrics.load_avg_15m_milli {
-        println!("metrics_load_avg_15m: {}", format_load_milli(value));
-    }
-    if let Some(value) = out.metrics.uptime_seconds {
-        println!("metrics_uptime_seconds: {value}");
-    }
-    if let Some(value) = out.metrics.memory_total_bytes {
-        println!("metrics_memory_total: {}", format_bytes(value));
-    }
-    if let Some(value) = out.metrics.memory_used_bytes {
-        println!("metrics_memory_used: {}", format_bytes(value));
-    }
-    if let Some(value) = out.metrics.memory_used_pct {
-        println!("metrics_memory_used_pct: {value}");
-    }
-    if let Some(value) = out.metrics.disk_total_bytes {
-        println!("metrics_disk_total: {}", format_bytes(value));
-    }
-    if let Some(value) = out.metrics.disk_available_bytes {
-        println!("metrics_disk_available: {}", format_bytes(value));
-    }
-    if let Some(value) = out.metrics.disk_free_pct {
-        println!("metrics_disk_free_pct: {value}");
-    }
-    if let Some(value) = out.metrics.process_count {
-        println!("metrics_process_count: {value}");
-    }
-    if let Some(value) = out.metrics.network_rx_bytes {
-        println!("metrics_network_rx_bytes: {value}");
-    }
-    if let Some(value) = out.metrics.network_tx_bytes {
-        println!("metrics_network_tx_bytes: {value}");
-    }
-    println!("checks: label=Checks");
-    for check in &out.checks {
-        println!(
-            "check: id={} label={} severity={} passed={} message={}",
-            check.id, check.label, check.severity, check.passed, check.message
-        );
-    }
-    if !out.suggested_actions.is_empty() {
-        println!("suggested_actions: count={}", out.suggested_actions.len());
-        for action in &out.suggested_actions {
-            println!("suggested_action: {action}");
-        }
-    }
-    if !out.warnings.is_empty() {
-        println!("warnings: count={}", out.warnings.len());
-        for warning in &out.warnings {
-            println!("warning: {warning}");
-        }
-    }
+    print!("{}", status_text(out));
 }
 
 fn run_touchid(action: Option<TouchIdActionArg>, dry_run: bool, json: bool) -> Result<(), String> {
@@ -2963,16 +2836,7 @@ fn touchid_json(out: TouchIdOutput) -> Result<String, String> {
 }
 
 fn print_touchid_output(out: &TouchIdOutput) {
-    println!(
-        "summary: kind=system_touchid action={} mode={} supported_os={} configured={} would_change={} applied={}",
-        out.action, out.mode, out.supported_os, out.configured, out.would_change, out.applied
-    );
-    if !out.warnings.is_empty() {
-        println!("warnings: count={}", out.warnings.len());
-        for warning in &out.warnings {
-            println!("warning: {warning}");
-        }
-    }
+    print!("{}", touchid_text(out));
 }
 
 fn run_completion(
@@ -2985,30 +2849,7 @@ fn run_completion(
         println!("{}", completion_json(output.clone())?);
         return Ok(());
     }
-
-    if output.mode == "generate" {
-        if let Some(script) = &output.script {
-            print!("{script}");
-        }
-        return Ok(());
-    }
-
-    println!(
-        "summary: kind=system_completion mode={} shell={} installed={} changed={}",
-        output.mode, output.shell, output.installed, output.changed
-    );
-    if let Some(path) = &output.config_path {
-        println!("config_path: {path}");
-    }
-    if let Some(snippet) = &output.snippet {
-        println!("snippet: {snippet}");
-    }
-    if !output.warnings.is_empty() {
-        println!("warnings: count={}", output.warnings.len());
-        for warning in &output.warnings {
-            println!("warning: {warning}");
-        }
-    }
+    print!("{}", completion_text(&output));
     Ok(())
 }
 
@@ -3437,32 +3278,7 @@ fn update_json(out: UpdateOutput) -> Result<String, String> {
 }
 
 fn print_update_output(out: &UpdateOutput) {
-    println!(
-        "summary: kind=system_update mode={} channel={} force={} executed={}",
-        out.mode, out.channel, out.force, out.executed
-    );
-    println!("current_version: {}", out.current_version);
-    if let Some(version) = &out.latest_version {
-        println!("latest_version: {version}");
-    }
-    if let Some(available) = out.update_available {
-        println!("update_available: {available}");
-    }
-    println!("install_source: {}", out.install_source);
-    println!("suggested_command: {}", out.suggested_command);
-    println!("checks: label=Checks");
-    for check in &out.checks {
-        println!(
-            "check: id={} label={} severity={} passed={} message={}",
-            check.id, check.label, check.severity, check.passed, check.message
-        );
-    }
-    if !out.warnings.is_empty() {
-        println!("warnings: count={}", out.warnings.len());
-        for warning in &out.warnings {
-            println!("warning: {warning}");
-        }
-    }
+    print!("{}", update_text(out));
 }
 
 fn run_remove(dry_run: bool, json: bool) -> Result<(), String> {
@@ -3646,32 +3462,7 @@ fn remove_json(out: RemoveOutput) -> Result<String, String> {
 }
 
 fn print_remove_output(out: &RemoveOutput) {
-    println!(
-        "summary: kind=system_remove mode={} detected={} removed={} skipped={}",
-        out.mode,
-        out.detected_paths.len(),
-        out.removed_paths.len(),
-        out.skipped_paths.len()
-    );
-    println!("executable: {}", out.executable);
-    for path in &out.detected_paths {
-        println!("detected_path: {path}");
-    }
-    for path in &out.removed_paths {
-        println!("removed_path: {path}");
-    }
-    for path in &out.skipped_paths {
-        println!("skipped_path: {path}");
-    }
-    for step in &out.manual_steps {
-        println!("manual_step: {step}");
-    }
-    if !out.warnings.is_empty() {
-        println!("warnings: count={}", out.warnings.len());
-        for warning in &out.warnings {
-            println!("warning: {warning}");
-        }
-    }
+    print!("{}", remove_text(out));
 }
 
 fn run_clean_output(
@@ -4204,6 +3995,274 @@ fn optimize_text(out: &OptimizeCommandOutput) -> String {
         }
     }
     let _ = writeln!(text, "Audit events: {}", out.audit_events);
+    text
+}
+
+fn check_text(out: &SystemCheckOutput) -> String {
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_check overall_passed={}",
+        out.overall_passed
+    );
+    let _ = writeln!(text, "mode: {}", out.mode);
+    let _ = writeln!(text, "checks: label=Checks");
+    for check in &out.checks {
+        let _ = writeln!(
+            text,
+            "check: id={} label={} severity={} passed={} fixed={} message={}",
+            check.id, check.label, check.severity, check.passed, check.fixed, check.message
+        );
+    }
+    let _ = writeln!(text, "fixes_applied: {}", out.fixes_applied);
+    if !out.suggested_actions.is_empty() {
+        let _ = writeln!(
+            text,
+            "suggested_actions: count={}",
+            out.suggested_actions.len()
+        );
+        for action in &out.suggested_actions {
+            let _ = writeln!(text, "suggested_action: {action}");
+        }
+    }
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            let _ = writeln!(text, "warning: {warning}");
+        }
+    }
+    text
+}
+
+fn analyze_text(out: &AnalyzeOutput) -> String {
+    let mut text = String::new();
+    let _ = writeln!(text, "summary: kind=system_analyze");
+    let _ = writeln!(text, "root: {}", out.root);
+    let _ = writeln!(text, "max_depth: {}", out.max_depth);
+    let _ = writeln!(text, "scanned_entries: {}", out.scanned_entries);
+    let _ = writeln!(text, "total_files: {}", out.total_files);
+    let _ = writeln!(text, "total_dirs: {}", out.total_dirs);
+    let _ = writeln!(text, "total_size: {}", format_bytes(out.total_size_bytes));
+    let _ = writeln!(text, "truncated_dirs: {}", out.truncated_dirs);
+    let _ = writeln!(text, "entries: label=Top entries");
+    for entry in &out.top_entries {
+        let _ = writeln!(
+            text,
+            "entry: name={} type={} size={} path={}",
+            entry.name,
+            entry.item_type,
+            format_bytes(entry.size_bytes),
+            entry.path
+        );
+    }
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            let _ = writeln!(text, "warning: {warning}");
+        }
+    }
+    text
+}
+
+fn status_text(out: &StatusOutput) -> String {
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_status overall_passed={} health_score={}",
+        out.overall_passed, out.health_score
+    );
+    let _ = writeln!(text, "mode: {}", out.mode);
+    let _ = writeln!(text, "os: {}", out.os);
+    let _ = writeln!(text, "arch: {}", out.arch);
+    let _ = writeln!(text, "state_dir: {}", out.state_dir);
+    if let Some(plugin_count) = out.plugin_count {
+        let _ = writeln!(text, "plugins: count={plugin_count}");
+    } else {
+        let _ = writeln!(text, "plugins: count=unknown");
+    }
+    let _ = writeln!(
+        text,
+        "registry_index_present: {}",
+        out.registry_index_present
+    );
+    if let Some(generated_at) = &out.registry_generated_at {
+        let _ = writeln!(text, "registry_generated_at: {generated_at}");
+    }
+    if let Some(age_days) = out.registry_age_days {
+        let _ = writeln!(text, "registry_age_days: {age_days}");
+    }
+    if let Some(value) = out.metrics.cpu_cores {
+        let _ = writeln!(text, "metrics_cpu_cores: {value}");
+    }
+    if let Some(value) = out.metrics.load_avg_1m_milli {
+        let _ = writeln!(text, "metrics_load_avg_1m: {}", format_load_milli(value));
+    }
+    if let Some(value) = out.metrics.load_avg_5m_milli {
+        let _ = writeln!(text, "metrics_load_avg_5m: {}", format_load_milli(value));
+    }
+    if let Some(value) = out.metrics.load_avg_15m_milli {
+        let _ = writeln!(text, "metrics_load_avg_15m: {}", format_load_milli(value));
+    }
+    if let Some(value) = out.metrics.uptime_seconds {
+        let _ = writeln!(text, "metrics_uptime_seconds: {value}");
+    }
+    if let Some(value) = out.metrics.memory_total_bytes {
+        let _ = writeln!(text, "metrics_memory_total: {}", format_bytes(value));
+    }
+    if let Some(value) = out.metrics.memory_used_bytes {
+        let _ = writeln!(text, "metrics_memory_used: {}", format_bytes(value));
+    }
+    if let Some(value) = out.metrics.memory_used_pct {
+        let _ = writeln!(text, "metrics_memory_used_pct: {value}");
+    }
+    if let Some(value) = out.metrics.disk_total_bytes {
+        let _ = writeln!(text, "metrics_disk_total: {}", format_bytes(value));
+    }
+    if let Some(value) = out.metrics.disk_available_bytes {
+        let _ = writeln!(text, "metrics_disk_available: {}", format_bytes(value));
+    }
+    if let Some(value) = out.metrics.disk_free_pct {
+        let _ = writeln!(text, "metrics_disk_free_pct: {value}");
+    }
+    if let Some(value) = out.metrics.process_count {
+        let _ = writeln!(text, "metrics_process_count: {value}");
+    }
+    if let Some(value) = out.metrics.network_rx_bytes {
+        let _ = writeln!(text, "metrics_network_rx_bytes: {value}");
+    }
+    if let Some(value) = out.metrics.network_tx_bytes {
+        let _ = writeln!(text, "metrics_network_tx_bytes: {value}");
+    }
+    let _ = writeln!(text, "checks: label=Checks");
+    for check in &out.checks {
+        let _ = writeln!(
+            text,
+            "check: id={} label={} severity={} passed={} message={}",
+            check.id, check.label, check.severity, check.passed, check.message
+        );
+    }
+    if !out.suggested_actions.is_empty() {
+        let _ = writeln!(
+            text,
+            "suggested_actions: count={}",
+            out.suggested_actions.len()
+        );
+        for action in &out.suggested_actions {
+            let _ = writeln!(text, "suggested_action: {action}");
+        }
+    }
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            let _ = writeln!(text, "warning: {warning}");
+        }
+    }
+    text
+}
+
+fn touchid_text(out: &TouchIdOutput) -> String {
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_touchid action={} mode={} supported_os={} configured={} would_change={} applied={}",
+        out.action, out.mode, out.supported_os, out.configured, out.would_change, out.applied
+    );
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            let _ = writeln!(text, "warning: {warning}");
+        }
+    }
+    text
+}
+
+fn completion_text(out: &CompletionOutput) -> String {
+    if out.mode == "generate" {
+        return out.script.clone().unwrap_or_default();
+    }
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_completion mode={} shell={} installed={} changed={}",
+        out.mode, out.shell, out.installed, out.changed
+    );
+    if let Some(path) = &out.config_path {
+        let _ = writeln!(text, "config_path: {path}");
+    }
+    if let Some(snippet) = &out.snippet {
+        let _ = writeln!(text, "snippet: {snippet}");
+    }
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            let _ = writeln!(text, "warning: {warning}");
+        }
+    }
+    text
+}
+
+fn update_text(out: &UpdateOutput) -> String {
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_update mode={} channel={} force={} executed={}",
+        out.mode, out.channel, out.force, out.executed
+    );
+    let _ = writeln!(text, "current_version: {}", out.current_version);
+    if let Some(version) = &out.latest_version {
+        let _ = writeln!(text, "latest_version: {version}");
+    }
+    if let Some(available) = out.update_available {
+        let _ = writeln!(text, "update_available: {available}");
+    }
+    let _ = writeln!(text, "install_source: {}", out.install_source);
+    let _ = writeln!(text, "suggested_command: {}", out.suggested_command);
+    let _ = writeln!(text, "checks: label=Checks");
+    for check in &out.checks {
+        let _ = writeln!(
+            text,
+            "check: id={} label={} severity={} passed={} message={}",
+            check.id, check.label, check.severity, check.passed, check.message
+        );
+    }
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            let _ = writeln!(text, "warning: {warning}");
+        }
+    }
+    text
+}
+
+fn remove_text(out: &RemoveOutput) -> String {
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_remove mode={} detected={} removed={} skipped={}",
+        out.mode,
+        out.detected_paths.len(),
+        out.removed_paths.len(),
+        out.skipped_paths.len()
+    );
+    let _ = writeln!(text, "executable: {}", out.executable);
+    for path in &out.detected_paths {
+        let _ = writeln!(text, "detected_path: {path}");
+    }
+    for path in &out.removed_paths {
+        let _ = writeln!(text, "removed_path: {path}");
+    }
+    for path in &out.skipped_paths {
+        let _ = writeln!(text, "skipped_path: {path}");
+    }
+    for step in &out.manual_steps {
+        let _ = writeln!(text, "manual_step: {step}");
+    }
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            let _ = writeln!(text, "warning: {warning}");
+        }
+    }
     text
 }
 
@@ -8153,6 +8212,11 @@ pub fn check_output_for_test(fix: bool) -> Result<serde_json::Value, String> {
         .map_err(|e| err_with(CliErrorKind::Internal, "check output parse failed", e))
 }
 
+pub fn check_text_output_for_test(fix: bool) -> String {
+    let output = run_check_output(fix);
+    check_text(&output)
+}
+
 pub fn analyze_output_for_test(path: Option<&Path>) -> Result<serde_json::Value, String> {
     let output = run_analyze_output(path.map(|value| value.to_path_buf()), None)?;
     let json = analyze_json(output)?;
@@ -8170,11 +8234,21 @@ pub fn analyze_output_with_depth_for_test(
         .map_err(|e| err_with(CliErrorKind::Internal, "analyze output parse failed", e))
 }
 
+pub fn analyze_text_output_for_test(path: Option<&Path>) -> Result<String, String> {
+    let output = run_analyze_output(path.map(|value| value.to_path_buf()), None)?;
+    Ok(analyze_text(&output))
+}
+
 pub fn status_output_for_test() -> Result<serde_json::Value, String> {
     let output = run_status_output()?;
     let json = status_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "status output parse failed", e))
+}
+
+pub fn status_text_output_for_test() -> Result<String, String> {
+    let output = run_status_output()?;
+    Ok(status_text(&output))
 }
 
 pub fn status_should_emit_json_for_test(json_flag: bool) -> bool {
@@ -8203,6 +8277,23 @@ pub fn touchid_output_for_test(
         .map_err(|e| err_with(CliErrorKind::Internal, "touchid output parse failed", e))
 }
 
+pub fn touchid_text_output_for_test(action: Option<&str>, dry_run: bool) -> Result<String, String> {
+    let action = match action.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if value == "enable" => Some(TouchIdActionArg::Enable),
+        Some(value) if value == "disable" => Some(TouchIdActionArg::Disable),
+        Some(value) if value == "status" => Some(TouchIdActionArg::Status),
+        Some(other) => {
+            return Err(err(
+                CliErrorKind::Validation,
+                format!("unsupported touchid action for test: {other}"),
+            ));
+        }
+        None => None,
+    };
+    let output = run_touchid_output(action.unwrap_or(TouchIdActionArg::Status), dry_run)?;
+    Ok(touchid_text(&output))
+}
+
 pub fn completion_output_for_test(
     shell: Option<&str>,
     dry_run: bool,
@@ -8225,6 +8316,26 @@ pub fn completion_output_for_test(
         .map_err(|e| err_with(CliErrorKind::Internal, "completion output parse failed", e))
 }
 
+pub fn completion_text_output_for_test(
+    shell: Option<&str>,
+    dry_run: bool,
+) -> Result<String, String> {
+    let shell = match shell.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if value == "bash" => Some(CompletionShellArg::Bash),
+        Some(value) if value == "zsh" => Some(CompletionShellArg::Zsh),
+        Some(value) if value == "fish" => Some(CompletionShellArg::Fish),
+        Some(other) => {
+            return Err(err(
+                CliErrorKind::Validation,
+                format!("unsupported completion shell for test: {other}"),
+            ));
+        }
+        None => None,
+    };
+    let output = run_completion_output(shell, dry_run)?;
+    Ok(completion_text(&output))
+}
+
 pub fn update_output_for_test(force: bool, nightly: bool) -> Result<serde_json::Value, String> {
     let output = run_update_output(force, nightly);
     let json = update_json(output)?;
@@ -8232,11 +8343,21 @@ pub fn update_output_for_test(force: bool, nightly: bool) -> Result<serde_json::
         .map_err(|e| err_with(CliErrorKind::Internal, "update output parse failed", e))
 }
 
+pub fn update_text_output_for_test(force: bool, nightly: bool) -> String {
+    let output = run_update_output(force, nightly);
+    update_text(&output)
+}
+
 pub fn remove_output_for_test(dry_run: bool) -> Result<serde_json::Value, String> {
     let output = run_remove_output(dry_run)?;
     let json = remove_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "remove output parse failed", e))
+}
+
+pub fn remove_text_output_for_test(dry_run: bool) -> Result<String, String> {
+    let output = run_remove_output(dry_run)?;
+    Ok(remove_text(&output))
 }
 
 pub fn clean_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {

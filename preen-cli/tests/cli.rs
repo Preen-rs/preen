@@ -9,10 +9,11 @@ use async_trait::async_trait;
 use clap::Parser;
 use preen_cli::{
     Cli, CliError, CliErrorKind, analyze_output_for_test, analyze_output_with_depth_for_test,
-    check_output_for_test, check_registry_freshness_for_test, clean_output_for_test,
-    clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test,
-    clean_text_output_for_test, cli_label_for_test, clone_rule_pack_for_test,
-    completion_output_for_test, default_signature_source_for_test, enforce_clean_scope_for_test,
+    analyze_text_output_for_test, check_output_for_test, check_registry_freshness_for_test,
+    check_text_output_for_test, clean_output_for_test, clean_runtime_error_detail_code_for_test,
+    clean_selection_summary_for_test, clean_text_output_for_test, cli_label_for_test,
+    clone_rule_pack_for_test, completion_output_for_test, completion_text_output_for_test,
+    default_signature_source_for_test, enforce_clean_scope_for_test,
     enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
     format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
     install_plugin_in_dir_for_test, installer_output_for_test, installer_paths_json_for_test,
@@ -33,16 +34,17 @@ use preen_cli::{
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
     purge_paths_json_for_test, purge_paths_text_for_test, purge_text_output_for_test,
     registry_backup_path_for_test, registry_source_detail_code_for_test,
-    registry_update_json_for_test, remove_output_for_test, resolve_registry_for_test, run_typed,
-    run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
-    runtime_error_detail_code_for_prefix_for_test, save_lockfile_at, search_registry_for_test,
-    search_registry_json_for_test, search_registry_with_options_for_test,
-    should_emit_formatted_error, status_output_for_test, status_should_emit_json_for_test,
-    test_failure_row_for_test, touchid_output_for_test, trust_policy_from_str,
+    registry_update_json_for_test, remove_output_for_test, remove_text_output_for_test,
+    resolve_registry_for_test, run_typed, run_typed_with_verifier_and_clean_executor_for_test,
+    run_typed_with_verifier_for_test, runtime_error_detail_code_for_prefix_for_test,
+    save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
+    search_registry_with_options_for_test, should_emit_formatted_error, status_output_for_test,
+    status_should_emit_json_for_test, status_text_output_for_test, test_failure_row_for_test,
+    touchid_output_for_test, touchid_text_output_for_test, trust_policy_from_str,
     uninstall_output_for_test, uninstall_paths_json_for_test, uninstall_paths_text_for_test,
     uninstall_runtime_error_detail_code_for_test, uninstall_text_output_for_test,
-    update_output_for_test, validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
-    write_registry_index_with_backup_for_test,
+    update_output_for_test, update_text_output_for_test, validate_registry_trust_inputs_for_test,
+    verify_lockfile_hashes, write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
     ActionExecutionError, ActionExecutionResult, ActionExecutorPort, ExecutionPlan, PlanError,
@@ -1671,6 +1673,261 @@ fn system_paths_text_contract_matrix_has_required_markers() {
     let uninstall = with_uninstall_path_override(uninstall_paths_text_for_test);
     assert!(uninstall.contains("Uninstall scan roots:"));
     assert!(uninstall.contains("- "));
+}
+
+#[test]
+fn system_support_commands_json_contract_matrix_has_required_fields() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    with_temp_user_env(|| {
+        let check = check_output_for_test(false).unwrap();
+        assert_system_envelope(
+            &check,
+            "system.check",
+            &[
+                "mode",
+                "overall_passed",
+                "checks",
+                "fixes_applied",
+                "suggested_actions",
+                "warnings",
+            ],
+        );
+    });
+
+    let analyze_root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(analyze_root.path().join("nested")).unwrap();
+    fs::write(
+        analyze_root.path().join("nested").join("sample.bin"),
+        b"sample",
+    )
+    .unwrap();
+    let analyze = analyze_output_for_test(Some(analyze_root.path())).unwrap();
+    assert_system_envelope(
+        &analyze,
+        "system.analyze",
+        &[
+            "root",
+            "path",
+            "max_depth",
+            "scanned_entries",
+            "total_files",
+            "total_dirs",
+            "total_size",
+            "total_size_bytes",
+            "truncated_dirs",
+            "entries",
+            "top_entries",
+            "warnings",
+        ],
+    );
+
+    with_temp_user_env(|| {
+        let status = status_output_for_test().unwrap();
+        assert_system_envelope(
+            &status,
+            "system.status",
+            &[
+                "mode",
+                "os",
+                "arch",
+                "health_score",
+                "state_dir",
+                "metrics",
+                "overall_passed",
+                "checks",
+                "suggested_actions",
+                "warnings",
+            ],
+        );
+
+        let touchid = touchid_output_for_test(Some("status"), true).unwrap();
+        assert_system_envelope(
+            &touchid,
+            "system.touchid",
+            &[
+                "mode",
+                "action",
+                "supported_os",
+                "configured",
+                "would_change",
+                "applied",
+                "warnings",
+            ],
+        );
+
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("SHELL", "/bin/zsh");
+        }
+        let completion = completion_output_for_test(None, true).unwrap();
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("SHELL");
+        }
+        assert_system_envelope(
+            &completion,
+            "system.completion",
+            &[
+                "mode",
+                "shell",
+                "generated",
+                "installed",
+                "changed",
+                "warnings",
+            ],
+        );
+
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_UPDATE_LATEST_VERSION", "9.9.9");
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
+        }
+        let update = update_output_for_test(false, false).unwrap();
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_UPDATE_LATEST_VERSION");
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert_system_envelope(
+            &update,
+            "system.update",
+            &[
+                "mode",
+                "channel",
+                "force",
+                "current_version",
+                "latest_version",
+                "update_available",
+                "install_source",
+                "suggested_command",
+                "executed",
+                "checks",
+                "warnings",
+            ],
+        );
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        fs::write(state_dir.path().join("plugins.lock"), "dummy").unwrap();
+        fs::write(cache_dir.path().join("cache.tmp"), "dummy").unwrap();
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_dir.path().as_os_str());
+            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
+        }
+        let remove = remove_output_for_test(true).unwrap();
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
+            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert_system_envelope(
+            &remove,
+            "system.remove",
+            &[
+                "mode",
+                "executable",
+                "detected_paths",
+                "removed_paths",
+                "skipped_paths",
+                "manual_steps",
+                "warnings",
+            ],
+        );
+    });
+}
+
+#[test]
+fn system_support_commands_text_contract_matrix_has_required_markers() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    with_temp_user_env(|| {
+        let check = check_text_output_for_test(false);
+        assert!(check.contains("summary: kind=system_check"));
+        assert!(check.contains("mode: check"));
+        assert!(check.contains("checks: label=Checks"));
+        assert!(check.contains("fixes_applied:"));
+    });
+
+    let analyze_root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(analyze_root.path().join("nested")).unwrap();
+    fs::write(
+        analyze_root.path().join("nested").join("sample.bin"),
+        b"sample",
+    )
+    .unwrap();
+    let analyze = analyze_text_output_for_test(Some(analyze_root.path())).unwrap();
+    assert!(analyze.contains("summary: kind=system_analyze"));
+    assert!(analyze.contains("root:"));
+    assert!(analyze.contains("total_files:"));
+    assert!(analyze.contains("entries: label=Top entries"));
+
+    with_temp_user_env(|| {
+        let status = status_text_output_for_test().unwrap();
+        assert!(status.contains("summary: kind=system_status"));
+        assert!(status.contains("mode: status"));
+        assert!(status.contains("checks: label=Checks"));
+        assert!(status.contains("suggested_actions: count="));
+
+        let touchid = touchid_text_output_for_test(Some("status"), true).unwrap();
+        assert!(touchid.contains("summary: kind=system_touchid"));
+        assert!(touchid.contains("action=status"));
+        assert!(touchid.contains("mode=dry_run"));
+
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("SHELL", "/bin/zsh");
+        }
+        let completion = completion_text_output_for_test(None, true).unwrap();
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("SHELL");
+        }
+        assert!(completion.contains("summary: kind=system_completion"));
+        assert!(completion.contains("mode=dry_run"));
+        assert!(completion.contains("config_path:"));
+
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_UPDATE_LATEST_VERSION", "9.9.9");
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
+        }
+        let update = update_text_output_for_test(false, false);
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_UPDATE_LATEST_VERSION");
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert!(update.contains("summary: kind=system_update"));
+        assert!(update.contains("channel=stable"));
+        assert!(update.contains("suggested_command:"));
+        assert!(update.contains("checks: label=Checks"));
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        fs::write(state_dir.path().join("plugins.lock"), "dummy").unwrap();
+        fs::write(cache_dir.path().join("cache.tmp"), "dummy").unwrap();
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_dir.path().as_os_str());
+            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
+        }
+        let remove = remove_text_output_for_test(true).unwrap();
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
+            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert!(remove.contains("summary: kind=system_remove"));
+        assert!(remove.contains("executable:"));
+        assert!(remove.contains("detected_path:"));
+        assert!(remove.contains("manual_step:"));
+    });
 }
 
 #[test]
