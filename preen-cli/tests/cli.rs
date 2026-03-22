@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use clap::Parser;
 use preen_cli::{
     Cli, CliError, CliErrorKind, analyze_output_for_test, analyze_output_with_depth_for_test,
-    check_output_for_test, check_registry_freshness_for_test,
+    check_output_for_test, check_registry_freshness_for_test, clean_output_for_test,
     clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test, cli_label_for_test,
     clone_rule_pack_for_test, completion_output_for_test, default_signature_source_for_test,
     enforce_clean_scope_for_test, enforce_installer_scope_for_test,
@@ -372,6 +372,17 @@ fn check_passed_from_json(data: &Value, check_id: &str) -> Option<bool> {
         }
     }
     None
+}
+
+fn assert_system_envelope(output: &Value, kind: &str, required_data_fields: &[&str]) {
+    assert_eq!(output["schema_version"].as_u64(), Some(1));
+    assert_eq!(output["kind"].as_str(), Some(kind));
+    for field in required_data_fields {
+        assert!(
+            !output["data"][field].is_null(),
+            "missing required data field: {field}"
+        );
+    }
 }
 
 fn check_passed_from_verify_text(text: &str, check_id: &str) -> Option<bool> {
@@ -1482,6 +1493,95 @@ fn optimize_dry_run_json_happy_path() {
         .cloned()
         .unwrap_or_default();
     assert!(!executed.is_empty());
+}
+
+#[test]
+fn system_command_json_contract_matrix_has_required_fields() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let clean = with_clean_path_override(|| clean_output_for_test(true, false, None).unwrap());
+    assert_system_envelope(
+        &clean,
+        "system.clean",
+        &[
+            "mode",
+            "strategy",
+            "target_count",
+            "affected_items",
+            "freed_bytes",
+            "warnings",
+            "audit_events",
+        ],
+    );
+    assert!(clean["data"]["preview_paths"].is_array());
+
+    let purge = with_purge_path_override(|| purge_output_for_test(true, false).unwrap());
+    assert_system_envelope(
+        &purge,
+        "system.purge",
+        &[
+            "mode",
+            "scanned_roots",
+            "target_count",
+            "affected_items",
+            "freed_bytes",
+            "warnings",
+            "audit_events",
+        ],
+    );
+    assert!(purge["data"]["preview_paths"].is_array());
+
+    let installer =
+        with_installer_path_override(|| installer_output_for_test(true, false).unwrap());
+    assert_system_envelope(
+        &installer,
+        "system.installer",
+        &[
+            "mode",
+            "scanned_roots",
+            "target_count",
+            "affected_items",
+            "freed_bytes",
+            "warnings",
+            "audit_events",
+        ],
+    );
+    assert!(installer["data"]["preview_paths"].is_array());
+
+    let uninstall = with_uninstall_path_override(|| {
+        uninstall_output_for_test(Some("DemoApp.app"), true, false).unwrap()
+    });
+    assert_system_envelope(
+        &uninstall,
+        "system.uninstall",
+        &[
+            "mode",
+            "target",
+            "scanned_roots",
+            "target_count",
+            "affected_items",
+            "freed_bytes",
+            "warnings",
+            "audit_events",
+        ],
+    );
+    assert!(uninstall["data"]["preview_paths"].is_array());
+
+    let optimize = optimize_output_for_test(true, false).unwrap();
+    assert_system_envelope(
+        &optimize,
+        "system.optimize",
+        &[
+            "mode",
+            "os",
+            "task_count",
+            "affected_items",
+            "post_check_run",
+            "warnings",
+            "audit_events",
+        ],
+    );
+    assert!(optimize["data"]["executed_tasks"].is_array());
 }
 
 #[test]
