@@ -874,27 +874,7 @@ fn run_clean_with_executor(
     } else if output.target_count == 0 {
         println!("clean completed: no cleanable items selected");
     } else {
-        println!(
-            "clean {} completed: strategy={} scanned={} targets={} estimated_freed_bytes={} affected_items={} freed_bytes={} audit_events={}",
-            output.mode,
-            output.strategy,
-            output.scanned_items,
-            output.target_count,
-            format_bytes(output.estimated_freed_bytes),
-            output.affected_items,
-            format_bytes(output.freed_bytes),
-            output.audit_events
-        );
-        println!(
-            "risk: high_targets={} requires_confirmation={}",
-            output.risk_summary.high_targets, output.risk_summary.requires_confirmation
-        );
-        for preview_item in &output.preview_paths {
-            println!("selected: {preview_item}");
-        }
-        for warning in &output.warnings {
-            println!("warning: {warning}");
-        }
+        print!("{}", clean_text(&output));
     }
 
     Ok(())
@@ -929,29 +909,7 @@ fn run_purge_with_executor(
         return Ok(());
     }
 
-    println!("Purge ({})", if dry_run { "dry-run" } else { "apply" });
-    println!("Scanned roots: {}", output.scanned_roots);
-    println!("Scanned directories: {}", output.scanned_dirs);
-    println!("Targets: {}", output.target_count);
-    println!(
-        "Estimated reclaimable: {}",
-        format_bytes(output.estimated_freed_bytes)
-    );
-    if !output.preview_paths.is_empty() {
-        println!("Preview:");
-        for path in &output.preview_paths {
-            println!("- {path}");
-        }
-    }
-    println!("Affected items: {}", output.affected_items);
-    println!("Freed bytes: {}", format_bytes(output.freed_bytes));
-    if !output.warnings.is_empty() {
-        println!("Warnings:");
-        for warning in &output.warnings {
-            println!("- {warning}");
-        }
-    }
-    println!("Audit events: {}", output.audit_events);
+    print!("{}", purge_text(&output));
 
     Ok(())
 }
@@ -985,29 +943,7 @@ fn run_installer_with_executor(
         return Ok(());
     }
 
-    println!("Installer ({})", if dry_run { "dry-run" } else { "apply" });
-    println!("Scanned roots: {}", output.scanned_roots);
-    println!("Scanned files: {}", output.scanned_files);
-    println!("Targets: {}", output.target_count);
-    println!(
-        "Estimated reclaimable: {}",
-        format_bytes(output.estimated_freed_bytes)
-    );
-    if !output.preview_paths.is_empty() {
-        println!("Preview:");
-        for path in &output.preview_paths {
-            println!("- {path}");
-        }
-    }
-    println!("Affected items: {}", output.affected_items);
-    println!("Freed bytes: {}", format_bytes(output.freed_bytes));
-    if !output.warnings.is_empty() {
-        println!("Warnings:");
-        for warning in &output.warnings {
-            println!("- {warning}");
-        }
-    }
-    println!("Audit events: {}", output.audit_events);
+    print!("{}", installer_text(&output));
 
     Ok(())
 }
@@ -1177,30 +1113,7 @@ fn run_uninstall_with_executor(
         return Ok(());
     }
 
-    println!("Uninstall ({})", if dry_run { "dry-run" } else { "apply" });
-    println!("Target: {}", output.target);
-    println!("Scanned roots: {}", output.scanned_roots);
-    println!("Scanned entries: {}", output.scanned_entries);
-    println!("Targets: {}", output.target_count);
-    println!(
-        "Estimated reclaimable: {}",
-        format_bytes(output.estimated_freed_bytes)
-    );
-    if !output.preview_paths.is_empty() {
-        println!("Preview:");
-        for path in &output.preview_paths {
-            println!("- {path}");
-        }
-    }
-    println!("Affected items: {}", output.affected_items);
-    println!("Freed bytes: {}", format_bytes(output.freed_bytes));
-    if !output.warnings.is_empty() {
-        println!("Warnings:");
-        for warning in &output.warnings {
-            println!("- {warning}");
-        }
-    }
-    println!("Audit events: {}", output.audit_events);
+    print!("{}", uninstall_text(&output));
 
     Ok(())
 }
@@ -1365,36 +1278,7 @@ fn run_optimize_with_executor(
         return Ok(());
     }
 
-    println!("Optimize ({})", if dry_run { "dry-run" } else { "apply" });
-    println!("OS: {}", output.os);
-    println!("Tasks: {}", output.task_count);
-    if !output.executed_tasks.is_empty() {
-        println!("Executed tasks:");
-        for task in &output.executed_tasks {
-            println!("- {task}");
-        }
-    }
-    println!("Affected items: {}", output.affected_items);
-    println!("Post-check run: {}", output.post_check_run);
-    if let Some(value) = output.post_check_overall_passed {
-        println!("Post-check overall_passed: {value}");
-    }
-    if !output.post_check_suggested_actions.is_empty() {
-        println!(
-            "Post-check suggested actions: {}",
-            output.post_check_suggested_actions.len()
-        );
-        for action in &output.post_check_suggested_actions {
-            println!("- {action}");
-        }
-    }
-    if !output.warnings.is_empty() {
-        println!("Warnings:");
-        for warning in &output.warnings {
-            println!("- {warning}");
-        }
-    }
-    println!("Audit events: {}", output.audit_events);
+    print!("{}", optimize_text(&output));
     Ok(())
 }
 
@@ -4146,6 +4030,178 @@ fn uninstall_json(out: UninstallCommandOutput) -> Result<String, String> {
 
 fn optimize_json(out: OptimizeCommandOutput) -> Result<String, String> {
     to_json_envelope("system.optimize", out)
+}
+
+fn clean_text(out: &CleanCommandOutput) -> String {
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "clean {} completed: strategy={} scanned={} targets={} estimated_freed_bytes={} affected_items={} freed_bytes={} audit_events={}",
+        out.mode,
+        out.strategy,
+        out.scanned_items,
+        out.target_count,
+        format_bytes(out.estimated_freed_bytes),
+        out.affected_items,
+        format_bytes(out.freed_bytes),
+        out.audit_events
+    );
+    let _ = writeln!(
+        text,
+        "risk: high_targets={} requires_confirmation={}",
+        out.risk_summary.high_targets, out.risk_summary.requires_confirmation
+    );
+    for preview_item in &out.preview_paths {
+        let _ = writeln!(text, "selected: {preview_item}");
+    }
+    for warning in &out.warnings {
+        let _ = writeln!(text, "warning: {warning}");
+    }
+    text
+}
+
+fn purge_text(out: &PurgeCommandOutput) -> String {
+    let mut text = String::new();
+    let mode = if out.mode == "dry_run" {
+        "dry-run"
+    } else {
+        "apply"
+    };
+    let _ = writeln!(text, "Purge ({mode})");
+    let _ = writeln!(text, "Scanned roots: {}", out.scanned_roots);
+    let _ = writeln!(text, "Scanned directories: {}", out.scanned_dirs);
+    let _ = writeln!(text, "Targets: {}", out.target_count);
+    let _ = writeln!(
+        text,
+        "Estimated reclaimable: {}",
+        format_bytes(out.estimated_freed_bytes)
+    );
+    if !out.preview_paths.is_empty() {
+        let _ = writeln!(text, "Preview:");
+        for path in &out.preview_paths {
+            let _ = writeln!(text, "- {path}");
+        }
+    }
+    let _ = writeln!(text, "Affected items: {}", out.affected_items);
+    let _ = writeln!(text, "Freed bytes: {}", format_bytes(out.freed_bytes));
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "Warnings:");
+        for warning in &out.warnings {
+            let _ = writeln!(text, "- {warning}");
+        }
+    }
+    let _ = writeln!(text, "Audit events: {}", out.audit_events);
+    text
+}
+
+fn installer_text(out: &InstallerCommandOutput) -> String {
+    let mut text = String::new();
+    let mode = if out.mode == "dry_run" {
+        "dry-run"
+    } else {
+        "apply"
+    };
+    let _ = writeln!(text, "Installer ({mode})");
+    let _ = writeln!(text, "Scanned roots: {}", out.scanned_roots);
+    let _ = writeln!(text, "Scanned files: {}", out.scanned_files);
+    let _ = writeln!(text, "Targets: {}", out.target_count);
+    let _ = writeln!(
+        text,
+        "Estimated reclaimable: {}",
+        format_bytes(out.estimated_freed_bytes)
+    );
+    if !out.preview_paths.is_empty() {
+        let _ = writeln!(text, "Preview:");
+        for path in &out.preview_paths {
+            let _ = writeln!(text, "- {path}");
+        }
+    }
+    let _ = writeln!(text, "Affected items: {}", out.affected_items);
+    let _ = writeln!(text, "Freed bytes: {}", format_bytes(out.freed_bytes));
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "Warnings:");
+        for warning in &out.warnings {
+            let _ = writeln!(text, "- {warning}");
+        }
+    }
+    let _ = writeln!(text, "Audit events: {}", out.audit_events);
+    text
+}
+
+fn uninstall_text(out: &UninstallCommandOutput) -> String {
+    let mut text = String::new();
+    let mode = if out.mode == "dry_run" {
+        "dry-run"
+    } else {
+        "apply"
+    };
+    let _ = writeln!(text, "Uninstall ({mode})");
+    let _ = writeln!(text, "Target: {}", out.target);
+    let _ = writeln!(text, "Scanned roots: {}", out.scanned_roots);
+    let _ = writeln!(text, "Scanned entries: {}", out.scanned_entries);
+    let _ = writeln!(text, "Targets: {}", out.target_count);
+    let _ = writeln!(
+        text,
+        "Estimated reclaimable: {}",
+        format_bytes(out.estimated_freed_bytes)
+    );
+    if !out.preview_paths.is_empty() {
+        let _ = writeln!(text, "Preview:");
+        for path in &out.preview_paths {
+            let _ = writeln!(text, "- {path}");
+        }
+    }
+    let _ = writeln!(text, "Affected items: {}", out.affected_items);
+    let _ = writeln!(text, "Freed bytes: {}", format_bytes(out.freed_bytes));
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "Warnings:");
+        for warning in &out.warnings {
+            let _ = writeln!(text, "- {warning}");
+        }
+    }
+    let _ = writeln!(text, "Audit events: {}", out.audit_events);
+    text
+}
+
+fn optimize_text(out: &OptimizeCommandOutput) -> String {
+    let mut text = String::new();
+    let mode = if out.mode == "dry_run" {
+        "dry-run"
+    } else {
+        "apply"
+    };
+    let _ = writeln!(text, "Optimize ({mode})");
+    let _ = writeln!(text, "OS: {}", out.os);
+    let _ = writeln!(text, "Tasks: {}", out.task_count);
+    if !out.executed_tasks.is_empty() {
+        let _ = writeln!(text, "Executed tasks:");
+        for task in &out.executed_tasks {
+            let _ = writeln!(text, "- {task}");
+        }
+    }
+    let _ = writeln!(text, "Affected items: {}", out.affected_items);
+    let _ = writeln!(text, "Post-check run: {}", out.post_check_run);
+    if let Some(value) = out.post_check_overall_passed {
+        let _ = writeln!(text, "Post-check overall_passed: {value}");
+    }
+    if !out.post_check_suggested_actions.is_empty() {
+        let _ = writeln!(
+            text,
+            "Post-check suggested actions: {}",
+            out.post_check_suggested_actions.len()
+        );
+        for action in &out.post_check_suggested_actions {
+            let _ = writeln!(text, "- {action}");
+        }
+    }
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "Warnings:");
+        for warning in &out.warnings {
+            let _ = writeln!(text, "- {warning}");
+        }
+    }
+    let _ = writeln!(text, "Audit events: {}", out.audit_events);
+    text
 }
 
 fn resolve_clean_paths() -> Vec<String> {
@@ -7948,11 +8004,39 @@ pub fn clean_output_for_test(
         .map_err(|e| err_with(CliErrorKind::Internal, "clean output parse failed", e))
 }
 
+pub fn clean_text_output_for_test(
+    dry_run: bool,
+    confirm: bool,
+    strategy: Option<&str>,
+) -> Result<String, String> {
+    let strategy_arg = match strategy.map(|item| item.trim().to_ascii_lowercase()) {
+        Some(ref value) if value == "delete" => Some(CleanStrategyArg::Delete),
+        Some(ref value) if value == "trash" => Some(CleanStrategyArg::Trash),
+        Some(other) => {
+            return Err(err(
+                CliErrorKind::Validation,
+                format!("unsupported clean strategy for test: {other}"),
+            ));
+        }
+        None => None,
+    };
+    let output = run_clean_output_with_executor(dry_run, confirm, strategy_arg, &OsActionExecutor)?;
+    if output.target_count == 0 {
+        return Ok("clean completed: no cleanable items selected\n".to_string());
+    }
+    Ok(clean_text(&output))
+}
+
 pub fn purge_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_json::Value, String> {
     let output = run_purge_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
     let json = purge_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "purge output parse failed", e))
+}
+
+pub fn purge_text_output_for_test(dry_run: bool, confirm: bool) -> Result<String, String> {
+    let output = run_purge_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
+    Ok(purge_text(&output))
 }
 
 pub fn installer_output_for_test(
@@ -7963,6 +8047,11 @@ pub fn installer_output_for_test(
     let json = installer_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "installer output parse failed", e))
+}
+
+pub fn installer_text_output_for_test(dry_run: bool, confirm: bool) -> Result<String, String> {
+    let output = run_installer_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
+    Ok(installer_text(&output))
 }
 
 pub fn uninstall_output_for_test(
@@ -7976,11 +8065,25 @@ pub fn uninstall_output_for_test(
         .map_err(|e| err_with(CliErrorKind::Internal, "uninstall output parse failed", e))
 }
 
+pub fn uninstall_text_output_for_test(
+    target: Option<&str>,
+    dry_run: bool,
+    confirm: bool,
+) -> Result<String, String> {
+    let output = run_uninstall_output_with_executor(target, dry_run, confirm, &OsActionExecutor)?;
+    Ok(uninstall_text(&output))
+}
+
 pub fn optimize_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_json::Value, String> {
     let output = run_optimize_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
     let json = optimize_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "optimize output parse failed", e))
+}
+
+pub fn optimize_text_output_for_test(dry_run: bool, confirm: bool) -> Result<String, String> {
+    let output = run_optimize_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
+    Ok(optimize_text(&output))
 }
 
 pub fn optimize_output_with_executor_for_test(
