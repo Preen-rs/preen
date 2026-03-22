@@ -268,7 +268,86 @@ impl PluginFailureHint {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PluginDetailCode {
+    InstallCloneFailed,
+    PreflightCloneFailed,
+    InstallSourceCloneFailed,
+    InstallSourceFetchFailed,
+    InstallSourceCheckoutFailed,
+    InstallSourceGitResolveFailed,
+    PreflightSourceCloneFailed,
+    PreflightSourceFetchFailed,
+    PreflightSourceCheckoutFailed,
+    PreflightSourceGitResolveFailed,
+}
+
+impl PluginDetailCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InstallCloneFailed => "install_clone_failed",
+            Self::PreflightCloneFailed => "preflight_clone_failed",
+            Self::InstallSourceCloneFailed => "install_source_clone_failed",
+            Self::InstallSourceFetchFailed => "install_source_fetch_failed",
+            Self::InstallSourceCheckoutFailed => "install_source_checkout_failed",
+            Self::InstallSourceGitResolveFailed => "install_source_git_resolve_failed",
+            Self::PreflightSourceCloneFailed => "preflight_source_clone_failed",
+            Self::PreflightSourceFetchFailed => "preflight_source_fetch_failed",
+            Self::PreflightSourceCheckoutFailed => "preflight_source_checkout_failed",
+            Self::PreflightSourceGitResolveFailed => "preflight_source_git_resolve_failed",
+        }
+    }
+
+    pub fn parse(code: &str) -> Option<Self> {
+        Some(match code {
+            "install_clone_failed" => Self::InstallCloneFailed,
+            "preflight_clone_failed" => Self::PreflightCloneFailed,
+            "install_source_clone_failed" => Self::InstallSourceCloneFailed,
+            "install_source_fetch_failed" => Self::InstallSourceFetchFailed,
+            "install_source_checkout_failed" => Self::InstallSourceCheckoutFailed,
+            "install_source_git_resolve_failed" => Self::InstallSourceGitResolveFailed,
+            "preflight_source_clone_failed" => Self::PreflightSourceCloneFailed,
+            "preflight_source_fetch_failed" => Self::PreflightSourceFetchFailed,
+            "preflight_source_checkout_failed" => Self::PreflightSourceCheckoutFailed,
+            "preflight_source_git_resolve_failed" => Self::PreflightSourceGitResolveFailed,
+            _ => return None,
+        })
+    }
+
+    pub const fn is_install_checkout_failure(self) -> bool {
+        matches!(
+            self,
+            Self::InstallCloneFailed
+                | Self::InstallSourceCloneFailed
+                | Self::InstallSourceFetchFailed
+                | Self::InstallSourceCheckoutFailed
+                | Self::InstallSourceGitResolveFailed
+        )
+    }
+
+    pub const fn is_preflight_checkout_failure(self) -> bool {
+        matches!(
+            self,
+            Self::PreflightCloneFailed
+                | Self::PreflightSourceCloneFailed
+                | Self::PreflightSourceFetchFailed
+                | Self::PreflightSourceCheckoutFailed
+                | Self::PreflightSourceGitResolveFailed
+        )
+    }
+}
+
 pub fn plugin_failure_hint_from_detail_code(code: &str) -> PluginFailureHint {
+    if let Some(detail_code) = PluginDetailCode::parse(code)
+        && (detail_code.is_install_checkout_failure()
+            || detail_code.is_preflight_checkout_failure())
+    {
+        return PluginFailureHint {
+            code: "source_checkout_failed",
+            action: "validate_git_url_and_pinned_rev",
+            priority: 2,
+        };
+    }
     match code {
         "preflight_signature_or_trust_failed"
         | "install_signature_or_trust_failed"
@@ -326,20 +405,6 @@ pub fn plugin_failure_hint_from_detail_code(code: &str) -> PluginFailureHint {
             code: "invalid_spec",
             action: "use_format_url_at_tag_or_commit",
             priority: 3,
-        },
-        "preflight_clone_failed"
-        | "install_clone_failed"
-        | "preflight_source_clone_failed"
-        | "preflight_source_fetch_failed"
-        | "preflight_source_checkout_failed"
-        | "preflight_source_git_resolve_failed"
-        | "install_source_clone_failed"
-        | "install_source_fetch_failed"
-        | "install_source_checkout_failed"
-        | "install_source_git_resolve_failed" => PluginFailureHint {
-            code: "source_checkout_failed",
-            action: "validate_git_url_and_pinned_rev",
-            priority: 2,
         },
         "registry_source_missing" => PluginFailureHint {
             code: "invalid_spec",
@@ -551,29 +616,25 @@ pub fn plugin_localized_error_message(
 ) -> String {
     let locale = normalize_language(language);
     if let Some(detail_code) = detail_code {
+        if let Some(code) = PluginDetailCode::parse(detail_code) {
+            if code.is_preflight_checkout_failure() {
+                return rust_i18n::t!(
+                    "plugin.errors.detail.preflight_clone_failed",
+                    locale = locale
+                )
+                .to_string();
+            }
+            if code.is_install_checkout_failure() {
+                return rust_i18n::t!("plugin.errors.detail.install_clone_failed", locale = locale)
+                    .to_string();
+            }
+        }
         return match detail_code {
             "preflight_spec_invalid" => rust_i18n::t!(
                 "plugin.errors.detail.preflight_spec_invalid",
                 locale = locale
             )
             .to_string(),
-            "preflight_clone_failed"
-            | "preflight_source_clone_failed"
-            | "preflight_source_fetch_failed"
-            | "preflight_source_checkout_failed"
-            | "preflight_source_git_resolve_failed" => rust_i18n::t!(
-                "plugin.errors.detail.preflight_clone_failed",
-                locale = locale
-            )
-            .to_string(),
-            "install_clone_failed"
-            | "install_source_clone_failed"
-            | "install_source_fetch_failed"
-            | "install_source_checkout_failed"
-            | "install_source_git_resolve_failed" => {
-                rust_i18n::t!("plugin.errors.detail.install_clone_failed", locale = locale)
-                    .to_string()
-            }
             "preflight_pack_load_failed" => rust_i18n::t!(
                 "plugin.errors.detail.preflight_pack_load_failed",
                 locale = locale

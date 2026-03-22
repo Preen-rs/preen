@@ -23,7 +23,7 @@ use preen_core::error::CoreError;
 use preen_core::metrics::NoopMetrics;
 use preen_core::plugin::{
     ActionSpec, ActionType, Capability, CliJsonEnvelope, Manifest, MatchMode, MatchSpec, OsTarget,
-    PluginCheckId, PluginCheckStatus, PluginFailureHint,
+    PluginCheckId, PluginCheckStatus, PluginDetailCode, PluginFailureHint,
     PluginPreflightAllReport as PluginPreflightAllOutput,
     PluginPreflightFailure as PluginPreflightFailureOutput,
     PluginPreflightReport as PluginPreflightOutput, PluginTestAllReport as PluginTestAllOutput,
@@ -8110,7 +8110,7 @@ pub fn is_git_filter_unsupported_error_for_test(message: &str) -> bool {
 }
 
 pub fn map_clone_error_detail_code_for_test(scope: &str, message: &str) -> &'static str {
-    map_clone_error_detail_code(scope, message)
+    map_clone_error_detail_code(scope, message).as_str()
 }
 
 pub fn optimize_runtime_error_detail_code_for_test(error: RuntimeExecutionError) -> Option<String> {
@@ -8194,7 +8194,7 @@ fn clone_rule_pack_at(
 ) -> Result<String, String> {
     git_clone_at(url, rev, dest).map_err(|e| {
         let detail_code = map_clone_error_detail_code(scope, &e);
-        err_code(CliErrorKind::Internal, detail_code, e)
+        err_code(CliErrorKind::Internal, detail_code.as_str(), e)
     })
 }
 
@@ -8332,20 +8332,24 @@ enum CloneFailureStage {
     Unknown,
 }
 
-fn map_clone_error_detail_code(scope: &str, message: &str) -> &'static str {
+fn map_clone_error_detail_code(scope: &str, message: &str) -> PluginDetailCode {
     let stage = detect_clone_failure_stage(message);
     match (scope, stage) {
-        ("install", CloneFailureStage::Clone) => "install_source_clone_failed",
-        ("install", CloneFailureStage::Fetch) => "install_source_fetch_failed",
-        ("install", CloneFailureStage::Checkout) => "install_source_checkout_failed",
-        ("install", CloneFailureStage::Resolve) => "install_source_git_resolve_failed",
-        ("preflight", CloneFailureStage::Clone) => "preflight_source_clone_failed",
-        ("preflight", CloneFailureStage::Fetch) => "preflight_source_fetch_failed",
-        ("preflight", CloneFailureStage::Checkout) => "preflight_source_checkout_failed",
-        ("preflight", CloneFailureStage::Resolve) => "preflight_source_git_resolve_failed",
-        ("install", CloneFailureStage::Unknown) => "install_clone_failed",
-        ("preflight", CloneFailureStage::Unknown) => "preflight_clone_failed",
-        _ => "install_clone_failed",
+        ("install", CloneFailureStage::Clone) => PluginDetailCode::InstallSourceCloneFailed,
+        ("install", CloneFailureStage::Fetch) => PluginDetailCode::InstallSourceFetchFailed,
+        ("install", CloneFailureStage::Checkout) => PluginDetailCode::InstallSourceCheckoutFailed,
+        ("install", CloneFailureStage::Resolve) => PluginDetailCode::InstallSourceGitResolveFailed,
+        ("preflight", CloneFailureStage::Clone) => PluginDetailCode::PreflightSourceCloneFailed,
+        ("preflight", CloneFailureStage::Fetch) => PluginDetailCode::PreflightSourceFetchFailed,
+        ("preflight", CloneFailureStage::Checkout) => {
+            PluginDetailCode::PreflightSourceCheckoutFailed
+        }
+        ("preflight", CloneFailureStage::Resolve) => {
+            PluginDetailCode::PreflightSourceGitResolveFailed
+        }
+        ("install", CloneFailureStage::Unknown) => PluginDetailCode::InstallCloneFailed,
+        ("preflight", CloneFailureStage::Unknown) => PluginDetailCode::PreflightCloneFailed,
+        _ => PluginDetailCode::InstallCloneFailed,
     }
 }
 

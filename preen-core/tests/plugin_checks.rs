@@ -1,6 +1,6 @@
 use preen_core::plugin::{
-    PluginCheckId, PluginCheckStatus, PluginTestDrift, plugin_check_label, plugin_error_kind_label,
-    plugin_failure_hint_from_detail_code, plugin_failure_hint_message,
+    PluginCheckId, PluginCheckStatus, PluginDetailCode, PluginTestDrift, plugin_check_label,
+    plugin_error_kind_label, plugin_failure_hint_from_detail_code, plugin_failure_hint_message,
     plugin_localized_error_message, plugin_primary_failure_hint_from_drifts,
 };
 
@@ -10,6 +10,21 @@ fn plugin_check_id_serializes_as_stable_snake_case() {
     let encoded = serde_json::to_string(&row).unwrap();
     assert!(encoded.contains("\"check\":\"core_compat_verified\""));
     assert!(encoded.contains("\"passed\":true"));
+}
+
+#[test]
+fn plugin_detail_code_source_checkout_taxonomy_is_parseable_and_stable() {
+    let code = PluginDetailCode::InstallSourceFetchFailed;
+    assert_eq!(code.as_str(), "install_source_fetch_failed");
+    assert_eq!(
+        PluginDetailCode::parse("install_source_fetch_failed"),
+        Some(PluginDetailCode::InstallSourceFetchFailed)
+    );
+    assert_eq!(
+        PluginDetailCode::parse("preflight_source_checkout_failed"),
+        Some(PluginDetailCode::PreflightSourceCheckoutFailed)
+    );
+    assert_eq!(PluginDetailCode::parse("unknown"), None);
 }
 
 #[test]
