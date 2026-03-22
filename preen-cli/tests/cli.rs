@@ -1103,6 +1103,32 @@ fn wants_json_output_detects_flag() {
 }
 
 #[test]
+fn wants_json_output_detects_flag_for_all_top_level_system_commands() {
+    let cases = [
+        vec!["preen", "clean", "--json"],
+        vec!["preen", "uninstall", "DemoApp", "--json"],
+        vec!["preen", "optimize", "--json"],
+        vec!["preen", "analyze", "--json"],
+        vec!["preen", "status", "--json"],
+        vec!["preen", "purge", "--json"],
+        vec!["preen", "installer", "--json"],
+        vec!["preen", "check", "--json"],
+        vec!["preen", "touchid", "status", "--json"],
+        vec!["preen", "completion", "zsh", "--json"],
+        vec!["preen", "update", "--json"],
+        vec!["preen", "remove", "--json"],
+    ];
+
+    for args in cases {
+        let cli = Cli::try_parse_from(args.clone()).unwrap();
+        assert!(
+            cli.wants_json_output(),
+            "json flag not detected for args: {args:?}"
+        );
+    }
+}
+
+#[test]
 fn top_level_system_commands_are_implemented() {
     let cases: Vec<Vec<&str>> = vec![
         vec!["preen", "touchid", "status", "--json"],
@@ -2413,6 +2439,30 @@ fn plugin_progress_line_format_is_stable() {
         line,
         "progress: command=plugin.install stage=verify_signature subject=preen-rs.homebrew"
     );
+}
+
+#[test]
+fn top_level_system_command_option_matrix_rejects_conflicts() {
+    let invalid_cases: &[&[&str]] = &[
+        &["preen", "clean", "--dry-run", "--confirm"],
+        &["preen", "uninstall", "DemoApp", "--dry-run", "--confirm"],
+        &["preen", "uninstall", "DemoApp", "--paths"],
+        &["preen", "uninstall", "--paths", "--dry-run"],
+        &["preen", "optimize", "--dry-run", "--confirm"],
+        &["preen", "purge", "--dry-run", "--confirm"],
+        &["preen", "purge", "--paths", "--confirm"],
+        &["preen", "installer", "--dry-run", "--confirm"],
+        &["preen", "installer", "--paths", "--dry-run"],
+        &["preen", "touchid", "invalid-action", "--dry-run"],
+        &["preen", "completion", "invalid-shell", "--dry-run"],
+    ];
+
+    for args in invalid_cases {
+        assert!(
+            Cli::try_parse_from(*args).is_err(),
+            "expected parse error for args: {args:?}"
+        );
+    }
 }
 
 #[test]
