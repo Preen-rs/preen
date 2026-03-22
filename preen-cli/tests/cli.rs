@@ -31,16 +31,17 @@ use preen_cli::{
     registry_backup_path_for_test, registry_source_detail_code_for_test,
     registry_update_json_for_test, remove_output_for_test, resolve_registry_for_test, run_typed,
     run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
-    save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
-    search_registry_with_options_for_test, should_emit_formatted_error, status_output_for_test,
-    status_should_emit_json_for_test, test_failure_row_for_test, touchid_output_for_test,
-    trust_policy_from_str, uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
+    runtime_error_detail_code_for_prefix_for_test, save_lockfile_at, search_registry_for_test,
+    search_registry_json_for_test, search_registry_with_options_for_test,
+    should_emit_formatted_error, status_output_for_test, status_should_emit_json_for_test,
+    test_failure_row_for_test, touchid_output_for_test, trust_policy_from_str,
+    uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
     update_output_for_test, validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
-    ActionExecutionError, ActionExecutionResult, ActionExecutorPort, ExecutionPlan,
-    RuntimeExecutionError,
+    ActionExecutionError, ActionExecutionResult, ActionExecutorPort, ExecutionPlan, PlanError,
+    RuntimeExecutionError, SafetyViolation,
 };
 use preen_core::plugin::{SignatureVerifier, VerificationInput, VerificationOutcome, VerifyError};
 use preen_core::plugin_lock::{LockedPlugin, PluginLockfile};
@@ -5433,6 +5434,98 @@ fn optimize_runtime_command_non_zero_maps_expected_detail_code() {
         },
     ));
     assert_eq!(detail.as_deref(), Some("optimize_command_non_zero"));
+}
+
+fn runtime_plan_relative_path_error() -> RuntimeExecutionError {
+    RuntimeExecutionError::Plan(PlanError::SafetyRejected(SafetyViolation::RelativePath {
+        path: "relative/path".to_string(),
+    }))
+}
+
+fn runtime_plan_blocked_path_error() -> RuntimeExecutionError {
+    RuntimeExecutionError::Plan(PlanError::SafetyRejected(SafetyViolation::BlockedPath {
+        path: "/usr/local".to_string(),
+    }))
+}
+
+fn runtime_plan_confirmation_required_error() -> RuntimeExecutionError {
+    RuntimeExecutionError::Plan(PlanError::ConfirmationRequired {
+        rule_id: "rule-1".to_string(),
+    })
+}
+
+fn runtime_plan_rule_not_in_manifest_error() -> RuntimeExecutionError {
+    RuntimeExecutionError::Plan(PlanError::RuleNotInManifest {
+        rule_id: "rule-1".to_string(),
+    })
+}
+
+#[test]
+fn runtime_error_detail_code_prefix_matrix_for_all_system_runtime_commands() {
+    let prefixes = ["clean", "purge", "installer", "uninstall", "optimize"];
+    let cases = [
+        ("relative_path", runtime_plan_relative_path_error()),
+        ("blocked_path", runtime_plan_blocked_path_error()),
+        (
+            "confirmation_required",
+            runtime_plan_confirmation_required_error(),
+        ),
+        (
+            "rule_not_in_manifest",
+            runtime_plan_rule_not_in_manifest_error(),
+        ),
+        (
+            "unsupported_action",
+            RuntimeExecutionError::Execute(ActionExecutionError::UnsupportedAction {
+                action: "unknown".to_string(),
+            }),
+        ),
+        (
+            "execution_failed",
+            RuntimeExecutionError::Execute(ActionExecutionError::Failed {
+                message: "boom".to_string(),
+            }),
+        ),
+        (
+            "command_denied",
+            RuntimeExecutionError::Execute(ActionExecutionError::CommandDenied {
+                command: "echo".to_string(),
+            }),
+        ),
+        (
+            "command_timeout",
+            RuntimeExecutionError::Execute(ActionExecutionError::CommandTimeout {
+                command: "echo".to_string(),
+                timeout_sec: 5,
+            }),
+        ),
+        (
+            "command_non_zero",
+            RuntimeExecutionError::Execute(ActionExecutionError::CommandNonZero {
+                command: "echo".to_string(),
+                code: Some(3),
+            }),
+        ),
+    ];
+
+    for prefix in prefixes {
+        for (suffix, error) in &cases {
+            let detail =
+                runtime_error_detail_code_for_prefix_for_test(prefix, error.clone()).unwrap();
+            assert_eq!(detail, format!("{prefix}_{suffix}"));
+        }
+    }
+}
+
+#[test]
+fn runtime_error_detail_code_for_prefix_returns_none_for_unknown_prefix() {
+    let detail = runtime_error_detail_code_for_prefix_for_test(
+        "unknown",
+        RuntimeExecutionError::Execute(ActionExecutionError::Failed {
+            message: "boom".to_string(),
+        }),
+    );
+    assert!(detail.is_none());
 }
 
 #[test]

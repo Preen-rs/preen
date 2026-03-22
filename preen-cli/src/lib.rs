@@ -8119,6 +8119,21 @@ pub fn optimize_runtime_error_detail_code_for_test(error: RuntimeExecutionError)
     decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
 }
 
+pub fn runtime_error_detail_code_for_prefix_for_test(
+    prefix: &str,
+    error: RuntimeExecutionError,
+) -> Option<String> {
+    let encoded = match prefix {
+        "clean" => map_clean_runtime_error(error),
+        "purge" => map_purge_runtime_error(error),
+        "installer" => map_installer_runtime_error(error),
+        "uninstall" => map_uninstall_runtime_error(error),
+        "optimize" => map_optimize_runtime_error(error),
+        _ => return None,
+    };
+    decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
+}
+
 pub fn clone_rule_pack_for_test(url: &str, rev: &str, dest: &Path) -> Result<String, String> {
     clone_rule_pack_at(url, rev, dest, "install")
 }
