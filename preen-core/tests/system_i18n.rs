@@ -52,3 +52,38 @@ fn system_detail_message_falls_back_to_original_message() {
         original
     );
 }
+
+#[test]
+fn system_detail_message_localizes_known_prefixed_detail_codes() {
+    let original = "fallback message";
+    let codes = [
+        "purge_confirmation_required",
+        "installer_path_scope_violation",
+        "uninstall_command_timeout",
+        "optimize_no_tasks",
+        "analyze_root_not_found",
+        "status_state_dir_unavailable",
+        "completion_shell_unknown",
+        "remove_path_resolve_failed",
+    ];
+
+    for code in codes {
+        let en = system_localized_error_message(Some(code), original, "en-US");
+        let de = system_localized_error_message(Some(code), original, "de-DE");
+        assert_ne!(en, original, "missing en localization for {code}");
+        assert_ne!(de, original, "missing de localization for {code}");
+    }
+}
+
+#[test]
+fn system_detail_message_ignores_unknown_prefixed_detail_codes() {
+    let original = "fallback message";
+    assert_eq!(
+        system_localized_error_message(
+            Some("unknownprefix_confirmation_required"),
+            original,
+            "en-US"
+        ),
+        original
+    );
+}

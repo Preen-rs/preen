@@ -85,6 +85,222 @@ pub fn system_error_kind_label(kind: &str, language: &str) -> String {
     .to_string()
 }
 
+fn system_command_names(prefix: &str) -> Option<(&'static str, &'static str)> {
+    match prefix {
+        "clean" => Some(("clean", "Clean")),
+        "purge" => Some(("purge", "Purge")),
+        "installer" => Some(("installer", "Installer")),
+        "uninstall" => Some(("uninstall", "Uninstall")),
+        "optimize" => Some(("optimize", "Optimize")),
+        "analyze" => Some(("analyze", "Analyze")),
+        "status" => Some(("status", "Status")),
+        "check" => Some(("check", "Check")),
+        "touchid" => Some(("touchid", "Touch ID")),
+        "completion" => Some(("completion", "Completion")),
+        "update" => Some(("update", "Update")),
+        "remove" => Some(("remove", "Remove")),
+        _ => None,
+    }
+}
+
+fn system_prefixed_detail_message(code: &str, locale: &str) -> Option<String> {
+    let (prefix, suffix) = code.split_once('_')?;
+    let (command_en, command_de) = system_command_names(prefix)?;
+    let command = if locale == "de-DE" {
+        command_de
+    } else {
+        command_en
+    };
+
+    let rendered = match suffix {
+        "confirmation_required" => {
+            if locale == "de-DE" {
+                format!("{command}-Anwenden benoetigt --confirm.")
+            } else {
+                format!("{command} apply mode requires --confirm.")
+            }
+        }
+        "no_roots" => {
+            if locale == "de-DE" {
+                format!("{command} hat keine konfigurierten Scan-Wurzeln.")
+            } else {
+                format!("{command} has no configured scan roots.")
+            }
+        }
+        "target_required" => {
+            if locale == "de-DE" {
+                format!("{command} benoetigt ein Target-Argument.")
+            } else {
+                format!("{command} requires a target argument.")
+            }
+        }
+        "rule_not_in_manifest" => {
+            if locale == "de-DE" {
+                format!("{command}-Regel fehlt im Manifest.")
+            } else {
+                format!("{command} rule is not present in manifest.")
+            }
+        }
+        "relative_path" => {
+            if locale == "de-DE" {
+                format!("Ausgewaehlter {command} Pfad muss absolut sein.")
+            } else {
+                format!("selected {command} path must be absolute.")
+            }
+        }
+        "path_scope_violation" => {
+            if locale == "de-DE" {
+                format!("Ausgewaehlter {command} Pfad liegt ausserhalb der konfigurierten Wurzeln.")
+            } else {
+                format!("selected {command} path is outside configured roots.")
+            }
+        }
+        "symlink_not_allowed" => {
+            if locale == "de-DE" {
+                format!("Ausgewaehlter {command} Pfad darf kein Symlink sein.")
+            } else {
+                format!("selected {command} path cannot be a symlink.")
+            }
+        }
+        "blocked_path" => {
+            if locale == "de-DE" {
+                format!("Ausgewaehlter {command} Pfad ist durch Sicherheitsrichtlinie blockiert.")
+            } else {
+                format!("selected {command} path is blocked by safety policy.")
+            }
+        }
+        "unsupported_action" => {
+            if locale == "de-DE" {
+                format!("{command}-Aktion wird vom Executor nicht unterstuetzt.")
+            } else {
+                format!("{command} action is unsupported by executor.")
+            }
+        }
+        "execution_failed" => {
+            if locale == "de-DE" {
+                format!("{command}-Ausfuehrung ist fehlgeschlagen.")
+            } else {
+                format!("{command} execution failed.")
+            }
+        }
+        "command_denied" => {
+            if locale == "de-DE" {
+                format!("{command}-Befehl wurde durch Allowlist abgelehnt.")
+            } else {
+                format!("{command} command was denied by allowlist.")
+            }
+        }
+        "command_timeout" => {
+            if locale == "de-DE" {
+                format!("{command}-Befehl hat das Zeitlimit ueberschritten.")
+            } else {
+                format!("{command} command timed out.")
+            }
+        }
+        "command_non_zero" => {
+            if locale == "de-DE" {
+                format!("{command}-Befehl endete mit einem Fehlerstatus.")
+            } else {
+                format!("{command} command exited with a non-zero status.")
+            }
+        }
+        "no_tasks" => {
+            if locale == "de-DE" {
+                format!("{command} hat auf diesem Betriebssystem keine unterstuetzten Aufgaben.")
+            } else {
+                format!("{command} has no supported tasks on this operating system.")
+            }
+        }
+        "dry_run_unsupported_os" => {
+            if locale == "de-DE" {
+                format!("{command} wird auf diesem Betriebssystem nicht unterstuetzt.")
+            } else {
+                format!("{command} is not supported on this operating system.")
+            }
+        }
+        "root_not_found" => {
+            if locale == "de-DE" {
+                format!("{command}-Wurzel wurde nicht gefunden.")
+            } else {
+                format!("{command} root not found.")
+            }
+        }
+        "root_not_directory" => {
+            if locale == "de-DE" {
+                format!("{command}-Wurzel ist kein Verzeichnis.")
+            } else {
+                format!("{command} root is not a directory.")
+            }
+        }
+        "target_not_readable" => {
+            if locale == "de-DE" {
+                format!("{command}-Ziel ist nicht lesbar.")
+            } else {
+                format!("{command} target is not readable.")
+            }
+        }
+        "cwd_unavailable" => {
+            if locale == "de-DE" {
+                format!("Aktuelles Arbeitsverzeichnis fuer {command} ist nicht verfuegbar.")
+            } else {
+                format!("current working directory is unavailable for {command}.")
+            }
+        }
+        "home_missing" => {
+            if locale == "de-DE" {
+                format!("Home-Verzeichnis wird fuer {command} benoetigt.")
+            } else {
+                format!("home directory is required for {command}.")
+            }
+        }
+        "state_dir_unavailable" => {
+            if locale == "de-DE" {
+                format!("State-Verzeichnis fuer {command} ist nicht verfuegbar.")
+            } else {
+                format!("state directory is unavailable for {command}.")
+            }
+        }
+        "path_resolve_failed" => {
+            if locale == "de-DE" {
+                format!("{command}-Pfadauflosung ist fehlgeschlagen.")
+            } else {
+                format!("{command} path resolution failed.")
+            }
+        }
+        "shell_unknown" => {
+            if locale == "de-DE" {
+                format!("Shell fuer {command} konnte nicht erkannt werden.")
+            } else {
+                format!("shell for {command} could not be detected.")
+            }
+        }
+        "read_failed" => {
+            if locale == "de-DE" {
+                format!("{command}-Konfiguration konnte nicht gelesen werden.")
+            } else {
+                format!("{command} configuration read failed.")
+            }
+        }
+        "write_failed" => {
+            if locale == "de-DE" {
+                format!("{command}-Konfiguration konnte nicht geschrieben werden.")
+            } else {
+                format!("{command} configuration write failed.")
+            }
+        }
+        "executable_unknown" => {
+            if locale == "de-DE" {
+                format!("Ausfuehrbare Datei fuer {command} konnte nicht ermittelt werden.")
+            } else {
+                format!("failed to resolve executable path for {command}.")
+            }
+        }
+        _ => return None,
+    };
+
+    Some(rendered)
+}
+
 pub fn system_localized_error_message(
     detail_code: Option<&str>,
     message: &str,
@@ -105,6 +321,9 @@ pub fn system_localized_error_message(
         let localized = rust_i18n::t!(&key, locale = locale).to_string();
         if localized != key {
             return localized;
+        }
+        if let Some(fallback) = system_prefixed_detail_message(code, locale) {
+            return fallback;
         }
     }
     message.to_string()
