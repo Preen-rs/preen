@@ -244,3 +244,115 @@ async fn os_executor_unsupported_action_emits_unsupported_action_detail_code() {
     assert_eq!(events[2].event_kind, "execution_failed");
     assert_eq!(events[2].detail_code.as_deref(), Some("unsupported_action"));
 }
+
+#[tokio::test]
+async fn os_executor_run_command_timeout_emits_command_timeout_detail_code() {
+    let rule_id = "run-timeout-rule";
+    let manifest = sample_manifest(rule_id);
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "sh".to_string());
+    let rule = sample_rule(
+        rule_id,
+        ActionSpec {
+            action_type: ActionType::RunCommand,
+            paths: Vec::new(),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 2".to_string(),
+            ],
+            mode: None,
+            timeout_sec: Some(1),
+            allow_globs: false,
+            max_items: Some(100),
+            package_manager: None,
+            project_types: Vec::new(),
+            params,
+        },
+        MatchMode::Command,
+        RiskLevel::Low,
+        Vec::new(),
+    );
+    let sink = RecordingAuditSink::new();
+    let policy = DefaultSafetyPolicy::default();
+    let executor = OsActionExecutor;
+
+    let err = execute_action_with_audit(
+        &manifest,
+        &rule,
+        ExecutionMode::Apply,
+        Some("ok"),
+        &policy,
+        &executor,
+        Some(&sink),
+    )
+    .await
+    .expect_err("run command should timeout");
+
+    assert!(matches!(
+        err,
+        RuntimeExecutionError::Execute(ActionExecutionError::CommandTimeout { .. })
+    ));
+    let events = sink.events();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].event_kind, "plan_built");
+    assert_eq!(events[1].event_kind, "execution_started");
+    assert_eq!(events[2].event_kind, "execution_failed");
+    assert_eq!(events[2].detail_code.as_deref(), Some("command_timeout"));
+}
+
+#[tokio::test]
+async fn os_executor_run_command_non_zero_emits_command_non_zero_detail_code() {
+    let rule_id = "run-non-zero-rule";
+    let manifest = sample_manifest(rule_id);
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "sh".to_string());
+    let rule = sample_rule(
+        rule_id,
+        ActionSpec {
+            action_type: ActionType::RunCommand,
+            paths: Vec::new(),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "exit 12".to_string(),
+            ],
+            mode: None,
+            timeout_sec: Some(30),
+            allow_globs: false,
+            max_items: Some(100),
+            package_manager: None,
+            project_types: Vec::new(),
+            params,
+        },
+        MatchMode::Command,
+        RiskLevel::Low,
+        Vec::new(),
+    );
+    let sink = RecordingAuditSink::new();
+    let policy = DefaultSafetyPolicy::default();
+    let executor = OsActionExecutor;
+
+    let err = execute_action_with_audit(
+        &manifest,
+        &rule,
+        ExecutionMode::Apply,
+        Some("ok"),
+        &policy,
+        &executor,
+        Some(&sink),
+    )
+    .await
+    .expect_err("run command should fail with non-zero status");
+
+    assert!(matches!(
+        err,
+        RuntimeExecutionError::Execute(ActionExecutionError::CommandNonZero { code: Some(12), .. })
+    ));
+    let events = sink.events();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].event_kind, "plan_built");
+    assert_eq!(events[1].event_kind, "execution_started");
+    assert_eq!(events[2].event_kind, "execution_failed");
+    assert_eq!(events[2].detail_code.as_deref(), Some("command_non_zero"));
+}
