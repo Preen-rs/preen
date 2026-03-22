@@ -9016,6 +9016,37 @@ impl Cli {
     }
 }
 
+pub fn should_emit_formatted_error(cli: &Cli, err: &CliError) -> bool {
+    if !cli.wants_json_output() {
+        return true;
+    }
+    !json_error_already_reported(cli, err)
+}
+
+fn json_error_already_reported(cli: &Cli, err: &CliError) -> bool {
+    let detail = err.detail_code.as_deref();
+    match &cli.command {
+        CliCommand::Plugin { cmd } => match cmd {
+            PluginCommand::Verify { .. } => matches!(
+                detail,
+                Some("verify_failed")
+                    | Some("verify_signature_or_trust_failed")
+                    | Some("verify_core_compat_failed")
+                    | Some("verify_action_api_unsupported")
+                    | Some("verify_os_target_failed")
+                    | Some("verify_resolved_rev_drift")
+                    | Some("verify_manifest_hash_drift")
+                    | Some("verify_signature_hash_drift")
+                    | Some("verify_version_drift")
+            ),
+            PluginCommand::Test { all, .. } => *all && detail == Some("test_all_failed"),
+            PluginCommand::Preflight { all, .. } => *all && detail == Some("preflight_all_failed"),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 impl From<String> for CliError {
     fn from(message: String) -> Self {
         if let Some((kind, detail_code, message)) = decode_tagged_error(&message) {

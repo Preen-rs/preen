@@ -32,7 +32,7 @@ use preen_cli::{
     registry_update_json_for_test, remove_output_for_test, resolve_registry_for_test, run_typed,
     run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
     save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
-    search_registry_with_options_for_test, status_output_for_test,
+    search_registry_with_options_for_test, should_emit_formatted_error, status_output_for_test,
     status_should_emit_json_for_test, test_failure_row_for_test, touchid_output_for_test,
     trust_policy_from_str, uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
     update_output_for_test, validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
@@ -2506,6 +2506,64 @@ fn format_error_respects_json_flag() {
     assert!(plain_out.contains("kind=trust"));
     assert!(plain_out.contains("kind_label="));
     assert!(plain_out.contains("message="));
+}
+
+#[test]
+fn json_error_output_is_suppressed_when_report_already_emitted_for_verify() {
+    let json_cli =
+        Cli::try_parse_from(["preen", "plugin", "verify", "test.pack", "--json"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Verification,
+        detail_code: Some("verify_manifest_hash_drift".to_string()),
+        message: "plugin verify failed for test.pack".to_string(),
+    };
+    assert!(!should_emit_formatted_error(&json_cli, &err));
+}
+
+#[test]
+fn json_error_output_is_suppressed_when_report_already_emitted_for_test_all() {
+    let json_cli = Cli::try_parse_from(["preen", "plugin", "test", "--all", "--json"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Verification,
+        detail_code: Some("test_all_failed".to_string()),
+        message: "1 plugin test checks failed".to_string(),
+    };
+    assert!(!should_emit_formatted_error(&json_cli, &err));
+}
+
+#[test]
+fn json_error_output_is_suppressed_when_report_already_emitted_for_preflight_all() {
+    let json_cli =
+        Cli::try_parse_from(["preen", "plugin", "preflight", "--all", "--json"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Verification,
+        detail_code: Some("preflight_all_failed".to_string()),
+        message: "1 plugin preflight checks failed".to_string(),
+    };
+    assert!(!should_emit_formatted_error(&json_cli, &err));
+}
+
+#[test]
+fn json_error_output_is_kept_when_no_report_was_emitted() {
+    let json_cli =
+        Cli::try_parse_from(["preen", "plugin", "verify", "test.pack", "--json"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Validation,
+        detail_code: Some("verify_pack_load_failed".to_string()),
+        message: "load failed".to_string(),
+    };
+    assert!(should_emit_formatted_error(&json_cli, &err));
+}
+
+#[test]
+fn text_error_output_is_never_suppressed() {
+    let plain_cli = Cli::try_parse_from(["preen", "plugin", "verify", "test.pack"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Verification,
+        detail_code: Some("verify_manifest_hash_drift".to_string()),
+        message: "plugin verify failed for test.pack".to_string(),
+    };
+    assert!(should_emit_formatted_error(&plain_cli, &err));
 }
 
 #[test]
