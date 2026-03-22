@@ -76,6 +76,12 @@ fn plugin_failure_hint_supports_mapping_and_locale_message() {
     assert_eq!(context.code, "source_checkout_failed");
     assert_eq!(context.action, "validate_git_url_and_pinned_rev");
     assert!(context.message.contains("Git checkout failed"));
+
+    let context_de =
+        plugin_failure_hint_context_from_detail_code("preflight_source_checkout_failed", "de-DE");
+    assert_eq!(context_de.code, "source_checkout_failed");
+    assert_eq!(context_de.action, "validate_git_url_and_pinned_rev");
+    assert!(context_de.message.contains("Git-Checkout"));
 }
 
 #[test]
@@ -118,6 +124,32 @@ fn plugin_localized_error_message_uses_detail_code_and_fallback() {
 
     let passthrough = plugin_localized_error_message(None, "custom failure", "de-DE");
     assert_eq!(passthrough, "custom failure");
+}
+
+#[test]
+fn plugin_localized_error_message_supports_new_source_checkout_detail_codes_en_de() {
+    let source_codes = [
+        "install_source_clone_failed",
+        "install_source_fetch_failed",
+        "install_source_checkout_failed",
+        "install_source_git_resolve_failed",
+        "preflight_source_clone_failed",
+        "preflight_source_fetch_failed",
+        "preflight_source_checkout_failed",
+        "preflight_source_git_resolve_failed",
+    ];
+    for code in source_codes {
+        let en = plugin_localized_error_message(Some(code), "source failure", "en-US");
+        assert!(
+            en.contains("Git checkout failed"),
+            "missing en localization for {code}"
+        );
+        let de = plugin_localized_error_message(Some(code), "source failure", "de-DE");
+        assert!(
+            de.contains("Git-Checkout"),
+            "missing de localization for {code}"
+        );
+    }
 }
 
 #[test]

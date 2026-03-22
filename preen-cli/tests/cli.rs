@@ -2560,6 +2560,70 @@ fn format_error_uses_locale_and_hint_for_text_mode() {
 }
 
 #[test]
+fn format_error_uses_locale_and_hint_for_source_checkout_detail_code_in_de() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_LANG", "de-DE");
+    }
+    let plain_cli = Cli::try_parse_from(["preen", "plugin", "search"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Internal,
+        detail_code: Some("install_source_fetch_failed".to_string()),
+        message: "source fetch failed".to_string(),
+    };
+    let out = plain_cli.format_error(&err);
+    assert!(out.contains("detail_code=install_source_fetch_failed"));
+    assert!(out.contains("hint_code=source_checkout_failed"));
+    assert!(out.contains("hint_action=validate_git_url_and_pinned_rev"));
+    assert!(out.contains("message=Git-Checkout fehlgeschlagen."));
+    assert!(out.contains("hint_message=Git-Checkout fehlgeschlagen."));
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_LANG");
+    }
+}
+
+#[test]
+fn format_error_json_uses_locale_for_source_checkout_hint_message() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_LANG", "de-DE");
+    }
+    let json_cli = Cli::try_parse_from(["preen", "plugin", "search", "--json"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Internal,
+        detail_code: Some("preflight_source_checkout_failed".to_string()),
+        message: "source checkout failed".to_string(),
+    };
+    let out = json_cli.format_error(&err);
+    let parsed: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("preflight_source_checkout_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_code"].as_str(),
+        Some("source_checkout_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_action"].as_str(),
+        Some("validate_git_url_and_pinned_rev")
+    );
+    assert!(
+        parsed["data"]["hint_message"]
+            .as_str()
+            .unwrap()
+            .contains("Git-Checkout")
+    );
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_LANG");
+    }
+}
+
+#[test]
 fn format_error_localizes_system_command_not_implemented_in_de() {
     let _guard = ENV_LOCK.lock().unwrap();
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
