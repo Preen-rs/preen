@@ -23,7 +23,7 @@ use preen_core::error::CoreError;
 use preen_core::metrics::NoopMetrics;
 use preen_core::plugin::{
     ActionSpec, ActionType, Capability, CliJsonEnvelope, Manifest, MatchMode, MatchSpec, OsTarget,
-    PluginCheckId, PluginCheckStatus, PluginDetailCode, PluginFailureHint,
+    PluginCheckId, PluginCheckStatus, PluginDetailCode,
     PluginPreflightAllReport as PluginPreflightAllOutput,
     PluginPreflightFailure as PluginPreflightFailureOutput,
     PluginPreflightReport as PluginPreflightOutput, PluginTestAllReport as PluginTestAllOutput,
@@ -31,9 +31,10 @@ use preen_core::plugin::{
     PluginTestReport as PluginTestOutput, PluginTestSpecReport as PluginTestSpecOutput, RiskLevel,
     RuleFile, RuleRef, SignatureBundle, SignatureVerifier, TrustPolicy, VerificationInput,
     VerifyError, plugin_check_label, plugin_check_severity, plugin_error_kind_label,
-    plugin_failure_hint_from_detail_code, plugin_failure_hint_message,
-    plugin_localized_error_message, plugin_primary_detail_code_from_drifts,
-    plugin_primary_failure_hint_from_drifts,
+    plugin_failure_hint_context, plugin_failure_hint_context_from_detail_code,
+    plugin_failure_hint_message, plugin_localized_error_message,
+    plugin_primary_detail_code_from_drifts, plugin_primary_failure_hint_from_drifts,
+    plugin_unknown_failure_hint_context,
 };
 use preen_core::plugin_loader::{LoadedRulePack, load_rule_pack_from_dir};
 use preen_core::plugin_lock::{LockedPlugin, PluginLockfile};
@@ -5630,13 +5631,10 @@ fn format_human_error(err: &CliError, language: &str) -> String {
     if let Some(detail_code) = &err.detail_code {
         line.push_str(&format!(" detail_code={detail_code}"));
         if !is_system_error {
-            let hint = plugin_failure_hint_from_detail_code(detail_code);
+            let hint = plugin_failure_hint_context_from_detail_code(detail_code, language);
             line.push_str(&format!(" hint_code={}", hint.code));
             line.push_str(&format!(" hint_action={}", hint.action));
-            line.push_str(&format!(
-                " hint_message={}",
-                plugin_failure_hint_message(hint.code, language)
-            ));
+            line.push_str(&format!(" hint_message={}", hint.message));
         }
     }
     line
@@ -5870,19 +5868,22 @@ fn plugin_primary_failure_output(
         return None;
     }
     if let Some(detail_code) = report.detail_code.as_deref() {
-        let hint = plugin_failure_hint_from_detail_code(detail_code);
+        let hint = plugin_failure_hint_context_from_detail_code(detail_code, language);
         return Some(PluginPrimaryFailureOutput {
             detail_code: Some(detail_code.to_string()),
             hint_code: hint.code.to_string(),
             hint_action: hint.action.to_string(),
-            hint_message: plugin_failure_hint_message(hint.code, language),
+            hint_message: hint.message,
         });
     }
-    plugin_primary_failure_hint_from_drifts(&report.drifts).map(|hint| PluginPrimaryFailureOutput {
-        detail_code: None,
-        hint_code: hint.code.to_string(),
-        hint_action: hint.action.to_string(),
-        hint_message: plugin_failure_hint_message(hint.code, language),
+    plugin_primary_failure_hint_from_drifts(&report.drifts).map(|hint| {
+        let context = plugin_failure_hint_context(hint, language);
+        PluginPrimaryFailureOutput {
+            detail_code: None,
+            hint_code: context.code.to_string(),
+            hint_action: context.action.to_string(),
+            hint_message: context.message,
+        }
     })
 }
 
@@ -6076,8 +6077,8 @@ fn format_preflight_failure_row(failure: &PluginPreflightFailureOutput, language
     let hint = failure
         .detail_code
         .as_deref()
-        .map(plugin_failure_hint_from_detail_code)
-        .unwrap_or(PluginFailureHint::unknown());
+        .map(|detail_code| plugin_failure_hint_context_from_detail_code(detail_code, language))
+        .unwrap_or_else(|| plugin_unknown_failure_hint_context(language));
     format!(
         "failure: spec={} error_kind={} detail_code={} message={} hint_code={} hint_action={} hint_message={}",
         failure.spec,
@@ -6089,7 +6090,7 @@ fn format_preflight_failure_row(failure: &PluginPreflightFailureOutput, language
         failure.message,
         hint.code,
         hint.action,
-        plugin_failure_hint_message(hint.code, language)
+        hint.message
     )
 }
 
@@ -6097,8 +6098,8 @@ fn format_test_failure_row(failure: &PluginTestFailureOutput, language: &str) ->
     let hint = failure
         .detail_code
         .as_deref()
-        .map(plugin_failure_hint_from_detail_code)
-        .unwrap_or(PluginFailureHint::unknown());
+        .map(|detail_code| plugin_failure_hint_context_from_detail_code(detail_code, language))
+        .unwrap_or_else(|| plugin_unknown_failure_hint_context(language));
     format!(
         "failure: pack_id={} error_kind={} detail_code={} message={} hint_code={} hint_action={} hint_message={}",
         failure.pack_id,
@@ -6110,7 +6111,7 @@ fn format_test_failure_row(failure: &PluginTestFailureOutput, language: &str) ->
         failure.message,
         hint.code,
         hint.action,
-        plugin_failure_hint_message(hint.code, language)
+        hint.message
     )
 }
 
@@ -7188,10 +7189,10 @@ fn error_json(err: &CliError) -> Result<String, String> {
     if let Some(detail_code) = err.detail_code.as_deref()
         && !is_system_detail_code(Some(detail_code))
     {
-        let hint = plugin_failure_hint_from_detail_code(detail_code);
+        let hint = plugin_failure_hint_context_from_detail_code(detail_code, &language);
         hint_code = Some(hint.code.to_string());
         hint_action = Some(hint.action.to_string());
-        hint_message = Some(plugin_failure_hint_message(hint.code, &language));
+        hint_message = Some(hint.message);
     }
     to_json_envelope(
         "error",
@@ -7682,7 +7683,7 @@ pub fn plugin_remove_json_for_test(pack_id: &str, removed: bool) -> Result<Strin
 }
 
 pub fn hint_for_detail_code_for_test(code: &str) -> (String, String, u8) {
-    let hint = plugin_failure_hint_from_detail_code(code);
+    let hint = plugin_failure_hint_context_from_detail_code(code, "en-US");
     (
         hint.code.to_string(),
         hint.action.to_string(),

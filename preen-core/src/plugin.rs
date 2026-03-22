@@ -268,6 +268,37 @@ impl PluginFailureHint {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginFailureHintContext {
+    pub code: &'static str,
+    pub action: &'static str,
+    pub priority: u8,
+    pub message: String,
+}
+
+pub fn plugin_failure_hint_context(
+    hint: PluginFailureHint,
+    language: &str,
+) -> PluginFailureHintContext {
+    PluginFailureHintContext {
+        code: hint.code,
+        action: hint.action,
+        priority: hint.priority,
+        message: plugin_failure_hint_message(hint.code, language),
+    }
+}
+
+pub fn plugin_failure_hint_context_from_detail_code(
+    detail_code: &str,
+    language: &str,
+) -> PluginFailureHintContext {
+    plugin_failure_hint_context(plugin_failure_hint_from_detail_code(detail_code), language)
+}
+
+pub fn plugin_unknown_failure_hint_context(language: &str) -> PluginFailureHintContext {
+    plugin_failure_hint_context(PluginFailureHint::unknown(), language)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PluginDetailCode {
     InstallCloneFailed,

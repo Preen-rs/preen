@@ -1,6 +1,7 @@
 use preen_core::plugin::{
     PluginCheckId, PluginCheckStatus, PluginDetailCode, PluginTestDrift, plugin_check_label,
-    plugin_error_kind_label, plugin_failure_hint_from_detail_code, plugin_failure_hint_message,
+    plugin_error_kind_label, plugin_failure_hint_context_from_detail_code,
+    plugin_failure_hint_from_detail_code, plugin_failure_hint_message,
     plugin_localized_error_message, plugin_primary_failure_hint_from_drifts,
 };
 
@@ -69,6 +70,12 @@ fn plugin_failure_hint_supports_mapping_and_locale_message() {
     let clone_hint = plugin_failure_hint_from_detail_code("install_source_fetch_failed");
     assert_eq!(clone_hint.code, "source_checkout_failed");
     assert_eq!(clone_hint.priority, 2);
+
+    let context =
+        plugin_failure_hint_context_from_detail_code("install_source_fetch_failed", "en-US");
+    assert_eq!(context.code, "source_checkout_failed");
+    assert_eq!(context.action, "validate_git_url_and_pinned_rev");
+    assert!(context.message.contains("Git checkout failed"));
 }
 
 #[test]
