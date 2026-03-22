@@ -16,16 +16,17 @@ use preen_cli::{
     enforce_uninstall_scope_for_test, error_json_for_test, format_bytes_for_test,
     hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
     installer_output_for_test, installer_runtime_error_detail_code_for_test,
-    is_git_filter_unsupported_error_for_test, list_plugins_with_options_for_test, load_lockfile_at,
-    map_clone_error_detail_code_for_test, map_error_with_detail_code_for_test,
-    optimize_output_for_test, optimize_output_with_executor_for_test,
-    optimize_runtime_error_detail_code_for_test, parse_install_spec, parse_plugin_spec,
-    plugin_info_json_for_test, plugin_install_json_for_test, plugin_install_text_for_test,
-    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
-    plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
-    plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
-    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
-    plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
+    is_git_filter_unsupported_error_for_test, is_system_detail_code_for_test,
+    list_plugins_with_options_for_test, load_lockfile_at, map_clone_error_detail_code_for_test,
+    map_error_with_detail_code_for_test, optimize_output_for_test,
+    optimize_output_with_executor_for_test, optimize_runtime_error_detail_code_for_test,
+    parse_install_spec, parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
+    plugin_install_text_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
+    plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
+    plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
+    plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
+    plugin_update_json_for_test, plugin_update_text_for_test, plugin_verify_for_test,
+    plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
     registry_backup_path_for_test, registry_source_detail_code_for_test,
@@ -53,6 +54,32 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn static_detail_codes_from_source_for_test() -> BTreeSet<String> {
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("lib.rs");
+    let source = fs::read_to_string(source_path).unwrap();
+    let mut codes = BTreeSet::new();
+    let mut cursor = 0;
+    while let Some(rel) = source[cursor..].find("err_code(") {
+        let start = cursor + rel + "err_code(".len();
+        let segment = &source[start..];
+        if let Some(first_comma_rel) = segment.find(',') {
+            let second_arg = segment[(first_comma_rel + 1)..].trim_start();
+            if let Some(without_opening_quote) = second_arg.strip_prefix('"')
+                && let Some(end_quote_rel) = without_opening_quote.find('"')
+            {
+                let code = &without_opening_quote[..end_quote_rel];
+                if !code.is_empty() && code.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_') {
+                    codes.insert(code.to_string());
+                }
+            }
+        }
+        cursor = start;
+    }
+    codes
+}
 
 struct AlwaysOkVerifier;
 
@@ -1126,6 +1153,116 @@ fn wants_json_output_detects_flag_for_all_top_level_system_commands() {
             cli.wants_json_output(),
             "json flag not detected for args: {args:?}"
         );
+    }
+}
+
+#[test]
+fn static_detail_code_contract_is_frozen() {
+    let actual = static_detail_codes_from_source_for_test();
+    let expected: BTreeSet<String> = [
+        "analyze_cwd_unavailable",
+        "analyze_home_missing",
+        "analyze_root_not_directory",
+        "analyze_root_not_found",
+        "analyze_target_not_readable",
+        "clean_confirmation_required",
+        "clean_dry_run_unsupported_os",
+        "completion_executable_unknown",
+        "completion_home_missing",
+        "completion_read_failed",
+        "completion_shell_unknown",
+        "completion_write_failed",
+        "install_action_api_unsupported",
+        "install_core_compat_failed",
+        "install_os_target_failed",
+        "install_pack_load_failed",
+        "install_spec_invalid",
+        "installer_confirmation_required",
+        "installer_no_roots",
+        "optimize_confirmation_required",
+        "optimize_no_tasks",
+        "preflight_action_api_unsupported",
+        "preflight_all_failed",
+        "preflight_core_compat_failed",
+        "preflight_os_target_failed",
+        "preflight_pack_load_failed",
+        "preflight_signature_or_trust_failed",
+        "preflight_spec_invalid",
+        "purge_confirmation_required",
+        "purge_no_roots",
+        "registry_identity_invalid",
+        "registry_index_parse_failed",
+        "registry_issuer_invalid",
+        "registry_signature_verify_failed",
+        "registry_source_missing",
+        "remove_execution_failed",
+        "remove_path_resolve_failed",
+        "remove_path_scope_violation",
+        "status_state_dir_unavailable",
+        "test_all_failed",
+        "uninstall_confirmation_required",
+        "uninstall_no_roots",
+        "uninstall_target_required",
+        "verify_action_api_unsupported",
+        "verify_core_compat_failed",
+        "verify_manifest_hash_drift",
+        "verify_os_target_failed",
+        "verify_pack_load_failed",
+        "verify_resolved_rev_drift",
+        "verify_signature_hash_drift",
+        "verify_signature_or_trust_failed",
+        "verify_version_drift",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect();
+    assert_eq!(actual, expected, "static detail-code taxonomy changed");
+}
+
+#[test]
+fn static_detail_codes_keep_system_plugin_hint_boundary_in_json_mode() {
+    let system_cli = Cli::try_parse_from(["preen", "status", "--json"]).unwrap();
+    let plugin_cli = Cli::try_parse_from(["preen", "plugin", "search", "--json"]).unwrap();
+    for detail_code in static_detail_codes_from_source_for_test() {
+        let is_system = is_system_detail_code_for_test(&detail_code);
+        let err = CliError {
+            kind: CliErrorKind::Validation,
+            detail_code: Some(detail_code.clone()),
+            message: "boundary-check".to_string(),
+        };
+        let formatted = if is_system {
+            system_cli.format_error(&err)
+        } else {
+            plugin_cli.format_error(&err)
+        };
+        let parsed: Value = serde_json::from_str(&formatted).unwrap();
+        let hint_code = &parsed["data"]["hint_code"];
+        let hint_action = &parsed["data"]["hint_action"];
+        let hint_message = &parsed["data"]["hint_message"];
+        if is_system {
+            assert!(
+                hint_code.is_null(),
+                "system code must not expose plugin hint"
+            );
+            assert!(
+                hint_action.is_null(),
+                "system code must not expose plugin hint"
+            );
+            assert!(
+                hint_message.is_null(),
+                "system code must not expose plugin hint"
+            );
+        } else {
+            assert!(hint_code.is_string(), "plugin code should expose hint_code");
+            assert!(
+                hint_action.is_string(),
+                "plugin code should expose hint_action"
+            );
+            assert!(
+                hint_message.is_string(),
+                "plugin code should expose hint_message"
+            );
+        }
     }
 }
 

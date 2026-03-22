@@ -8134,6 +8134,10 @@ pub fn runtime_error_detail_code_for_prefix_for_test(
     decode_tagged_error(&encoded).and_then(|(_, detail_code, _)| detail_code)
 }
 
+pub fn is_system_detail_code_for_test(code: &str) -> bool {
+    is_system_detail_code(Some(code))
+}
+
 pub fn clone_rule_pack_for_test(url: &str, rev: &str, dest: &Path) -> Result<String, String> {
     clone_rule_pack_at(url, rev, dest, "install")
 }
