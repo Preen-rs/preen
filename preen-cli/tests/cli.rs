@@ -247,6 +247,50 @@ fn with_purge_path_override<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
+fn with_installer_path_override<T>(f: impl FnOnce() -> T) -> T {
+    let temp = tempfile::tempdir().unwrap();
+    let downloads = temp.path().join("downloads");
+    fs::create_dir_all(&downloads).unwrap();
+    let installer = downloads.join("Setup.pkg");
+    fs::write(&installer, vec![0u8; 11 * 1024 * 1024]).unwrap();
+    let old = std::env::var_os("PREEN_INSTALLER_PATHS");
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_INSTALLER_PATHS", downloads.as_os_str());
+    }
+    let out = f();
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        match old {
+            Some(v) => std::env::set_var("PREEN_INSTALLER_PATHS", v),
+            None => std::env::remove_var("PREEN_INSTALLER_PATHS"),
+        }
+    }
+    out
+}
+
+fn with_uninstall_path_override<T>(f: impl FnOnce() -> T) -> T {
+    let temp = tempfile::tempdir().unwrap();
+    let apps = temp.path().join("apps");
+    fs::create_dir_all(&apps).unwrap();
+    let app = apps.join("DemoApp.app");
+    fs::write(&app, b"demo").unwrap();
+    let old = std::env::var_os("PREEN_UNINSTALL_PATHS");
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_UNINSTALL_PATHS", apps.as_os_str());
+    }
+    let out = f();
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        match old {
+            Some(v) => std::env::set_var("PREEN_UNINSTALL_PATHS", v),
+            None => std::env::remove_var("PREEN_UNINSTALL_PATHS"),
+        }
+    }
+    out
+}
+
 fn clean_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
     let _guard = ENV_LOCK.lock().unwrap();
     with_clean_path_override(|| {
@@ -266,6 +310,37 @@ fn purge_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
     let _guard = ENV_LOCK.lock().unwrap();
     with_purge_path_override(|| {
         let cli = Cli::try_parse_from(["preen", "purge", "--confirm", "--json"]).unwrap();
+        let executor = ForcedCleanErrorExecutor { error };
+        let err = run_typed_with_verifier_and_clean_executor_for_test(
+            cli.clone(),
+            &AlwaysOkVerifier,
+            &executor,
+        )
+        .unwrap_err();
+        serde_json::from_str(&cli.format_error(&err)).unwrap()
+    })
+}
+
+fn installer_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_installer_path_override(|| {
+        let cli = Cli::try_parse_from(["preen", "installer", "--confirm", "--json"]).unwrap();
+        let executor = ForcedCleanErrorExecutor { error };
+        let err = run_typed_with_verifier_and_clean_executor_for_test(
+            cli.clone(),
+            &AlwaysOkVerifier,
+            &executor,
+        )
+        .unwrap_err();
+        serde_json::from_str(&cli.format_error(&err)).unwrap()
+    })
+}
+
+fn uninstall_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_uninstall_path_override(|| {
+        let cli = Cli::try_parse_from(["preen", "uninstall", "DemoApp.app", "--confirm", "--json"])
+            .unwrap();
         let executor = ForcedCleanErrorExecutor { error };
         let err = run_typed_with_verifier_and_clean_executor_for_test(
             cli.clone(),
@@ -2355,6 +2430,39 @@ fn optimize_json_maps_command_non_zero_detail_code_without_plugin_hints() {
     assert_eq!(
         parsed["data"]["detail_code"].as_str().unwrap(),
         "optimize_command_non_zero"
+    );
+    assert!(parsed["data"]["hint_code"].is_null());
+    assert!(parsed["data"]["hint_action"].is_null());
+    assert!(parsed["data"]["hint_message"].is_null());
+}
+
+#[test]
+fn installer_json_maps_command_timeout_detail_code_without_plugin_hints() {
+    let parsed = installer_error_json_for_forced_executor(ActionExecutionError::CommandTimeout {
+        command: "installer command".to_string(),
+        timeout_sec: 11,
+    });
+    assert_eq!(parsed["kind"].as_str().unwrap(), "error");
+    assert_eq!(parsed["data"]["error_kind"].as_str().unwrap(), "internal");
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "installer_command_timeout"
+    );
+    assert!(parsed["data"]["hint_code"].is_null());
+    assert!(parsed["data"]["hint_action"].is_null());
+    assert!(parsed["data"]["hint_message"].is_null());
+}
+
+#[test]
+fn uninstall_json_maps_command_denied_detail_code_without_plugin_hints() {
+    let parsed = uninstall_error_json_for_forced_executor(ActionExecutionError::CommandDenied {
+        command: "uninstall command".to_string(),
+    });
+    assert_eq!(parsed["kind"].as_str().unwrap(), "error");
+    assert_eq!(parsed["data"]["error_kind"].as_str().unwrap(), "internal");
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str().unwrap(),
+        "uninstall_command_denied"
     );
     assert!(parsed["data"]["hint_code"].is_null());
     assert!(parsed["data"]["hint_action"].is_null());
