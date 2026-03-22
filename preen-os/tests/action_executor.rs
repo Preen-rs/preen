@@ -359,6 +359,90 @@ async fn older_than_days_rejects_invalid_days_param() {
 }
 
 #[tokio::test]
+async fn prune_empty_dirs_dry_run_counts_without_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty_chain = dir.path().join("empty").join("nested");
+    fs::create_dir_all(&empty_chain).unwrap();
+    let non_empty = dir.path().join("keep");
+    fs::create_dir_all(&non_empty).unwrap();
+    fs::write(non_empty.join("file.txt"), b"x").unwrap();
+
+    let plan = sample_plan(
+        ActionType::PruneEmptyDirs,
+        ExecutionMode::DryRun,
+        vec![dir.path().to_string_lossy().to_string()],
+    );
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert_eq!(out.freed_bytes, 0);
+    assert!(out.warnings.is_empty());
+    assert!(empty_chain.exists());
+    assert!(non_empty.exists());
+}
+
+#[tokio::test]
+async fn prune_empty_dirs_apply_removes_only_empty_dirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty_chain = dir.path().join("empty").join("nested");
+    fs::create_dir_all(&empty_chain).unwrap();
+    let non_empty = dir.path().join("keep");
+    fs::create_dir_all(&non_empty).unwrap();
+    fs::write(non_empty.join("file.txt"), b"x").unwrap();
+
+    let plan = sample_plan(
+        ActionType::PruneEmptyDirs,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+    );
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert_eq!(out.freed_bytes, 0);
+    assert!(out.warnings.is_empty());
+    assert!(!empty_chain.exists());
+    assert!(non_empty.exists());
+}
+
+#[tokio::test]
+async fn prune_empty_dirs_respects_max_items_and_reports_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty_chain = dir.path().join("a").join("b").join("c");
+    fs::create_dir_all(&empty_chain).unwrap();
+    let mut plan = sample_plan(
+        ActionType::PruneEmptyDirs,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+    );
+    plan.request.action.max_items = Some(2);
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert_eq!(out.freed_bytes, 0);
+    assert_eq!(out.warnings.len(), 1);
+    assert!(out.warnings[0].contains("truncated"));
+    assert!(!dir.path().join("a").join("b").join("c").exists());
+    assert!(!dir.path().join("a").join("b").exists());
+    assert!(dir.path().join("a").exists());
+}
+
+#[tokio::test]
+async fn prune_empty_dirs_warns_for_non_directory_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file.txt");
+    fs::write(&file, b"x").unwrap();
+    let plan = sample_plan(
+        ActionType::PruneEmptyDirs,
+        ExecutionMode::Apply,
+        vec![file.to_string_lossy().to_string()],
+    );
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 0);
+    assert_eq!(out.freed_bytes, 0);
+    assert_eq!(out.warnings.len(), 1);
+    assert!(out.warnings[0].contains("not directory"));
+    assert!(file.exists());
+}
+
+#[tokio::test]
 async fn run_command_dry_run_reports_warning() {
     let mut params = HashMap::new();
     params.insert("allowlist".to_string(), "echo".to_string());

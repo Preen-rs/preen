@@ -135,6 +135,66 @@ impl OsActionExecutor {
             })
     }
 
+    fn collect_empty_dirs(
+        root: &Path,
+        limit: usize,
+    ) -> Result<(Vec<PathBuf>, bool), ActionExecutionError> {
+        fn visit(
+            dir: &Path,
+            selected: &mut Vec<PathBuf>,
+            limit: usize,
+            truncated: &mut bool,
+        ) -> Result<bool, ActionExecutionError> {
+            let entries = fs::read_dir(dir).map_err(|e| ActionExecutionError::Failed {
+                message: format!("prune_empty_dirs read_dir failed: {}: {e}", dir.display()),
+            })?;
+            let mut children: Vec<PathBuf> = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|e| ActionExecutionError::Failed {
+                    message: format!(
+                        "prune_empty_dirs read_dir entry failed: {}: {e}",
+                        dir.display()
+                    ),
+                })?;
+                children.push(entry.path());
+            }
+            children.sort();
+
+            let mut empty_after_prune = true;
+            for child in children {
+                let meta =
+                    fs::symlink_metadata(&child).map_err(|e| ActionExecutionError::Failed {
+                        message: format!(
+                            "prune_empty_dirs metadata failed: {}: {e}",
+                            child.display()
+                        ),
+                    })?;
+                if meta.file_type().is_dir() {
+                    let child_empty = visit(&child, selected, limit, truncated)?;
+                    if !child_empty {
+                        empty_after_prune = false;
+                    }
+                } else {
+                    empty_after_prune = false;
+                }
+            }
+
+            if empty_after_prune {
+                if selected.len() < limit {
+                    selected.push(dir.to_path_buf());
+                    return Ok(true);
+                }
+                *truncated = true;
+            }
+            Ok(false)
+        }
+
+        let mut selected: Vec<PathBuf> = Vec::new();
+        let mut truncated = false;
+        visit(root, &mut selected, limit, &mut truncated)?;
+        Ok((selected, truncated))
+    }
+
     fn parse_command_allowlist(plan: &ExecutionPlan) -> Vec<String> {
         let mut values = Vec::new();
         let mut has_param_allowlist = false;
@@ -350,6 +410,7 @@ impl ActionExecutorPort for OsActionExecutor {
             action_type,
             ActionType::TrashPaths
                 | ActionType::DeletePaths
+                | ActionType::PruneEmptyDirs
                 | ActionType::RunCommand
                 | ActionType::ScanPaths
                 | ActionType::MatchRegex
@@ -400,6 +461,50 @@ impl ActionExecutorPort for OsActionExecutor {
 
         if matches!(action_type, ActionType::OlderThanDays) {
             return Self::execute_older_than_days(plan);
+        }
+
+        if matches!(action_type, ActionType::PruneEmptyDirs) {
+            let mut affected_items: u64 = 0;
+            let mut warnings: Vec<String> = Vec::new();
+            let max_items = Self::parse_max_items(plan);
+
+            for raw in &plan.request.action.paths {
+                let path = Self::expand_path(raw);
+                if !path.exists() {
+                    warnings.push(format!("path not found: {}", path.display()));
+                    continue;
+                }
+                if !path.is_dir() {
+                    warnings.push(format!("path is not directory: {}", path.display()));
+                    continue;
+                }
+                let remaining = max_items.saturating_sub(affected_items as usize);
+                let (dirs, truncated) = Self::collect_empty_dirs(&path, remaining)?;
+                affected_items = affected_items.saturating_add(dirs.len() as u64);
+                if plan.request.mode == ExecutionMode::Apply {
+                    for dir in dirs {
+                        fs::remove_dir(&dir).map_err(|e| ActionExecutionError::Failed {
+                            message: format!(
+                                "prune_empty_dirs remove_dir failed: {}: {e}",
+                                dir.display()
+                            ),
+                        })?;
+                    }
+                }
+                if truncated {
+                    warnings.push(format!(
+                        "scan result truncated at max_items={max_items} for {}",
+                        path.display()
+                    ));
+                    break;
+                }
+            }
+
+            return Ok(ActionExecutionResult {
+                affected_items,
+                freed_bytes: 0,
+                warnings,
+            });
         }
 
         let mut affected_items: u64 = 0;
