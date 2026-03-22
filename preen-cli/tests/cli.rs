@@ -15,31 +15,33 @@ use preen_cli::{
     completion_output_for_test, default_signature_source_for_test, enforce_clean_scope_for_test,
     enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
     format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
-    install_plugin_in_dir_for_test, installer_output_for_test,
-    installer_runtime_error_detail_code_for_test, installer_text_output_for_test,
-    is_git_filter_unsupported_error_for_test, is_system_detail_code_for_test,
-    list_plugins_with_options_for_test, load_lockfile_at, map_clone_error_detail_code_for_test,
-    map_error_with_detail_code_for_test, optimize_output_for_test,
-    optimize_output_with_executor_for_test, optimize_runtime_error_detail_code_for_test,
-    optimize_text_output_for_test, parse_install_spec, parse_plugin_spec,
-    plugin_info_json_for_test, plugin_install_json_for_test, plugin_install_text_for_test,
-    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
-    plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
-    plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
-    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
-    plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
+    install_plugin_in_dir_for_test, installer_output_for_test, installer_paths_json_for_test,
+    installer_paths_text_for_test, installer_runtime_error_detail_code_for_test,
+    installer_text_output_for_test, is_git_filter_unsupported_error_for_test,
+    is_system_detail_code_for_test, list_plugins_with_options_for_test, load_lockfile_at,
+    map_clone_error_detail_code_for_test, map_error_with_detail_code_for_test,
+    optimize_output_for_test, optimize_output_with_executor_for_test,
+    optimize_runtime_error_detail_code_for_test, optimize_text_output_for_test, parse_install_spec,
+    parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
+    plugin_install_text_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
+    plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
+    plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
+    plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
+    plugin_update_json_for_test, plugin_update_text_for_test, plugin_verify_for_test,
+    plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
-    purge_text_output_for_test, registry_backup_path_for_test,
-    registry_source_detail_code_for_test, registry_update_json_for_test, remove_output_for_test,
-    resolve_registry_for_test, run_typed, run_typed_with_verifier_and_clean_executor_for_test,
-    run_typed_with_verifier_for_test, runtime_error_detail_code_for_prefix_for_test,
-    save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
-    search_registry_with_options_for_test, should_emit_formatted_error, status_output_for_test,
-    status_should_emit_json_for_test, test_failure_row_for_test, touchid_output_for_test,
-    trust_policy_from_str, uninstall_output_for_test, uninstall_runtime_error_detail_code_for_test,
-    uninstall_text_output_for_test, update_output_for_test,
-    validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
+    purge_paths_json_for_test, purge_paths_text_for_test, purge_text_output_for_test,
+    registry_backup_path_for_test, registry_source_detail_code_for_test,
+    registry_update_json_for_test, remove_output_for_test, resolve_registry_for_test, run_typed,
+    run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
+    runtime_error_detail_code_for_prefix_for_test, save_lockfile_at, search_registry_for_test,
+    search_registry_json_for_test, search_registry_with_options_for_test,
+    should_emit_formatted_error, status_output_for_test, status_should_emit_json_for_test,
+    test_failure_row_for_test, touchid_output_for_test, trust_policy_from_str,
+    uninstall_output_for_test, uninstall_paths_json_for_test, uninstall_paths_text_for_test,
+    uninstall_runtime_error_detail_code_for_test, uninstall_text_output_for_test,
+    update_output_for_test, validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
@@ -385,6 +387,16 @@ fn assert_system_envelope(output: &Value, kind: &str, required_data_fields: &[&s
             "missing required data field: {field}"
         );
     }
+}
+
+fn assert_paths_envelope(output: &Value, kind: &str) {
+    assert_eq!(output["schema_version"].as_u64(), Some(1));
+    assert_eq!(output["kind"].as_str(), Some(kind));
+    let roots = output["data"]["roots"]
+        .as_array()
+        .expect("roots must be an array");
+    assert!(!roots.is_empty(), "roots array must not be empty");
+    assert!(roots.iter().all(|value| value.as_str().is_some()));
 }
 
 fn check_passed_from_verify_text(text: &str, check_id: &str) -> Option<bool> {
@@ -1628,6 +1640,37 @@ fn system_command_text_contract_matrix_has_required_markers() {
     assert!(optimize.contains("Tasks:"));
     assert!(optimize.contains("Affected items:"));
     assert!(optimize.contains("Audit events:"));
+}
+
+#[test]
+fn system_paths_json_contract_matrix_has_required_fields() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let purge = with_purge_path_override(|| purge_paths_json_for_test().unwrap());
+    assert_paths_envelope(&purge, "system.purge.paths");
+
+    let installer = with_installer_path_override(|| installer_paths_json_for_test().unwrap());
+    assert_paths_envelope(&installer, "system.installer.paths");
+
+    let uninstall = with_uninstall_path_override(|| uninstall_paths_json_for_test().unwrap());
+    assert_paths_envelope(&uninstall, "system.uninstall.paths");
+}
+
+#[test]
+fn system_paths_text_contract_matrix_has_required_markers() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let purge = with_purge_path_override(purge_paths_text_for_test);
+    assert!(purge.contains("Purge scan roots:"));
+    assert!(purge.contains("- "));
+
+    let installer = with_installer_path_override(installer_paths_text_for_test);
+    assert!(installer.contains("Installer scan roots:"));
+    assert!(installer.contains("- "));
+
+    let uninstall = with_uninstall_path_override(uninstall_paths_text_for_test);
+    assert!(uninstall.contains("Uninstall scan roots:"));
+    assert!(uninstall.contains("- "));
 }
 
 #[test]

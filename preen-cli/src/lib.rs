@@ -890,16 +890,10 @@ fn run_purge_with_executor(
     if paths {
         let roots = normalize_purge_roots(resolve_purge_roots());
         if json {
-            println!(
-                "{}",
-                to_json_envelope("system.purge.paths", PurgePathsOutput { roots })?
-            );
+            println!("{}", purge_paths_json(roots)?);
             return Ok(());
         }
-        println!("Purge scan roots:");
-        for root in &roots {
-            println!("- {root}");
-        }
+        print!("{}", paths_text("Purge scan roots:", &roots));
         return Ok(());
     }
 
@@ -924,16 +918,10 @@ fn run_installer_with_executor(
     if paths {
         let roots = normalize_installer_roots(resolve_installer_roots());
         if json {
-            println!(
-                "{}",
-                to_json_envelope("system.installer.paths", InstallerPathsOutput { roots })?
-            );
+            println!("{}", installer_paths_json(roots)?);
             return Ok(());
         }
-        println!("Installer scan roots:");
-        for root in &roots {
-            println!("- {root}");
-        }
+        print!("{}", paths_text("Installer scan roots:", &roots));
         return Ok(());
     }
 
@@ -1094,16 +1082,10 @@ fn run_uninstall_with_executor(
     if paths {
         let roots = normalize_uninstall_roots(resolve_uninstall_roots());
         if json {
-            println!(
-                "{}",
-                to_json_envelope("system.uninstall.paths", UninstallPathsOutput { roots })?
-            );
+            println!("{}", uninstall_paths_json(roots)?);
             return Ok(());
         }
-        println!("Uninstall scan roots:");
-        for root in &roots {
-            println!("- {root}");
-        }
+        print!("{}", paths_text("Uninstall scan roots:", &roots));
         return Ok(());
     }
 
@@ -4030,6 +4012,27 @@ fn uninstall_json(out: UninstallCommandOutput) -> Result<String, String> {
 
 fn optimize_json(out: OptimizeCommandOutput) -> Result<String, String> {
     to_json_envelope("system.optimize", out)
+}
+
+fn purge_paths_json(roots: Vec<String>) -> Result<String, String> {
+    to_json_envelope("system.purge.paths", PurgePathsOutput { roots })
+}
+
+fn installer_paths_json(roots: Vec<String>) -> Result<String, String> {
+    to_json_envelope("system.installer.paths", InstallerPathsOutput { roots })
+}
+
+fn uninstall_paths_json(roots: Vec<String>) -> Result<String, String> {
+    to_json_envelope("system.uninstall.paths", UninstallPathsOutput { roots })
+}
+
+fn paths_text(header: &str, roots: &[String]) -> String {
+    let mut text = String::new();
+    let _ = writeln!(text, "{header}");
+    for root in roots {
+        let _ = writeln!(text, "- {root}");
+    }
+    text
 }
 
 fn clean_text(out: &CleanCommandOutput) -> String {
@@ -8039,6 +8042,18 @@ pub fn purge_text_output_for_test(dry_run: bool, confirm: bool) -> Result<String
     Ok(purge_text(&output))
 }
 
+pub fn purge_paths_json_for_test() -> Result<serde_json::Value, String> {
+    let roots = normalize_purge_roots(resolve_purge_roots());
+    let json = purge_paths_json(roots)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "purge paths output parse failed", e))
+}
+
+pub fn purge_paths_text_for_test() -> String {
+    let roots = normalize_purge_roots(resolve_purge_roots());
+    paths_text("Purge scan roots:", &roots)
+}
+
 pub fn installer_output_for_test(
     dry_run: bool,
     confirm: bool,
@@ -8052,6 +8067,23 @@ pub fn installer_output_for_test(
 pub fn installer_text_output_for_test(dry_run: bool, confirm: bool) -> Result<String, String> {
     let output = run_installer_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
     Ok(installer_text(&output))
+}
+
+pub fn installer_paths_json_for_test() -> Result<serde_json::Value, String> {
+    let roots = normalize_installer_roots(resolve_installer_roots());
+    let json = installer_paths_json(roots)?;
+    serde_json::from_str(&json).map_err(|e| {
+        err_with(
+            CliErrorKind::Internal,
+            "installer paths output parse failed",
+            e,
+        )
+    })
+}
+
+pub fn installer_paths_text_for_test() -> String {
+    let roots = normalize_installer_roots(resolve_installer_roots());
+    paths_text("Installer scan roots:", &roots)
 }
 
 pub fn uninstall_output_for_test(
@@ -8072,6 +8104,23 @@ pub fn uninstall_text_output_for_test(
 ) -> Result<String, String> {
     let output = run_uninstall_output_with_executor(target, dry_run, confirm, &OsActionExecutor)?;
     Ok(uninstall_text(&output))
+}
+
+pub fn uninstall_paths_json_for_test() -> Result<serde_json::Value, String> {
+    let roots = normalize_uninstall_roots(resolve_uninstall_roots());
+    let json = uninstall_paths_json(roots)?;
+    serde_json::from_str(&json).map_err(|e| {
+        err_with(
+            CliErrorKind::Internal,
+            "uninstall paths output parse failed",
+            e,
+        )
+    })
+}
+
+pub fn uninstall_paths_text_for_test() -> String {
+    let roots = normalize_uninstall_roots(resolve_uninstall_roots());
+    paths_text("Uninstall scan roots:", &roots)
 }
 
 pub fn optimize_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_json::Value, String> {
