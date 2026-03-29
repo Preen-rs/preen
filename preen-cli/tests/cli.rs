@@ -3297,6 +3297,63 @@ fn installer_paths_rejects_dry_run_or_confirm_conflicts() {
 }
 
 #[test]
+fn system_option_matrix_accepts_valid_flag_combinations() {
+    let valid_cases = [
+        vec!["preen", "clean", "--dry-run"],
+        vec!["preen", "clean", "--confirm"],
+        vec!["preen", "optimize", "--dry-run"],
+        vec!["preen", "optimize", "--confirm"],
+        vec!["preen", "purge", "--dry-run"],
+        vec!["preen", "purge", "--confirm"],
+        vec!["preen", "purge", "--paths"],
+        vec!["preen", "installer", "--dry-run"],
+        vec!["preen", "installer", "--confirm"],
+        vec!["preen", "installer", "--paths"],
+        vec!["preen", "uninstall", "Demo.app", "--dry-run"],
+        vec!["preen", "uninstall", "Demo.app", "--confirm"],
+        vec!["preen", "uninstall", "--paths"],
+        vec!["preen", "analyze", "/tmp", "--max-depth", "2"],
+        vec!["preen", "status"],
+        vec!["preen", "check", "--fix"],
+        vec!["preen", "touchid", "status", "--dry-run"],
+        vec!["preen", "completion", "zsh", "--dry-run"],
+        vec!["preen", "update", "--force", "--nightly"],
+        vec!["preen", "remove", "--dry-run"],
+    ];
+
+    for args in valid_cases {
+        let parsed = Cli::try_parse_from(args.clone());
+        assert!(
+            parsed.is_ok(),
+            "expected valid system option combination, got parse error: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn system_option_matrix_rejects_conflicting_flags() {
+    let invalid_cases = [
+        vec!["preen", "clean", "--dry-run", "--confirm"],
+        vec!["preen", "optimize", "--dry-run", "--confirm"],
+        vec!["preen", "purge", "--paths", "--dry-run"],
+        vec!["preen", "purge", "--paths", "--confirm"],
+        vec!["preen", "installer", "--paths", "--dry-run"],
+        vec!["preen", "installer", "--paths", "--confirm"],
+        vec!["preen", "uninstall", "Demo.app", "--paths"],
+        vec!["preen", "uninstall", "--paths", "--dry-run"],
+        vec!["preen", "uninstall", "--paths", "--confirm"],
+    ];
+
+    for args in invalid_cases {
+        let parsed = Cli::try_parse_from(args.clone());
+        assert!(
+            parsed.is_err(),
+            "expected conflicting system flags to fail parsing: {args:?}"
+        );
+    }
+}
+
+#[test]
 fn touchid_rejects_invalid_action() {
     let parsed = Cli::try_parse_from(["preen", "touchid", "invalid-action", "--dry-run"]);
     assert!(parsed.is_err());
