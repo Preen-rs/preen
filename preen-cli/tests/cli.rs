@@ -43,10 +43,11 @@ use preen_cli::{
     should_emit_formatted_error, status_output_for_test, status_should_emit_json_for_test,
     status_text_output_for_test, test_failure_row_for_test, touchid_output_for_test,
     touchid_text_output_for_test, trust_policy_from_str, uninstall_output_for_test,
-    uninstall_paths_json_for_test, uninstall_paths_text_for_test,
-    uninstall_runtime_error_detail_code_for_test, uninstall_text_output_for_test,
-    update_output_for_test, update_text_output_for_test, validate_registry_trust_inputs_for_test,
-    verify_lockfile_hashes, write_registry_index_with_backup_for_test,
+    uninstall_output_with_debug_for_test, uninstall_paths_json_for_test,
+    uninstall_paths_text_for_test, uninstall_runtime_error_detail_code_for_test,
+    uninstall_text_output_for_test, update_output_for_test, update_text_output_for_test,
+    validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
+    write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
     ActionExecutionError, ActionExecutionResult, ActionExecutorPort, ExecutionPlan, PlanError,
@@ -1686,6 +1687,7 @@ fn system_command_text_contract_matrix_has_required_markers() {
     assert!(uninstall.contains("Uninstall (dry-run)"));
     assert!(uninstall.contains("Target: DemoApp.app"));
     assert!(uninstall.contains("Scanned entries:"));
+    assert!(uninstall.contains("Scan depth:"));
     assert!(uninstall.contains("Targets:"));
     assert!(uninstall.contains("Audit events:"));
 
@@ -2596,22 +2598,38 @@ fn uninstall_dry_run_json_happy_path() {
     let _guard = ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp.path().join("DemoApp.app");
+    let preview_list = temp.path().join("uninstall-list.txt");
     fs::create_dir_all(&app_dir).unwrap();
     fs::write(app_dir.join("Info.plist"), b"demo").unwrap();
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::set_var("PREEN_UNINSTALL_PATHS", temp.path().as_os_str());
+        std::env::set_var(
+            "PREEN_UNINSTALL_PREVIEW_LIST_PATH",
+            preview_list.as_os_str(),
+        );
     }
 
     let output = uninstall_output_for_test(Some("DemoApp"), true, false).unwrap();
     assert_eq!(output["kind"].as_str(), Some("system.uninstall"));
     assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
     assert_eq!(output["data"]["target"].as_str(), Some("DemoApp"));
+    assert_eq!(output["data"]["scan_depth"].as_u64(), Some(3));
     assert!(output["data"]["target_count"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(
+        output["data"]["preview_list_path"].as_str(),
+        Some(preview_list.to_string_lossy().as_ref())
+    );
+    assert!(
+        fs::read_to_string(preview_list)
+            .unwrap()
+            .contains("DemoApp.app")
+    );
 
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::remove_var("PREEN_UNINSTALL_PATHS");
+        std::env::remove_var("PREEN_UNINSTALL_PREVIEW_LIST_PATH");
     }
 }
 
@@ -2636,6 +2654,36 @@ fn uninstall_apply_confirm_deletes_targets() {
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::remove_var("PREEN_UNINSTALL_PATHS");
+    }
+}
+
+#[test]
+fn uninstall_debug_mode_writes_debug_log() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let app_dir = temp.path().join("DemoApp.app");
+    let debug_log = temp.path().join("uninstall-debug.log");
+    fs::create_dir_all(&app_dir).unwrap();
+    fs::write(app_dir.join("Info.plist"), b"demo").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_UNINSTALL_PATHS", temp.path().as_os_str());
+        std::env::set_var("PREEN_UNINSTALL_DEBUG_LOG_PATH", debug_log.as_os_str());
+    }
+
+    let output = uninstall_output_with_debug_for_test(Some("DemoApp"), true, false, true).unwrap();
+    assert_eq!(
+        output["data"]["debug_log_path"].as_str(),
+        Some(debug_log.to_string_lossy().as_ref())
+    );
+    let log = fs::read_to_string(debug_log).unwrap();
+    assert!(log.contains("target=DemoApp"));
+    assert!(log.contains("scan_depth=3"));
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_UNINSTALL_PATHS");
+        std::env::remove_var("PREEN_UNINSTALL_DEBUG_LOG_PATH");
     }
 }
 
@@ -3247,6 +3295,14 @@ fn top_level_system_command_option_matrix_parses() {
             "--json",
         ],
         vec!["preen", "uninstall", "DemoApp", "--dry-run", "--json"],
+        vec![
+            "preen",
+            "uninstall",
+            "DemoApp",
+            "--dry-run",
+            "--debug",
+            "--json",
+        ],
         vec!["preen", "uninstall", "DemoApp", "--confirm", "--json"],
         vec!["preen", "uninstall", "--paths", "--json"],
         vec!["preen", "optimize", "--dry-run", "--json"],
@@ -3279,6 +3335,7 @@ fn top_level_system_commands_short_flags_parse() {
         vec!["preen", "clean", "-n"],
         vec!["preen", "clean", "--whitelist"],
         vec!["preen", "uninstall", "DemoApp", "-n"],
+        vec!["preen", "uninstall", "DemoApp", "--debug"],
         vec!["preen", "optimize", "-n"],
         vec!["preen", "purge", "-n"],
         vec!["preen", "purge", "--debug"],
@@ -3482,6 +3539,7 @@ fn system_option_matrix_accepts_valid_flag_combinations() {
         vec!["preen", "installer", "--confirm"],
         vec!["preen", "installer", "--paths"],
         vec!["preen", "uninstall", "Demo.app", "--dry-run"],
+        vec!["preen", "uninstall", "Demo.app", "--dry-run", "--debug"],
         vec!["preen", "uninstall", "Demo.app", "--confirm"],
         vec!["preen", "uninstall", "--paths"],
         vec!["preen", "analyze", "/tmp", "--max-depth", "2"],

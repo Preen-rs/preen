@@ -68,7 +68,7 @@ const DEFAULT_PURGE_SCAN_DEPTH: usize = 6;
 const DEFAULT_PURGE_PREVIEW_LIMIT: usize = 20;
 const DEFAULT_INSTALLER_SCAN_DEPTH: usize = 2;
 const DEFAULT_INSTALLER_PREVIEW_LIMIT: usize = 20;
-const DEFAULT_UNINSTALL_SCAN_DEPTH: usize = 4;
+const DEFAULT_UNINSTALL_SCAN_DEPTH: usize = 3;
 const DEFAULT_UNINSTALL_PREVIEW_LIMIT: usize = 20;
 const DEFAULT_OPTIMIZE_TIMEOUT_SEC: u64 = 60;
 const DEFAULT_ANALYZE_MAX_DEPTH: usize = 8;
@@ -97,6 +97,8 @@ const PURGE_PREVIEW_LIST_FILE_NAME: &str = "purge-list.txt";
 const PURGE_DEBUG_LOG_FILE_NAME: &str = "purge-debug.log";
 const INSTALLER_PREVIEW_LIST_FILE_NAME: &str = "installer-list.txt";
 const INSTALLER_DEBUG_LOG_FILE_NAME: &str = "installer-debug.log";
+const UNINSTALL_PREVIEW_LIST_FILE_NAME: &str = "uninstall-list.txt";
+const UNINSTALL_DEBUG_LOG_FILE_NAME: &str = "uninstall-debug.log";
 const DEFAULT_CLEAN_WHITELIST_PATTERNS: [&str; 2] = [
     "~/Library/Application Support/Preen/plugins",
     "~/.config/preen/plugins",
@@ -331,13 +333,25 @@ struct UninstallCommandOutput {
     target: String,
     scanned_roots: usize,
     scanned_entries: usize,
+    scan_depth: usize,
     target_count: usize,
     estimated_freed_bytes: u64,
     preview_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_list_path: Option<String>,
     affected_items: u64,
     freed_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug_log_path: Option<String>,
     warnings: Vec<String>,
     audit_events: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UninstallCommandOptions {
+    dry_run: bool,
+    confirm: bool,
+    debug: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -593,12 +607,14 @@ fn run_typed_with_verifier_and_clean_executor(
             dry_run,
             confirm,
             paths,
+            debug,
             json,
         } => run_uninstall_with_executor(
             target.as_deref(),
             *dry_run,
             *confirm,
             *paths,
+            *debug,
             *json,
             clean_executor,
         )
@@ -1209,6 +1225,7 @@ fn run_uninstall_with_executor(
     dry_run: bool,
     confirm: bool,
     paths: bool,
+    debug: bool,
     json: bool,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<(), String> {
@@ -1222,7 +1239,12 @@ fn run_uninstall_with_executor(
         return Ok(());
     }
 
-    let output = run_uninstall_output_with_executor(target, dry_run, confirm, clean_executor)?;
+    let options = UninstallCommandOptions {
+        dry_run,
+        confirm,
+        debug,
+    };
+    let output = run_uninstall_output_with_executor(target, options, clean_executor)?;
     if json {
         println!("{}", uninstall_json(output.clone())?);
         return Ok(());
@@ -1235,8 +1257,7 @@ fn run_uninstall_with_executor(
 
 fn run_uninstall_output_with_executor(
     target: Option<&str>,
-    dry_run: bool,
-    confirm: bool,
+    options: UninstallCommandOptions,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<UninstallCommandOutput, String> {
     let target = target
@@ -1249,7 +1270,7 @@ fn run_uninstall_output_with_executor(
                 "uninstall requires a target argument",
             )
         })?;
-    if !dry_run && !confirm {
+    if !options.dry_run && !options.confirm {
         return Err(err_code(
             CliErrorKind::Validation,
             "uninstall_confirmation_required",
@@ -1266,8 +1287,9 @@ fn run_uninstall_output_with_executor(
         ));
     }
 
+    let scan_depth = uninstall_scan_depth();
     let (selection, scanned_entries, mut warnings) =
-        scan_uninstall_candidates(&roots, target, uninstall_scan_depth());
+        scan_uninstall_candidates(&roots, target, scan_depth);
     let selected_paths = selection
         .iter()
         .map(|item| item.path.clone())
@@ -1275,11 +1297,20 @@ fn run_uninstall_output_with_executor(
     let estimated_freed_bytes: u64 = selection.iter().map(|item| item.size).sum();
     enforce_uninstall_scope(&selected_paths, &roots)?;
     let preview_paths = clean_preview_paths(&selected_paths, uninstall_preview_limit());
+    let preview_list_path = write_uninstall_preview_list(options.dry_run, &selected_paths);
+    let debug_log_path = write_uninstall_debug(
+        options.debug,
+        &roots,
+        target,
+        scan_depth,
+        scanned_entries,
+        selected_paths.len(),
+    );
 
     if selected_paths.is_empty() {
         warnings.push("no uninstall targets selected".to_string());
         return Ok(UninstallCommandOutput {
-            mode: if dry_run {
+            mode: if options.dry_run {
                 "dry_run".to_string()
             } else {
                 "apply".to_string()
@@ -1287,11 +1318,18 @@ fn run_uninstall_output_with_executor(
             target: target.to_string(),
             scanned_roots: roots.len(),
             scanned_entries,
+            scan_depth,
             target_count: 0,
             estimated_freed_bytes: 0,
             preview_paths: Vec::new(),
+            preview_list_path: preview_list_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             affected_items: 0,
             freed_bytes: 0,
+            debug_log_path: debug_log_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             warnings,
             audit_events: 0,
         });
@@ -1355,15 +1393,15 @@ fn run_uninstall_output_with_executor(
             &runtime,
             &manifest,
             &rule,
-            dry_run,
-            confirm,
+            options.dry_run,
+            options.confirm,
             clean_executor,
             map_uninstall_runtime_error,
         )?;
     warnings.extend(runtime_warnings);
 
     Ok(UninstallCommandOutput {
-        mode: if dry_run {
+        mode: if options.dry_run {
             "dry_run".to_string()
         } else {
             "apply".to_string()
@@ -1371,11 +1409,18 @@ fn run_uninstall_output_with_executor(
         target: target.to_string(),
         scanned_roots: roots.len(),
         scanned_entries,
+        scan_depth,
         target_count: selected_paths.len(),
         estimated_freed_bytes,
         preview_paths,
+        preview_list_path: preview_list_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         affected_items,
         freed_bytes,
+        debug_log_path: debug_log_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         warnings,
         audit_events,
     })
@@ -4186,6 +4231,7 @@ fn uninstall_text(out: &UninstallCommandOutput) -> String {
     let _ = writeln!(text, "Target: {}", out.target);
     let _ = writeln!(text, "Scanned roots: {}", out.scanned_roots);
     let _ = writeln!(text, "Scanned entries: {}", out.scanned_entries);
+    let _ = writeln!(text, "Scan depth: {}", out.scan_depth);
     let _ = writeln!(text, "Targets: {}", out.target_count);
     let _ = writeln!(
         text,
@@ -4198,8 +4244,14 @@ fn uninstall_text(out: &UninstallCommandOutput) -> String {
             let _ = writeln!(text, "- {path}");
         }
     }
+    if let Some(path) = &out.preview_list_path {
+        let _ = writeln!(text, "Preview list: {path}");
+    }
     let _ = writeln!(text, "Affected items: {}", out.affected_items);
     let _ = writeln!(text, "Freed bytes: {}", format_bytes(out.freed_bytes));
+    if let Some(path) = &out.debug_log_path {
+        let _ = writeln!(text, "Debug log: {path}");
+    }
     if !out.warnings.is_empty() {
         let _ = writeln!(text, "Warnings:");
         for warning in &out.warnings {
@@ -4614,6 +4666,24 @@ fn installer_debug_log_path() -> Option<PathBuf> {
         .map(|dir| dir.join(INSTALLER_DEBUG_LOG_FILE_NAME))
 }
 
+fn uninstall_preview_list_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PREEN_UNINSTALL_PREVIEW_LIST_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    preen_state_dir()
+        .ok()
+        .map(|dir| dir.join(UNINSTALL_PREVIEW_LIST_FILE_NAME))
+}
+
+fn uninstall_debug_log_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PREEN_UNINSTALL_DEBUG_LOG_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    preen_state_dir()
+        .ok()
+        .map(|dir| dir.join(UNINSTALL_DEBUG_LOG_FILE_NAME))
+}
+
 fn load_clean_whitelist_config() -> Result<CleanWhitelistConfig, String> {
     let path = match clean_whitelist_path() {
         Ok(path) => path,
@@ -4932,6 +5002,56 @@ fn write_installer_debug(
     Some(path)
 }
 
+fn write_uninstall_preview_list(dry_run: bool, selected_paths: &[String]) -> Option<PathBuf> {
+    if !dry_run {
+        return None;
+    }
+    let path = uninstall_preview_list_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let mut content = String::new();
+    for value in selected_paths {
+        let _ = writeln!(content, "{value}");
+    }
+    fs::write(&path, content).ok()?;
+    Some(path)
+}
+
+fn write_uninstall_debug(
+    enabled: bool,
+    roots: &[String],
+    target: &str,
+    scan_depth: usize,
+    scanned_entries: usize,
+    target_count: usize,
+) -> Option<PathBuf> {
+    if !enabled {
+        return None;
+    }
+    let path = uninstall_debug_log_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let timestamp = OffsetDateTime::now_utc().format(&Rfc3339).ok()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let _ = writeln!(
+        file,
+        "time={} target={} scan_depth={} scanned_entries={} target_count={} roots={}",
+        timestamp,
+        target,
+        scan_depth,
+        scanned_entries,
+        target_count,
+        roots.join(","),
+    );
+    Some(path)
+}
+
 fn warning_with_default(mut warnings: Vec<String>) -> Vec<String> {
     if !warnings
         .iter()
@@ -5050,21 +5170,29 @@ fn resolve_uninstall_roots() -> Vec<String> {
 
     #[cfg(target_os = "macos")]
     {
-        vec![
-            home.join("Applications").to_string_lossy().to_string(),
-            home.join("Library")
-                .join("Application Support")
-                .to_string_lossy()
-                .to_string(),
-            home.join("Library")
-                .join("Caches")
-                .to_string_lossy()
-                .to_string(),
-            home.join("Library")
-                .join("Preferences")
-                .to_string_lossy()
-                .to_string(),
-        ]
+        let mut roots = vec![
+            PathBuf::from("/Applications"),
+            home.join("Applications"),
+            PathBuf::from("/Library").join("Input Methods"),
+            home.join("Library").join("Input Methods"),
+            home.join("Library").join("Application Support"),
+            home.join("Library").join("Caches"),
+            home.join("Library").join("Preferences"),
+        ];
+        if let Ok(volumes) = fs::read_dir("/Volumes") {
+            for entry in volumes.flatten() {
+                let candidate = entry.path().join("Applications");
+                if candidate.is_dir() {
+                    roots.push(candidate);
+                }
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        roots
+            .into_iter()
+            .filter(|path| seen.insert(path.to_string_lossy().to_string()))
+            .map(|path| path.to_string_lossy().to_string())
+            .collect()
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -8977,7 +9105,12 @@ pub fn uninstall_output_for_test(
     dry_run: bool,
     confirm: bool,
 ) -> Result<serde_json::Value, String> {
-    let output = run_uninstall_output_with_executor(target, dry_run, confirm, &OsActionExecutor)?;
+    let options = UninstallCommandOptions {
+        dry_run,
+        confirm,
+        debug: false,
+    };
+    let output = run_uninstall_output_with_executor(target, options, &OsActionExecutor)?;
     let json = uninstall_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "uninstall output parse failed", e))
@@ -8988,8 +9121,30 @@ pub fn uninstall_text_output_for_test(
     dry_run: bool,
     confirm: bool,
 ) -> Result<String, String> {
-    let output = run_uninstall_output_with_executor(target, dry_run, confirm, &OsActionExecutor)?;
+    let options = UninstallCommandOptions {
+        dry_run,
+        confirm,
+        debug: false,
+    };
+    let output = run_uninstall_output_with_executor(target, options, &OsActionExecutor)?;
     Ok(uninstall_text(&output))
+}
+
+pub fn uninstall_output_with_debug_for_test(
+    target: Option<&str>,
+    dry_run: bool,
+    confirm: bool,
+    debug: bool,
+) -> Result<serde_json::Value, String> {
+    let options = UninstallCommandOptions {
+        dry_run,
+        confirm,
+        debug,
+    };
+    let output = run_uninstall_output_with_executor(target, options, &OsActionExecutor)?;
+    let json = uninstall_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "uninstall output parse failed", e))
 }
 
 pub fn uninstall_paths_json_for_test() -> Result<serde_json::Value, String> {
@@ -9917,6 +10072,8 @@ enum CliCommand {
         confirm: bool,
         #[arg(long, conflicts_with_all = ["target", "dry_run", "confirm"])]
         paths: bool,
+        #[arg(long)]
+        debug: bool,
         #[arg(long)]
         json: bool,
     },
