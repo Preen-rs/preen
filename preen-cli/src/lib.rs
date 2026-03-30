@@ -91,10 +91,14 @@ const DEFAULT_INSTALLER_EXTENSIONS: [&str; 12] = [
 const CLEAN_WHITELIST_FILE_NAME: &str = "clean-whitelist.txt";
 const CLEAN_PREVIEW_LIST_FILE_NAME: &str = "clean-list.txt";
 const CLEAN_DEBUG_LOG_FILE_NAME: &str = "clean-debug.log";
+const PURGE_PATHS_FILE_NAME: &str = "purge-paths.txt";
+const PURGE_PREVIEW_LIST_FILE_NAME: &str = "purge-list.txt";
+const PURGE_DEBUG_LOG_FILE_NAME: &str = "purge-debug.log";
 const DEFAULT_CLEAN_WHITELIST_PATTERNS: [&str; 2] = [
     "~/Library/Application Support/Preen/plugins",
     "~/.config/preen/plugins",
 ];
+const DEFAULT_PURGE_MIN_AGE_DAYS: i64 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliErrorKind {
@@ -260,13 +264,26 @@ struct PurgeCommandOutput {
     mode: String,
     scanned_roots: usize,
     scanned_dirs: usize,
+    min_age_days: i64,
+    skipped_recent: usize,
     target_count: usize,
     estimated_freed_bytes: u64,
     preview_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_list_path: Option<String>,
     affected_items: u64,
     freed_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug_log_path: Option<String>,
     warnings: Vec<String>,
     audit_events: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PurgeCommandOptions {
+    dry_run: bool,
+    confirm: bool,
+    debug: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -544,8 +561,9 @@ fn run_typed_with_verifier_and_clean_executor(
             dry_run,
             confirm,
             paths,
+            debug,
             json,
-        } => run_purge_with_executor(*dry_run, *confirm, *paths, *json, clean_executor)
+        } => run_purge_with_executor(*dry_run, *confirm, *paths, *debug, *json, clean_executor)
             .map_err(CliError::from),
         CliCommand::Installer {
             dry_run,
@@ -949,6 +967,7 @@ fn run_purge_with_executor(
     dry_run: bool,
     confirm: bool,
     paths: bool,
+    debug: bool,
     json: bool,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<(), String> {
@@ -962,7 +981,12 @@ fn run_purge_with_executor(
         return Ok(());
     }
 
-    let output = run_purge_output_with_executor(dry_run, confirm, clean_executor)?;
+    let options = PurgeCommandOptions {
+        dry_run,
+        confirm,
+        debug,
+    };
+    let output = run_purge_output_with_executor(options, clean_executor)?;
     if json {
         println!("{}", purge_json(output.clone())?);
         return Ok(());
@@ -3716,11 +3740,10 @@ fn run_clean_output_with_executor(
 }
 
 fn run_purge_output_with_executor(
-    dry_run: bool,
-    confirm: bool,
+    options: PurgeCommandOptions,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<PurgeCommandOutput, String> {
-    if !dry_run && !confirm {
+    if !options.dry_run && !options.confirm {
         return Err(err_code(
             CliErrorKind::Validation,
             "purge_confirmation_required",
@@ -3737,7 +3760,9 @@ fn run_purge_output_with_executor(
         ));
     }
 
-    let (selection, scanned_dirs, mut warnings) = scan_purge_candidates(&roots, purge_scan_depth());
+    let min_age_days = purge_min_age_days();
+    let (selection, scanned_dirs, skipped_recent, mut warnings) =
+        scan_purge_candidates(&roots, purge_scan_depth(), min_age_days);
     let selected_paths = selection
         .iter()
         .map(|item| item.path.clone())
@@ -3745,22 +3770,39 @@ fn run_purge_output_with_executor(
     let estimated_freed_bytes: u64 = selection.iter().map(|item| item.size).sum();
     enforce_purge_scope(&selected_paths, &roots)?;
     let preview_paths = clean_preview_paths(&selected_paths, purge_preview_limit());
+    let preview_list_path = write_purge_preview_list(options.dry_run, &selected_paths);
+    let debug_log_path = write_purge_debug(
+        options.debug,
+        &roots,
+        scanned_dirs,
+        selected_paths.len(),
+        min_age_days,
+        skipped_recent,
+    );
 
     if selected_paths.is_empty() {
         warnings.push("no purge targets selected".to_string());
         return Ok(PurgeCommandOutput {
-            mode: if dry_run {
+            mode: if options.dry_run {
                 "dry_run".to_string()
             } else {
                 "apply".to_string()
             },
             scanned_roots: roots.len(),
             scanned_dirs,
+            min_age_days,
+            skipped_recent,
             target_count: 0,
             estimated_freed_bytes: 0,
             preview_paths: Vec::new(),
+            preview_list_path: preview_list_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             affected_items: 0,
             freed_bytes: 0,
+            debug_log_path: debug_log_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             warnings,
             audit_events: 0,
         });
@@ -3824,26 +3866,35 @@ fn run_purge_output_with_executor(
             &runtime,
             &manifest,
             &rule,
-            dry_run,
-            confirm,
+            options.dry_run,
+            options.confirm,
             clean_executor,
             map_purge_runtime_error,
         )?;
+    warnings.extend(runtime_warnings);
 
     Ok(PurgeCommandOutput {
-        mode: if dry_run {
+        mode: if options.dry_run {
             "dry_run".to_string()
         } else {
             "apply".to_string()
         },
         scanned_roots: roots.len(),
         scanned_dirs,
+        min_age_days,
+        skipped_recent,
         target_count: selected_paths.len(),
         estimated_freed_bytes,
         preview_paths,
+        preview_list_path: preview_list_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         affected_items,
         freed_bytes,
-        warnings: runtime_warnings,
+        debug_log_path: debug_log_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        warnings,
         audit_events,
     })
 }
@@ -4004,6 +4055,11 @@ fn purge_text(out: &PurgeCommandOutput) -> String {
     let _ = writeln!(text, "Purge ({mode})");
     let _ = writeln!(text, "Scanned roots: {}", out.scanned_roots);
     let _ = writeln!(text, "Scanned directories: {}", out.scanned_dirs);
+    let _ = writeln!(
+        text,
+        "Min age days: {} (recent skipped: {})",
+        out.min_age_days, out.skipped_recent
+    );
     let _ = writeln!(text, "Targets: {}", out.target_count);
     let _ = writeln!(
         text,
@@ -4016,8 +4072,14 @@ fn purge_text(out: &PurgeCommandOutput) -> String {
             let _ = writeln!(text, "- {path}");
         }
     }
+    if let Some(path) = &out.preview_list_path {
+        let _ = writeln!(text, "Preview list: {path}");
+    }
     let _ = writeln!(text, "Affected items: {}", out.affected_items);
     let _ = writeln!(text, "Freed bytes: {}", format_bytes(out.freed_bytes));
+    if let Some(path) = &out.debug_log_path {
+        let _ = writeln!(text, "Debug log: {path}");
+    }
     if !out.warnings.is_empty() {
         let _ = writeln!(text, "Warnings:");
         for warning in &out.warnings {
@@ -4456,6 +4518,33 @@ fn clean_debug_log_path() -> Result<PathBuf, String> {
     Ok(preen_state_dir()?.join(CLEAN_DEBUG_LOG_FILE_NAME))
 }
 
+fn purge_paths_config_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PREEN_PURGE_PATHS_FILE") {
+        return Some(PathBuf::from(path));
+    }
+    preen_state_dir()
+        .ok()
+        .map(|dir| dir.join(PURGE_PATHS_FILE_NAME))
+}
+
+fn purge_preview_list_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PREEN_PURGE_PREVIEW_LIST_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    preen_state_dir()
+        .ok()
+        .map(|dir| dir.join(PURGE_PREVIEW_LIST_FILE_NAME))
+}
+
+fn purge_debug_log_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PREEN_PURGE_DEBUG_LOG_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    preen_state_dir()
+        .ok()
+        .map(|dir| dir.join(PURGE_DEBUG_LOG_FILE_NAME))
+}
+
 fn load_clean_whitelist_config() -> Result<CleanWhitelistConfig, String> {
     let path = match clean_whitelist_path() {
         Ok(path) => path,
@@ -4676,6 +4765,56 @@ fn write_clean_debug(
     Some(path)
 }
 
+fn write_purge_preview_list(dry_run: bool, selected_paths: &[String]) -> Option<PathBuf> {
+    if !dry_run {
+        return None;
+    }
+    let path = purge_preview_list_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let mut content = String::new();
+    for value in selected_paths {
+        let _ = writeln!(content, "{value}");
+    }
+    fs::write(&path, content).ok()?;
+    Some(path)
+}
+
+fn write_purge_debug(
+    enabled: bool,
+    roots: &[String],
+    scanned_dirs: usize,
+    target_count: usize,
+    min_age_days: i64,
+    skipped_recent: usize,
+) -> Option<PathBuf> {
+    if !enabled {
+        return None;
+    }
+    let path = purge_debug_log_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let timestamp = OffsetDateTime::now_utc().format(&Rfc3339).ok()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let _ = writeln!(
+        file,
+        "time={} scanned_dirs={} target_count={} min_age_days={} skipped_recent={} roots={}",
+        timestamp,
+        scanned_dirs,
+        target_count,
+        min_age_days,
+        skipped_recent,
+        roots.join(","),
+    );
+    Some(path)
+}
+
 fn warning_with_default(mut warnings: Vec<String>) -> Vec<String> {
     if !warnings
         .iter()
@@ -4695,6 +4834,21 @@ fn resolve_purge_roots() -> Vec<String> {
             .filter(|item| !item.is_empty())
             .map(ToOwned::to_owned)
             .collect();
+        if !out.is_empty() {
+            return out;
+        }
+    }
+
+    if let Some(path) = purge_paths_config_path()
+        && path.exists()
+        && let Ok(raw) = fs::read_to_string(path)
+    {
+        let out = raw
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(expand_tilde)
+            .collect::<Vec<_>>();
         if !out.is_empty() {
             return out;
         }
@@ -4810,6 +4964,14 @@ fn purge_preview_limit() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_PURGE_PREVIEW_LIMIT)
+}
+
+fn purge_min_age_days() -> i64 {
+    std::env::var("PREEN_PURGE_MIN_AGE_DAYS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(DEFAULT_PURGE_MIN_AGE_DAYS)
 }
 
 fn installer_scan_depth() -> usize {
@@ -5012,30 +5174,43 @@ fn normalize_uninstall_roots(roots: Vec<String>) -> Vec<String> {
 fn scan_purge_candidates(
     roots: &[String],
     max_depth: usize,
-) -> (Vec<CleanSelectedItem>, usize, Vec<String>) {
+    min_age_days: i64,
+) -> (Vec<CleanSelectedItem>, usize, usize, Vec<String>) {
     let mut out = Vec::new();
     let mut warnings = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut scanned_dirs = 0usize;
+    let mut skipped_recent = 0usize;
 
     for root in roots {
         let root_path = PathBuf::from(root);
         if !root_path.exists() {
             continue;
         }
-        discover_purge_targets_under(
-            &root_path,
-            1,
+        let mut state = PurgeScanState {
             max_depth,
-            &mut seen,
-            &mut out,
-            &mut scanned_dirs,
-            &mut warnings,
-        );
+            min_age_days,
+            seen: &mut seen,
+            out: &mut out,
+            scanned_dirs: &mut scanned_dirs,
+            skipped_recent: &mut skipped_recent,
+            warnings: &mut warnings,
+        };
+        discover_purge_targets_under(&root_path, 1, &mut state);
     }
 
     out.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
-    (out, scanned_dirs, warnings)
+    (out, scanned_dirs, skipped_recent, warnings)
+}
+
+struct PurgeScanState<'a> {
+    max_depth: usize,
+    min_age_days: i64,
+    seen: &'a mut std::collections::HashSet<PathBuf>,
+    out: &'a mut Vec<CleanSelectedItem>,
+    scanned_dirs: &'a mut usize,
+    skipped_recent: &'a mut usize,
+    warnings: &'a mut Vec<String>,
 }
 
 fn scan_installer_candidates(
@@ -5266,22 +5441,14 @@ fn normalize_uninstall_name(value: &str) -> String {
         .collect()
 }
 
-fn discover_purge_targets_under(
-    root: &Path,
-    depth: usize,
-    max_depth: usize,
-    seen: &mut std::collections::HashSet<PathBuf>,
-    out: &mut Vec<CleanSelectedItem>,
-    scanned_dirs: &mut usize,
-    warnings: &mut Vec<String>,
-) {
-    if depth > max_depth {
+fn discover_purge_targets_under(root: &Path, depth: usize, state: &mut PurgeScanState<'_>) {
+    if depth > state.max_depth {
         return;
     }
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(e) => {
-            warnings.push(format!(
+            state.warnings.push(format!(
                 "purge scan skipped unreadable directory: {} ({e})",
                 root.display()
             ));
@@ -5297,32 +5464,44 @@ fn discover_purge_targets_under(
         if !file_type.is_dir() {
             continue;
         }
-        *scanned_dirs += 1;
+        *state.scanned_dirs += 1;
         if file_type.is_symlink() {
             continue;
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if DEFAULT_PURGE_ARTIFACT_NAMES.contains(&name.as_ref()) {
+            if state.min_age_days > 0 {
+                let age_days = path_age_days(&path);
+                if age_days < state.min_age_days {
+                    *state.skipped_recent += 1;
+                    continue;
+                }
+            }
             let canonical = fs::canonicalize(&path).unwrap_or(path.clone());
-            if seen.insert(canonical.clone()) {
-                out.push(CleanSelectedItem {
+            if state.seen.insert(canonical.clone()) {
+                state.out.push(CleanSelectedItem {
                     path: canonical.to_string_lossy().to_string(),
                     size: calculate_path_size(&canonical),
                 });
             }
             continue;
         }
-        discover_purge_targets_under(
-            &path,
-            depth + 1,
-            max_depth,
-            seen,
-            out,
-            scanned_dirs,
-            warnings,
-        );
+        discover_purge_targets_under(&path, depth + 1, state);
     }
+}
+
+fn path_age_days(path: &Path) -> i64 {
+    let Ok(metadata) = fs::metadata(path) else {
+        return i64::MAX;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return i64::MAX;
+    };
+    let Ok(elapsed) = std::time::SystemTime::now().duration_since(modified) else {
+        return 0;
+    };
+    (elapsed.as_secs() / 86_400) as i64
 }
 
 fn calculate_path_size(path: &Path) -> u64 {
@@ -8499,14 +8678,40 @@ pub fn clean_text_output_for_test(
 }
 
 pub fn purge_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_json::Value, String> {
-    let output = run_purge_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
+    let options = PurgeCommandOptions {
+        dry_run,
+        confirm,
+        debug: false,
+    };
+    let output = run_purge_output_with_executor(options, &OsActionExecutor)?;
+    let json = purge_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "purge output parse failed", e))
+}
+
+pub fn purge_output_with_debug_for_test(
+    dry_run: bool,
+    confirm: bool,
+    debug: bool,
+) -> Result<serde_json::Value, String> {
+    let options = PurgeCommandOptions {
+        dry_run,
+        confirm,
+        debug,
+    };
+    let output = run_purge_output_with_executor(options, &OsActionExecutor)?;
     let json = purge_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "purge output parse failed", e))
 }
 
 pub fn purge_text_output_for_test(dry_run: bool, confirm: bool) -> Result<String, String> {
-    let output = run_purge_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
+    let options = PurgeCommandOptions {
+        dry_run,
+        confirm,
+        debug: false,
+    };
+    let output = run_purge_output_with_executor(options, &OsActionExecutor)?;
     Ok(purge_text(&output))
 }
 
@@ -9528,6 +9733,8 @@ enum CliCommand {
         confirm: bool,
         #[arg(long, conflicts_with_all = ["dry_run", "confirm"])]
         paths: bool,
+        #[arg(long)]
+        debug: bool,
         #[arg(long)]
         json: bool,
     },

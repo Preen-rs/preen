@@ -32,16 +32,17 @@ use preen_cli::{
     plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
-    purge_paths_json_for_test, purge_paths_text_for_test, purge_text_output_for_test,
-    registry_backup_path_for_test, registry_source_detail_code_for_test,
-    registry_update_json_for_test, remove_output_for_test, remove_text_output_for_test,
-    resolve_registry_for_test, run_typed, run_typed_with_verifier_and_clean_executor_for_test,
-    run_typed_with_verifier_for_test, runtime_error_detail_code_for_prefix_for_test,
-    save_lockfile_at, search_registry_for_test, search_registry_json_for_test,
-    search_registry_with_options_for_test, should_emit_formatted_error, status_output_for_test,
-    status_should_emit_json_for_test, status_text_output_for_test, test_failure_row_for_test,
-    touchid_output_for_test, touchid_text_output_for_test, trust_policy_from_str,
-    uninstall_output_for_test, uninstall_paths_json_for_test, uninstall_paths_text_for_test,
+    purge_output_with_debug_for_test, purge_paths_json_for_test, purge_paths_text_for_test,
+    purge_text_output_for_test, registry_backup_path_for_test,
+    registry_source_detail_code_for_test, registry_update_json_for_test, remove_output_for_test,
+    remove_text_output_for_test, resolve_registry_for_test, run_typed,
+    run_typed_with_verifier_and_clean_executor_for_test, run_typed_with_verifier_for_test,
+    runtime_error_detail_code_for_prefix_for_test, save_lockfile_at, search_registry_for_test,
+    search_registry_json_for_test, search_registry_with_options_for_test,
+    should_emit_formatted_error, status_output_for_test, status_should_emit_json_for_test,
+    status_text_output_for_test, test_failure_row_for_test, touchid_output_for_test,
+    touchid_text_output_for_test, trust_policy_from_str, uninstall_output_for_test,
+    uninstall_paths_json_for_test, uninstall_paths_text_for_test,
     uninstall_runtime_error_detail_code_for_test, uninstall_text_output_for_test,
     update_output_for_test, update_text_output_for_test, validate_registry_trust_inputs_for_test,
     verify_lockfile_hashes, write_registry_index_with_backup_for_test,
@@ -238,9 +239,11 @@ fn with_purge_path_override<T>(f: impl FnOnce() -> T) -> T {
     fs::create_dir_all(&purge_target).unwrap();
     fs::write(purge_target.join("placeholder.js"), b"const x = 1;").unwrap();
     let old = std::env::var_os("PREEN_PURGE_PATHS");
+    let old_min_age = std::env::var_os("PREEN_PURGE_MIN_AGE_DAYS");
     // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::set_var("PREEN_PURGE_PATHS", workspace.as_os_str());
+        std::env::set_var("PREEN_PURGE_MIN_AGE_DAYS", "0");
     }
     let out = f();
     // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
@@ -248,6 +251,10 @@ fn with_purge_path_override<T>(f: impl FnOnce() -> T) -> T {
         match old {
             Some(v) => std::env::set_var("PREEN_PURGE_PATHS", v),
             None => std::env::remove_var("PREEN_PURGE_PATHS"),
+        }
+        match old_min_age {
+            Some(v) => std::env::set_var("PREEN_PURGE_MIN_AGE_DAYS", v),
+            None => std::env::remove_var("PREEN_PURGE_MIN_AGE_DAYS"),
         }
     }
     out
@@ -2664,6 +2671,7 @@ fn purge_dry_run_json_happy_path() {
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::set_var("PREEN_PURGE_PATHS", temp.path().as_os_str());
+        std::env::set_var("PREEN_PURGE_MIN_AGE_DAYS", "0");
     }
 
     let output = purge_output_for_test(true, false).unwrap();
@@ -2674,6 +2682,66 @@ fn purge_dry_run_json_happy_path() {
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::remove_var("PREEN_PURGE_PATHS");
+        std::env::remove_var("PREEN_PURGE_MIN_AGE_DAYS");
+    }
+}
+
+#[test]
+fn purge_dry_run_skips_recent_artifacts_by_default_age_policy() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("app");
+    let artifact = project.join("node_modules");
+    fs::create_dir_all(&artifact).unwrap();
+    fs::write(artifact.join("a.js"), b"1234").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_PURGE_PATHS", temp.path().as_os_str());
+        std::env::remove_var("PREEN_PURGE_MIN_AGE_DAYS");
+    }
+
+    let output = purge_output_for_test(true, false).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.purge"));
+    assert_eq!(output["data"]["target_count"].as_u64(), Some(0));
+    assert!(output["data"]["skipped_recent"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(output["data"]["min_age_days"].as_i64(), Some(7));
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_PURGE_PATHS");
+        std::env::remove_var("PREEN_PURGE_MIN_AGE_DAYS");
+    }
+}
+
+#[test]
+fn purge_debug_mode_writes_debug_log() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("app");
+    let artifact = project.join("target");
+    let debug_log = temp.path().join("purge-debug.log");
+    fs::create_dir_all(&artifact).unwrap();
+    fs::write(artifact.join("x.bin"), b"1234").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_PURGE_PATHS", temp.path().as_os_str());
+        std::env::set_var("PREEN_PURGE_MIN_AGE_DAYS", "0");
+        std::env::set_var("PREEN_PURGE_DEBUG_LOG_PATH", debug_log.as_os_str());
+    }
+
+    let output = purge_output_with_debug_for_test(true, false, true).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.purge"));
+    assert_eq!(
+        output["data"]["debug_log_path"].as_str(),
+        Some(debug_log.to_string_lossy().as_ref())
+    );
+    assert!(debug_log.exists());
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_PURGE_PATHS");
+        std::env::remove_var("PREEN_PURGE_MIN_AGE_DAYS");
+        std::env::remove_var("PREEN_PURGE_DEBUG_LOG_PATH");
     }
 }
 
@@ -2688,6 +2756,7 @@ fn purge_apply_confirm_deletes_targets() {
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::set_var("PREEN_PURGE_PATHS", temp.path().as_os_str());
+        std::env::set_var("PREEN_PURGE_MIN_AGE_DAYS", "0");
     }
 
     let output = purge_output_for_test(false, true).unwrap();
@@ -2699,6 +2768,7 @@ fn purge_apply_confirm_deletes_targets() {
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::remove_var("PREEN_PURGE_PATHS");
+        std::env::remove_var("PREEN_PURGE_MIN_AGE_DAYS");
     }
 }
 
@@ -3141,6 +3211,7 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "analyze", "/tmp", "--max-depth", "3", "--json"],
         vec!["preen", "status", "--json"],
         vec!["preen", "purge", "--dry-run", "--json"],
+        vec!["preen", "purge", "--dry-run", "--debug", "--json"],
         vec!["preen", "purge", "--confirm", "--json"],
         vec!["preen", "purge", "--paths", "--json"],
         vec!["preen", "installer", "--dry-run", "--json"],
@@ -3165,6 +3236,7 @@ fn top_level_system_commands_short_flags_parse() {
         vec!["preen", "uninstall", "DemoApp", "-n"],
         vec!["preen", "optimize", "-n"],
         vec!["preen", "purge", "-n"],
+        vec!["preen", "purge", "--debug"],
         vec!["preen", "installer", "-n"],
         vec!["preen", "touchid", "-n"],
         vec!["preen", "completion", "-n"],
@@ -3356,6 +3428,7 @@ fn system_option_matrix_accepts_valid_flag_combinations() {
         vec!["preen", "optimize", "--dry-run"],
         vec!["preen", "optimize", "--confirm"],
         vec!["preen", "purge", "--dry-run"],
+        vec!["preen", "purge", "--dry-run", "--debug"],
         vec!["preen", "purge", "--confirm"],
         vec!["preen", "purge", "--paths"],
         vec!["preen", "installer", "--dry-run"],
