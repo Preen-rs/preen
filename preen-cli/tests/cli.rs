@@ -9,15 +9,16 @@ use async_trait::async_trait;
 use clap::Parser;
 use preen_cli::{
     Cli, CliError, CliErrorKind, analyze_output_for_test, analyze_output_with_depth_for_test,
-    analyze_text_output_for_test, check_output_for_test, check_registry_freshness_for_test,
-    check_text_output_for_test, clean_output_for_test, clean_runtime_error_detail_code_for_test,
-    clean_selection_summary_for_test, clean_text_output_for_test, clean_whitelist_output_for_test,
-    cli_label_for_test, clone_rule_pack_for_test, completion_output_for_test,
-    completion_text_output_for_test, default_signature_source_for_test,
-    enforce_clean_scope_for_test, enforce_installer_scope_for_test,
-    enforce_uninstall_scope_for_test, error_json_for_test, format_bytes_for_test,
-    hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
-    installer_output_for_test, installer_output_with_debug_for_test, installer_paths_json_for_test,
+    analyze_text_output_for_test, check_output_for_test, check_output_with_debug_for_test,
+    check_registry_freshness_for_test, check_text_output_for_test, clean_output_for_test,
+    clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test,
+    clean_text_output_for_test, clean_whitelist_output_for_test, cli_label_for_test,
+    clone_rule_pack_for_test, completion_output_for_test, completion_text_output_for_test,
+    default_signature_source_for_test, enforce_clean_scope_for_test,
+    enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
+    format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
+    install_plugin_in_dir_for_test, installer_output_for_test,
+    installer_output_with_debug_for_test, installer_paths_json_for_test,
     installer_paths_text_for_test, installer_runtime_error_detail_code_for_test,
     installer_text_output_for_test, is_git_filter_unsupported_error_for_test,
     is_system_detail_code_for_test, list_plugins_with_options_for_test, load_lockfile_at,
@@ -2118,6 +2119,32 @@ fn check_json_happy_path_without_fix() {
 }
 
 #[test]
+fn check_debug_mode_writes_debug_log() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let debug_log = temp.path().join("check-debug.log");
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_CHECK_DEBUG_LOG_PATH", debug_log.as_os_str());
+    }
+
+    let output = check_output_with_debug_for_test(false, true).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.check"));
+    assert_eq!(
+        output["data"]["debug_log_path"].as_str(),
+        Some(debug_log.to_string_lossy().as_ref())
+    );
+    let log = fs::read_to_string(debug_log).unwrap();
+    assert!(log.contains("mode=check"));
+    assert!(log.contains("overall_passed="));
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_CHECK_DEBUG_LOG_PATH");
+    }
+}
+
+#[test]
 fn check_fix_json_creates_state_and_plugin_dirs() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
@@ -3366,6 +3393,7 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "installer", "--confirm", "--json"],
         vec!["preen", "installer", "--paths", "--json"],
         vec!["preen", "check", "--fix", "--json"],
+        vec!["preen", "check", "--debug", "--json"],
         vec!["preen", "touchid", "enable", "--dry-run", "--json"],
         vec!["preen", "completion", "zsh", "--dry-run", "--json"],
         vec!["preen", "update", "--force", "--nightly", "--json"],
@@ -3390,6 +3418,7 @@ fn top_level_system_commands_short_flags_parse() {
         vec!["preen", "purge", "--debug"],
         vec!["preen", "installer", "-n"],
         vec!["preen", "installer", "--debug"],
+        vec!["preen", "check", "--debug"],
         vec!["preen", "touchid", "-n"],
         vec!["preen", "completion", "-n"],
         vec!["preen", "update", "-f"],
@@ -3609,6 +3638,7 @@ fn system_option_matrix_accepts_valid_flag_combinations() {
         vec!["preen", "analyze", "/tmp", "--max-depth", "2"],
         vec!["preen", "status"],
         vec!["preen", "check", "--fix"],
+        vec!["preen", "check", "--debug"],
         vec!["preen", "touchid", "status", "--dry-run"],
         vec!["preen", "completion", "zsh", "--dry-run"],
         vec!["preen", "update", "--force", "--nightly"],

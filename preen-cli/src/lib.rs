@@ -101,6 +101,7 @@ const UNINSTALL_PREVIEW_LIST_FILE_NAME: &str = "uninstall-list.txt";
 const UNINSTALL_DEBUG_LOG_FILE_NAME: &str = "uninstall-debug.log";
 const OPTIMIZE_WHITELIST_FILE_NAME: &str = "optimize-whitelist.txt";
 const OPTIMIZE_DEBUG_LOG_FILE_NAME: &str = "optimize-debug.log";
+const CHECK_DEBUG_LOG_FILE_NAME: &str = "check-debug.log";
 const DEFAULT_CLEAN_WHITELIST_PATTERNS: [&str; 2] = [
     "~/Library/Application Support/Preen/plugins",
     "~/.config/preen/plugins",
@@ -418,6 +419,8 @@ struct SystemCheckOutput {
     checks: Vec<SystemCheckRowOutput>,
     fixes_applied: u64,
     suggested_actions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug_log_path: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -668,7 +671,9 @@ fn run_typed_with_verifier_and_clean_executor(
             json,
         } => run_analyze(path.clone(), *max_depth, *json).map_err(CliError::from),
         CliCommand::Status { json } => run_status(*json).map_err(CliError::from),
-        CliCommand::Check { fix, json } => run_check(*fix, *json).map_err(CliError::from),
+        CliCommand::Check { fix, debug, json } => {
+            run_check(*fix, *debug, *json).map_err(CliError::from)
+        }
         CliCommand::Touchid {
             action,
             dry_run,
@@ -1649,7 +1654,7 @@ fn run_optimize_output_with_executor(
     {
         (false, None, Vec::new())
     } else {
-        let post_check = run_check_output(false);
+        let post_check = run_check_output(false, false);
         let suggested_actions = post_check
             .suggested_actions
             .into_iter()
@@ -1691,8 +1696,8 @@ fn run_optimize_output_with_executor(
     })
 }
 
-fn run_check(fix: bool, json: bool) -> Result<(), String> {
-    let output = run_check_output(fix);
+fn run_check(fix: bool, debug: bool, json: bool) -> Result<(), String> {
+    let output = run_check_output(fix, debug);
     if json {
         println!("{}", check_json(output.clone())?);
         return Ok(());
@@ -1701,7 +1706,7 @@ fn run_check(fix: bool, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn run_check_output(fix: bool) -> SystemCheckOutput {
+fn run_check_output(fix: bool, debug: bool) -> SystemCheckOutput {
     let mode = if fix { "check_and_fix" } else { "check" }.to_string();
     let mut checks = Vec::new();
     let mut warnings = Vec::new();
@@ -1895,6 +1900,14 @@ fn run_check_output(fix: bool) -> SystemCheckOutput {
     if overall_passed {
         push_unique_action(&mut suggested_actions, "preen optimize --dry-run");
     }
+    let debug_log_path = write_check_debug(
+        debug,
+        &mode,
+        checks.len(),
+        checks.iter().filter(|row| row.passed).count(),
+        overall_passed,
+        fixes_applied,
+    );
 
     SystemCheckOutput {
         mode,
@@ -1902,6 +1915,9 @@ fn run_check_output(fix: bool) -> SystemCheckOutput {
         checks,
         fixes_applied,
         suggested_actions,
+        debug_log_path: debug_log_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         warnings,
     }
 }
@@ -4471,6 +4487,9 @@ fn check_text(out: &SystemCheckOutput) -> String {
             let _ = writeln!(text, "suggested_action: {action}");
         }
     }
+    if let Some(path) = &out.debug_log_path {
+        let _ = writeln!(text, "debug_log: {path}");
+    }
     if !out.warnings.is_empty() {
         let _ = writeln!(text, "warnings: count={}", out.warnings.len());
         for warning in &out.warnings {
@@ -4839,6 +4858,15 @@ fn optimize_debug_log_path() -> Option<PathBuf> {
     preen_state_dir()
         .ok()
         .map(|dir| dir.join(OPTIMIZE_DEBUG_LOG_FILE_NAME))
+}
+
+fn check_debug_log_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PREEN_CHECK_DEBUG_LOG_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    preen_state_dir()
+        .ok()
+        .map(|dir| dir.join(CHECK_DEBUG_LOG_FILE_NAME))
 }
 
 fn load_clean_whitelist_config() -> Result<CleanWhitelistConfig, String> {
@@ -5303,6 +5331,35 @@ fn write_optimize_debug(
         file,
         "time={} mode={} selected_tasks={} executed_tasks={} affected_items={}",
         timestamp, mode, selected_tasks, executed_tasks, affected_items
+    );
+    Some(path)
+}
+
+fn write_check_debug(
+    enabled: bool,
+    mode: &str,
+    check_count: usize,
+    passed_count: usize,
+    overall_passed: bool,
+    fixes_applied: u64,
+) -> Option<PathBuf> {
+    if !enabled {
+        return None;
+    }
+    let path = check_debug_log_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let timestamp = OffsetDateTime::now_utc().format(&Rfc3339).ok()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let _ = writeln!(
+        file,
+        "time={} mode={} checks={} passed={} overall_passed={} fixes_applied={}",
+        timestamp, mode, check_count, passed_count, overall_passed, fixes_applied
     );
     Some(path)
 }
@@ -9487,15 +9544,25 @@ pub fn optimize_whitelist_output_for_test() -> Result<serde_json::Value, String>
 }
 
 pub fn check_output_for_test(fix: bool) -> Result<serde_json::Value, String> {
-    let output = run_check_output(fix);
+    let output = run_check_output(fix, false);
     let json = check_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "check output parse failed", e))
 }
 
 pub fn check_text_output_for_test(fix: bool) -> String {
-    let output = run_check_output(fix);
+    let output = run_check_output(fix, false);
     check_text(&output)
+}
+
+pub fn check_output_with_debug_for_test(
+    fix: bool,
+    debug: bool,
+) -> Result<serde_json::Value, String> {
+    let output = run_check_output(fix, debug);
+    let json = check_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "check output parse failed", e))
 }
 
 pub fn analyze_output_for_test(path: Option<&Path>) -> Result<serde_json::Value, String> {
@@ -10426,6 +10493,8 @@ enum CliCommand {
     Check {
         #[arg(long)]
         fix: bool,
+        #[arg(long)]
+        debug: bool,
         #[arg(long)]
         json: bool,
     },
