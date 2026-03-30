@@ -204,7 +204,7 @@ async fn os_executor_unsupported_action_emits_unsupported_action_detail_code() {
     let rule = sample_rule(
         rule_id,
         ActionSpec {
-            action_type: ActionType::AppUninstall,
+            action_type: ActionType::Other("custom_unsupported".to_string()),
             paths: Vec::new(),
             command: Vec::new(),
             mode: None,

@@ -140,12 +140,199 @@ async fn apply_deletepaths_removes_target() {
 
 #[tokio::test]
 async fn unsupported_action_returns_error() {
-    let plan = sample_plan(ActionType::AppUninstall, ExecutionMode::DryRun, vec![]);
+    let plan = sample_plan(
+        ActionType::Other("custom_action".to_string()),
+        ExecutionMode::DryRun,
+        vec![],
+    );
     let err = OsActionExecutor.execute(&plan).await.unwrap_err();
     assert!(matches!(
         err,
         ActionExecutionError::UnsupportedAction { .. }
     ));
+}
+
+#[tokio::test]
+async fn app_uninstall_apply_deletes_target_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("Demo.app");
+    fs::create_dir_all(&app).unwrap();
+    fs::write(app.join("Info.plist"), b"demo").unwrap();
+    let plan = sample_plan(
+        ActionType::AppUninstall,
+        ExecutionMode::Apply,
+        vec![app.to_string_lossy().to_string()],
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert!(out.freed_bytes > 0);
+    assert!(out.warnings.is_empty());
+    assert!(!app.exists());
+}
+
+#[tokio::test]
+async fn app_uninstall_requires_paths_or_command() {
+    let plan = sample_plan(ActionType::AppUninstall, ExecutionMode::DryRun, vec![]);
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::Failed { .. }));
+    assert!(err.to_string().contains("requires paths or command"));
+}
+
+#[tokio::test]
+async fn remove_orphans_apply_deletes_target_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let orphan = dir.path().join("orphan.cache");
+    fs::write(&orphan, b"x").unwrap();
+    let plan = sample_plan(
+        ActionType::RemoveOrphans,
+        ExecutionMode::Apply,
+        vec![orphan.to_string_lossy().to_string()],
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert!(out.freed_bytes > 0);
+    assert!(out.warnings.is_empty());
+    assert!(!orphan.exists());
+}
+
+#[tokio::test]
+async fn optimize_system_runs_allowlisted_command() {
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "echo".to_string());
+    let plan = sample_plan_with(
+        ActionType::OptimizeSystem,
+        ExecutionMode::Apply,
+        vec![],
+        vec!["/bin/echo".to_string(), "ok".to_string()],
+        params,
+        Some(5),
+    );
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert_eq!(out.freed_bytes, 0);
+}
+
+#[tokio::test]
+async fn optimize_system_requires_command() {
+    let plan = sample_plan(ActionType::OptimizeSystem, ExecutionMode::Apply, vec![]);
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::Failed { .. }));
+    assert!(err.to_string().contains("requires command"));
+}
+
+#[tokio::test]
+async fn find_installers_dry_run_matches_known_extensions() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("app.pkg"), b"x").unwrap();
+    fs::write(dir.path().join("archive.zip"), b"x").unwrap();
+    fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+    let plan = sample_plan(
+        ActionType::FindInstallers,
+        ExecutionMode::DryRun,
+        vec![dir.path().to_string_lossy().to_string()],
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert!(out.freed_bytes > 0);
+    assert!(out.warnings.is_empty());
+    assert!(dir.path().join("app.pkg").exists());
+    assert!(dir.path().join("archive.zip").exists());
+    assert!(dir.path().join("notes.txt").exists());
+}
+
+#[tokio::test]
+async fn find_installers_apply_deletes_only_matching_extensions() {
+    let dir = tempfile::tempdir().unwrap();
+    let dmg = dir.path().join("setup.dmg");
+    let txt = dir.path().join("readme.txt");
+    fs::write(&dmg, b"x").unwrap();
+    fs::write(&txt, b"x").unwrap();
+    let plan = sample_plan(
+        ActionType::FindInstallers,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert!(out.freed_bytes > 0);
+    assert!(!dmg.exists());
+    assert!(txt.exists());
+}
+
+#[tokio::test]
+async fn project_cleanup_dry_run_matches_common_artifact_dirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    fs::create_dir_all(project.join("node_modules")).unwrap();
+    fs::create_dir_all(project.join("target")).unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("node_modules").join("pkg.json"), b"x").unwrap();
+    fs::write(project.join("target").join("bin"), b"x").unwrap();
+    let plan = sample_plan(
+        ActionType::ProjectCleanup,
+        ExecutionMode::DryRun,
+        vec![project.to_string_lossy().to_string()],
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert!(out.freed_bytes > 0);
+    assert!(out.warnings.is_empty());
+    assert!(project.join("node_modules").exists());
+    assert!(project.join("target").exists());
+    assert!(project.join("src").exists());
+}
+
+#[tokio::test]
+async fn project_cleanup_apply_deletes_only_artifact_dirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    fs::create_dir_all(project.join("node_modules")).unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("node_modules").join("pkg.json"), b"x").unwrap();
+    fs::write(project.join("src").join("main.rs"), b"x").unwrap();
+    let plan = sample_plan(
+        ActionType::ProjectCleanup,
+        ExecutionMode::Apply,
+        vec![project.to_string_lossy().to_string()],
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert!(out.freed_bytes > 0);
+    assert!(!project.join("node_modules").exists());
+    assert!(project.join("src").exists());
+}
+
+#[tokio::test]
+async fn disk_usage_snapshot_reports_file_count_and_size() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.bin"), vec![1_u8; 8]).unwrap();
+    fs::create_dir_all(dir.path().join("nested")).unwrap();
+    fs::write(dir.path().join("nested").join("b.bin"), vec![1_u8; 4]).unwrap();
+    let plan = sample_plan(
+        ActionType::DiskUsageSnapshot,
+        ExecutionMode::DryRun,
+        vec![dir.path().to_string_lossy().to_string()],
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert!(out.freed_bytes >= 12);
+    assert!(out.warnings.is_empty());
+}
+
+#[tokio::test]
+async fn system_status_is_noop_success() {
+    let plan = sample_plan(ActionType::SystemStatus, ExecutionMode::DryRun, vec![]);
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 0);
+    assert_eq!(out.freed_bytes, 0);
+    assert!(out.warnings.is_empty());
 }
 
 #[tokio::test]

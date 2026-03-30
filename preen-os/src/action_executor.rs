@@ -4,6 +4,7 @@ use preen_core::action_runtime::{
 };
 use preen_core::plugin::ActionType;
 use regex::Regex;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -15,6 +16,23 @@ use walkdir::WalkDir;
 pub struct OsActionExecutor;
 
 impl OsActionExecutor {
+    const DEFAULT_PROJECT_ARTIFACT_NAMES: [&'static str; 10] = [
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        "out",
+        ".next",
+        ".nuxt",
+        "venv",
+        ".venv",
+        "__pycache__",
+    ];
+
+    const DEFAULT_INSTALLER_EXTENSIONS: [&'static str; 12] = [
+        "dmg", "pkg", "zip", "tar", "tgz", "gz", "bz2", "xz", "deb", "rpm", "appimage", "iso",
+    ];
+
     fn expand_path(path: &str) -> PathBuf {
         PathBuf::from(shellexpand::tilde(path).to_string())
     }
@@ -92,6 +110,75 @@ impl OsActionExecutor {
             .max_items
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(usize::MAX)
+    }
+
+    fn parse_csv_set(plan: &ExecutionPlan, key: &str) -> HashSet<String> {
+        let mut out = HashSet::new();
+        if let Some(raw) = plan.request.action.params.get(key) {
+            out.extend(
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(|item| item.to_ascii_lowercase()),
+            );
+        }
+        out
+    }
+
+    fn project_artifact_names(plan: &ExecutionPlan) -> HashSet<String> {
+        let mut names = Self::parse_csv_set(plan, "artifact_names");
+        if names.is_empty() {
+            names.extend(
+                Self::DEFAULT_PROJECT_ARTIFACT_NAMES
+                    .iter()
+                    .map(|item| item.to_string()),
+            );
+        }
+        names
+    }
+
+    fn installer_extensions(plan: &ExecutionPlan) -> HashSet<String> {
+        let mut exts = Self::parse_csv_set(plan, "extensions");
+        if exts.is_empty() {
+            exts.extend(
+                Self::DEFAULT_INSTALLER_EXTENSIONS
+                    .iter()
+                    .map(|item| item.to_string()),
+            );
+        }
+        exts
+    }
+
+    fn basename_lower(path: &Path) -> Option<String> {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|value| value.to_ascii_lowercase())
+    }
+
+    fn extension_lower(path: &Path) -> Option<String> {
+        path.extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+    }
+
+    fn count_files_and_size(path: &Path) -> (u64, u64) {
+        if path.is_file() {
+            return (1, fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+        }
+        if !path.is_dir() {
+            return (0, 0);
+        }
+        let mut files: u64 = 0;
+        let mut size: u64 = 0;
+        for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
+            if let Ok(meta) = entry.metadata()
+                && meta.is_file()
+            {
+                files += 1;
+                size = size.saturating_add(meta.len());
+            }
+        }
+        (files, size)
     }
 
     fn parse_required_param<'a>(
@@ -397,6 +484,253 @@ impl OsActionExecutor {
             warnings,
         })
     }
+
+    fn collect_project_cleanup_targets(
+        root: &Path,
+        remaining: usize,
+        artifact_names: &HashSet<String>,
+    ) -> Result<(Vec<PathBuf>, bool), ActionExecutionError> {
+        if remaining == 0 {
+            return Ok((Vec::new(), true));
+        }
+        if !root.exists() {
+            return Ok((Vec::new(), false));
+        }
+        if !root.is_dir() {
+            return Err(ActionExecutionError::Failed {
+                message: format!(
+                    "project_cleanup target is not directory: {}",
+                    root.display()
+                ),
+            });
+        }
+
+        let mut selected = Vec::new();
+        let mut truncated = false;
+        let walker = WalkDir::new(root).sort_by_file_name();
+        for entry in walker.into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_dir() {
+                continue;
+            }
+            let candidate = entry.path();
+            if let Some(name) = Self::basename_lower(candidate)
+                && artifact_names.contains(&name)
+            {
+                selected.push(candidate.to_path_buf());
+                if selected.len() >= remaining {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        Ok((selected, truncated))
+    }
+
+    fn collect_installer_targets(
+        root: &Path,
+        remaining: usize,
+        extensions: &HashSet<String>,
+    ) -> Result<(Vec<PathBuf>, bool), ActionExecutionError> {
+        if remaining == 0 {
+            return Ok((Vec::new(), true));
+        }
+        if !root.exists() {
+            return Ok((Vec::new(), false));
+        }
+        if root.is_file() {
+            let matched = Self::extension_lower(root)
+                .map(|ext| extensions.contains(&ext))
+                .unwrap_or(false);
+            return Ok((
+                if matched {
+                    vec![root.to_path_buf()]
+                } else {
+                    Vec::new()
+                },
+                false,
+            ));
+        }
+        if !root.is_dir() {
+            return Err(ActionExecutionError::Failed {
+                message: format!(
+                    "find_installers target is not directory: {}",
+                    root.display()
+                ),
+            });
+        }
+
+        let mut selected = Vec::new();
+        let mut truncated = false;
+        let walker = WalkDir::new(root).sort_by_file_name();
+        for entry in walker.into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let candidate = entry.path();
+            if let Some(ext) = Self::extension_lower(candidate)
+                && extensions.contains(&ext)
+            {
+                selected.push(candidate.to_path_buf());
+                if selected.len() >= remaining {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        Ok((selected, truncated))
+    }
+
+    fn execute_delete_like_paths(
+        plan: &ExecutionPlan,
+        use_trash: bool,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        let mut affected_items: u64 = 0;
+        let mut freed_bytes: u64 = 0;
+        let mut warnings: Vec<String> = Vec::new();
+
+        for raw in &plan.request.action.paths {
+            let path = Self::expand_path(raw);
+            if !path.exists() {
+                warnings.push(format!("path not found: {}", path.display()));
+                continue;
+            }
+
+            affected_items = affected_items.saturating_add(1);
+            freed_bytes = freed_bytes.saturating_add(Self::calculate_size(&path));
+
+            if plan.request.mode == ExecutionMode::DryRun {
+                continue;
+            }
+
+            if use_trash {
+                Self::trash_path(&path)?;
+            } else {
+                Self::delete_path(&path)?;
+            }
+        }
+
+        Ok(ActionExecutionResult {
+            affected_items,
+            freed_bytes,
+            warnings,
+        })
+    }
+
+    async fn execute_project_cleanup(
+        plan: &ExecutionPlan,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        let max_items = Self::parse_max_items(plan);
+        let artifact_names = Self::project_artifact_names(plan);
+        let mut selected = Vec::new();
+        let mut warnings = Vec::new();
+
+        for raw in &plan.request.action.paths {
+            let root = Self::expand_path(raw);
+            if !root.exists() {
+                warnings.push(format!("path not found: {}", root.display()));
+                continue;
+            }
+            let remaining = max_items.saturating_sub(selected.len());
+            let (targets, truncated) =
+                Self::collect_project_cleanup_targets(&root, remaining, &artifact_names)?;
+            selected.extend(targets);
+            if truncated {
+                warnings.push(format!(
+                    "project cleanup result truncated at max_items={max_items} for {}",
+                    root.display()
+                ));
+                break;
+            }
+        }
+
+        let freed_bytes: u64 = selected.iter().map(|path| Self::calculate_size(path)).sum();
+        if plan.request.mode == ExecutionMode::Apply {
+            for path in &selected {
+                Self::delete_path(path)?;
+            }
+        }
+
+        Ok(ActionExecutionResult {
+            affected_items: selected.len() as u64,
+            freed_bytes,
+            warnings,
+        })
+    }
+
+    async fn execute_find_installers(
+        plan: &ExecutionPlan,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        let max_items = Self::parse_max_items(plan);
+        let extensions = Self::installer_extensions(plan);
+        let mut selected = Vec::new();
+        let mut warnings = Vec::new();
+
+        for raw in &plan.request.action.paths {
+            let root = Self::expand_path(raw);
+            if !root.exists() {
+                warnings.push(format!("path not found: {}", root.display()));
+                continue;
+            }
+            let remaining = max_items.saturating_sub(selected.len());
+            let (targets, truncated) =
+                Self::collect_installer_targets(&root, remaining, &extensions)?;
+            selected.extend(targets);
+            if truncated {
+                warnings.push(format!(
+                    "installer scan result truncated at max_items={max_items} for {}",
+                    root.display()
+                ));
+                break;
+            }
+        }
+
+        let freed_bytes: u64 = selected.iter().map(|path| Self::calculate_size(path)).sum();
+        if plan.request.mode == ExecutionMode::Apply {
+            for path in &selected {
+                Self::delete_path(path)?;
+            }
+        }
+
+        Ok(ActionExecutionResult {
+            affected_items: selected.len() as u64,
+            freed_bytes,
+            warnings,
+        })
+    }
+
+    async fn execute_disk_usage_snapshot(
+        plan: &ExecutionPlan,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        let mut affected_items: u64 = 0;
+        let mut freed_bytes: u64 = 0;
+        let mut warnings: Vec<String> = Vec::new();
+        let max_items = Self::parse_max_items(plan);
+
+        for raw in &plan.request.action.paths {
+            let path = Self::expand_path(raw);
+            if !path.exists() {
+                warnings.push(format!("path not found: {}", path.display()));
+                continue;
+            }
+            let (files, size) = Self::count_files_and_size(&path);
+            affected_items = affected_items.saturating_add(files);
+            freed_bytes = freed_bytes.saturating_add(size);
+            if (affected_items as usize) >= max_items {
+                warnings.push(format!(
+                    "disk usage snapshot truncated at max_items={max_items} for {}",
+                    path.display()
+                ));
+                affected_items = max_items as u64;
+                break;
+            }
+        }
+
+        Ok(ActionExecutionResult {
+            affected_items,
+            freed_bytes,
+            warnings,
+        })
+    }
 }
 
 #[async_trait]
@@ -411,6 +745,13 @@ impl ActionExecutorPort for OsActionExecutor {
             ActionType::TrashPaths
                 | ActionType::DeletePaths
                 | ActionType::PruneEmptyDirs
+                | ActionType::RemoveOrphans
+                | ActionType::AppUninstall
+                | ActionType::DiskUsageSnapshot
+                | ActionType::SystemStatus
+                | ActionType::ProjectCleanup
+                | ActionType::FindInstallers
+                | ActionType::OptimizeSystem
                 | ActionType::RunCommand
                 | ActionType::ScanPaths
                 | ActionType::MatchRegex
@@ -423,6 +764,57 @@ impl ActionExecutorPort for OsActionExecutor {
 
         if matches!(action_type, ActionType::RunCommand) {
             return Self::execute_run_command(plan).await;
+        }
+
+        if matches!(action_type, ActionType::SystemStatus) {
+            return Ok(ActionExecutionResult {
+                affected_items: 0,
+                freed_bytes: 0,
+                warnings: Vec::new(),
+            });
+        }
+
+        if matches!(action_type, ActionType::OptimizeSystem) {
+            if plan.request.action.command.is_empty() {
+                return Err(ActionExecutionError::Failed {
+                    message: "optimize_system requires command".to_string(),
+                });
+            }
+            return Self::execute_run_command(plan).await;
+        }
+
+        if matches!(action_type, ActionType::ProjectCleanup) {
+            return Self::execute_project_cleanup(plan).await;
+        }
+
+        if matches!(action_type, ActionType::FindInstallers) {
+            return Self::execute_find_installers(plan).await;
+        }
+
+        if matches!(action_type, ActionType::DiskUsageSnapshot) {
+            return Self::execute_disk_usage_snapshot(plan).await;
+        }
+
+        if matches!(
+            action_type,
+            ActionType::RemoveOrphans | ActionType::AppUninstall
+        ) {
+            if !plan.request.action.paths.is_empty() {
+                return Self::execute_delete_like_paths(plan, false);
+            }
+            if !plan.request.action.command.is_empty() {
+                return Self::execute_run_command(plan).await;
+            }
+            return Err(ActionExecutionError::Failed {
+                message: format!(
+                    "{} requires paths or command",
+                    match action_type {
+                        ActionType::RemoveOrphans => "remove_orphans",
+                        ActionType::AppUninstall => "app_uninstall",
+                        _ => "action",
+                    }
+                ),
+            });
         }
 
         if matches!(action_type, ActionType::ScanPaths) {
@@ -507,35 +899,12 @@ impl ActionExecutorPort for OsActionExecutor {
             });
         }
 
-        let mut affected_items: u64 = 0;
-        let mut freed_bytes: u64 = 0;
-        let mut warnings: Vec<String> = Vec::new();
-
-        for raw in &plan.request.action.paths {
-            let path = Self::expand_path(raw);
-            if !path.exists() {
-                warnings.push(format!("path not found: {}", path.display()));
-                continue;
-            }
-
-            affected_items += 1;
-            freed_bytes += Self::calculate_size(&path);
-
-            if plan.request.mode == ExecutionMode::DryRun {
-                continue;
-            }
-
-            match action_type {
-                ActionType::TrashPaths => Self::trash_path(&path)?,
-                ActionType::DeletePaths => Self::delete_path(&path)?,
-                _ => {}
-            }
+        match action_type {
+            ActionType::TrashPaths => Self::execute_delete_like_paths(plan, true),
+            ActionType::DeletePaths => Self::execute_delete_like_paths(plan, false),
+            _ => Err(ActionExecutionError::UnsupportedAction {
+                action: format!("{action_type:?}"),
+            }),
         }
-
-        Ok(ActionExecutionResult {
-            affected_items,
-            freed_bytes,
-            warnings,
-        })
     }
 }
