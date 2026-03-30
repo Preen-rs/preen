@@ -22,8 +22,9 @@ use preen_cli::{
     installer_text_output_for_test, is_git_filter_unsupported_error_for_test,
     is_system_detail_code_for_test, list_plugins_with_options_for_test, load_lockfile_at,
     map_clone_error_detail_code_for_test, map_error_with_detail_code_for_test,
-    optimize_output_for_test, optimize_output_with_executor_for_test,
-    optimize_runtime_error_detail_code_for_test, optimize_text_output_for_test, parse_install_spec,
+    optimize_output_for_test, optimize_output_with_debug_for_test,
+    optimize_output_with_executor_for_test, optimize_runtime_error_detail_code_for_test,
+    optimize_text_output_for_test, optimize_whitelist_output_for_test, parse_install_spec,
     parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
     plugin_install_text_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
     plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
@@ -1562,6 +1563,50 @@ fn optimize_dry_run_json_happy_path() {
         .cloned()
         .unwrap_or_default();
     assert!(!executed.is_empty());
+}
+
+#[test]
+fn optimize_debug_mode_writes_debug_log() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let debug_log = temp.path().join("optimize-debug.log");
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_OPTIMIZE_DEBUG_LOG_PATH", debug_log.as_os_str());
+    }
+
+    let output =
+        optimize_output_with_debug_for_test(true, false, true, &AlwaysSuccessExecutor).unwrap();
+    assert_eq!(output["kind"].as_str(), Some("system.optimize"));
+    assert_eq!(
+        output["data"]["debug_log_path"].as_str(),
+        Some(debug_log.to_string_lossy().as_ref())
+    );
+    let log = fs::read_to_string(debug_log).unwrap();
+    assert!(log.contains("mode=dry_run"));
+    assert!(log.contains("selected_tasks="));
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_OPTIMIZE_DEBUG_LOG_PATH");
+    }
+}
+
+#[test]
+fn optimize_whitelist_json_happy_path() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = optimize_whitelist_output_for_test().unwrap();
+        assert_eq!(output["kind"].as_str(), Some("system.optimize.whitelist"));
+        assert!(
+            output["data"]["path"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("optimize-whitelist")
+        );
+        assert!(output["data"]["entries"].as_u64().unwrap_or(0) >= 1);
+        assert!(output["data"]["available_tasks"].as_u64().unwrap_or(0) >= 1);
+    });
 }
 
 #[test]
@@ -3306,7 +3351,9 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "uninstall", "DemoApp", "--confirm", "--json"],
         vec!["preen", "uninstall", "--paths", "--json"],
         vec!["preen", "optimize", "--dry-run", "--json"],
+        vec!["preen", "optimize", "--dry-run", "--debug", "--json"],
         vec!["preen", "optimize", "--confirm", "--json"],
+        vec!["preen", "optimize", "--whitelist", "--json"],
         vec!["preen", "analyze", "/tmp", "--json"],
         vec!["preen", "analyze", "/tmp", "--max-depth", "3", "--json"],
         vec!["preen", "status", "--json"],
@@ -3337,6 +3384,8 @@ fn top_level_system_commands_short_flags_parse() {
         vec!["preen", "uninstall", "DemoApp", "-n"],
         vec!["preen", "uninstall", "DemoApp", "--debug"],
         vec!["preen", "optimize", "-n"],
+        vec!["preen", "optimize", "--debug"],
+        vec!["preen", "optimize", "--whitelist"],
         vec!["preen", "purge", "-n"],
         vec!["preen", "purge", "--debug"],
         vec!["preen", "installer", "-n"],
@@ -3449,6 +3498,9 @@ fn top_level_system_command_option_matrix_rejects_conflicts() {
         &["preen", "uninstall", "DemoApp", "--paths"],
         &["preen", "uninstall", "--paths", "--dry-run"],
         &["preen", "optimize", "--dry-run", "--confirm"],
+        &["preen", "optimize", "--whitelist", "--dry-run"],
+        &["preen", "optimize", "--whitelist", "--confirm"],
+        &["preen", "optimize", "--whitelist", "--debug"],
         &["preen", "purge", "--dry-run", "--confirm"],
         &["preen", "purge", "--paths", "--confirm"],
         &["preen", "installer", "--dry-run", "--confirm"],
@@ -3481,6 +3533,16 @@ fn uninstall_rejects_dry_run_with_confirm_conflict() {
 fn optimize_rejects_dry_run_with_confirm_conflict() {
     let parsed = Cli::try_parse_from(["preen", "optimize", "--dry-run", "--confirm"]);
     assert!(parsed.is_err());
+}
+
+#[test]
+fn optimize_whitelist_rejects_dry_run_confirm_or_debug_conflicts() {
+    let with_dry_run = Cli::try_parse_from(["preen", "optimize", "--whitelist", "--dry-run"]);
+    assert!(with_dry_run.is_err());
+    let with_confirm = Cli::try_parse_from(["preen", "optimize", "--whitelist", "--confirm"]);
+    assert!(with_confirm.is_err());
+    let with_debug = Cli::try_parse_from(["preen", "optimize", "--whitelist", "--debug"]);
+    assert!(with_debug.is_err());
 }
 
 #[test]
@@ -3529,7 +3591,9 @@ fn system_option_matrix_accepts_valid_flag_combinations() {
         vec!["preen", "clean", "--whitelist"],
         vec!["preen", "clean", "--dry-run", "--debug"],
         vec!["preen", "optimize", "--dry-run"],
+        vec!["preen", "optimize", "--dry-run", "--debug"],
         vec!["preen", "optimize", "--confirm"],
+        vec!["preen", "optimize", "--whitelist"],
         vec!["preen", "purge", "--dry-run"],
         vec!["preen", "purge", "--dry-run", "--debug"],
         vec!["preen", "purge", "--confirm"],
@@ -3568,6 +3632,9 @@ fn system_option_matrix_rejects_conflicting_flags() {
         vec!["preen", "clean", "--whitelist", "--dry-run"],
         vec!["preen", "clean", "--whitelist", "--strategy", "delete"],
         vec!["preen", "optimize", "--dry-run", "--confirm"],
+        vec!["preen", "optimize", "--whitelist", "--dry-run"],
+        vec!["preen", "optimize", "--whitelist", "--confirm"],
+        vec!["preen", "optimize", "--whitelist", "--debug"],
         vec!["preen", "purge", "--paths", "--dry-run"],
         vec!["preen", "purge", "--paths", "--confirm"],
         vec!["preen", "installer", "--paths", "--dry-run"],

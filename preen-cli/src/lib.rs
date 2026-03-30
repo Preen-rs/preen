@@ -99,6 +99,8 @@ const INSTALLER_PREVIEW_LIST_FILE_NAME: &str = "installer-list.txt";
 const INSTALLER_DEBUG_LOG_FILE_NAME: &str = "installer-debug.log";
 const UNINSTALL_PREVIEW_LIST_FILE_NAME: &str = "uninstall-list.txt";
 const UNINSTALL_DEBUG_LOG_FILE_NAME: &str = "uninstall-debug.log";
+const OPTIMIZE_WHITELIST_FILE_NAME: &str = "optimize-whitelist.txt";
+const OPTIMIZE_DEBUG_LOG_FILE_NAME: &str = "optimize-debug.log";
 const DEFAULT_CLEAN_WHITELIST_PATTERNS: [&str; 2] = [
     "~/Library/Application Support/Preen/plugins",
     "~/.config/preen/plugins",
@@ -369,8 +371,34 @@ struct OptimizeCommandOutput {
     post_check_run: bool,
     post_check_overall_passed: Option<bool>,
     post_check_suggested_actions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug_log_path: Option<String>,
     warnings: Vec<String>,
     audit_events: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OptimizeCommandOptions {
+    dry_run: bool,
+    confirm: bool,
+    debug: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OptimizeWhitelistConfig {
+    path: PathBuf,
+    entries: Vec<String>,
+    warnings: Vec<String>,
+    active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct OptimizeWhitelistOutput {
+    path: String,
+    entries: usize,
+    created: bool,
+    defaults_written: bool,
+    available_tasks: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -622,9 +650,18 @@ fn run_typed_with_verifier_and_clean_executor(
         CliCommand::Optimize {
             dry_run,
             confirm,
+            whitelist,
+            debug,
             json,
-        } => run_optimize_with_executor(*dry_run, *confirm, *json, clean_executor)
-            .map_err(CliError::from),
+        } => run_optimize_with_executor(
+            *dry_run,
+            *confirm,
+            *whitelist,
+            *debug,
+            *json,
+            clean_executor,
+        )
+        .map_err(CliError::from),
         CliCommand::Analyze {
             path,
             max_depth,
@@ -854,6 +891,32 @@ fn optimize_task_specs() -> Vec<OptimizeTaskSpec> {
         }];
     }
     Vec::new()
+}
+
+fn select_optimize_tasks(
+    tasks: &[OptimizeTaskSpec],
+    whitelist_entries: &[String],
+    whitelist_active: bool,
+    warnings: &mut Vec<String>,
+) -> Vec<OptimizeTaskSpec> {
+    if !whitelist_active {
+        return tasks.to_vec();
+    }
+    let allowed: std::collections::HashSet<String> = whitelist_entries.iter().cloned().collect();
+    let mut selected = Vec::new();
+    for task in tasks {
+        if allowed.contains(task.id) {
+            selected.push(*task);
+        }
+    }
+    for value in whitelist_entries {
+        if !tasks.iter().any(|task| task.id == value) {
+            warnings.push(format!(
+                "optimize whitelist entry not found in task list: {value}"
+            ));
+        }
+    }
+    selected
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1429,10 +1492,27 @@ fn run_uninstall_output_with_executor(
 fn run_optimize_with_executor(
     dry_run: bool,
     confirm: bool,
+    whitelist: bool,
+    debug: bool,
     json: bool,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<(), String> {
-    let output = run_optimize_output_with_executor(dry_run, confirm, clean_executor)?;
+    if whitelist {
+        let out = optimize_whitelist_output()?;
+        if json {
+            println!("{}", optimize_whitelist_json(out)?);
+            return Ok(());
+        }
+        print!("{}", optimize_whitelist_text(&out));
+        return Ok(());
+    }
+
+    let options = OptimizeCommandOptions {
+        dry_run,
+        confirm,
+        debug,
+    };
+    let output = run_optimize_output_with_executor(options, clean_executor)?;
     if json {
         println!("{}", optimize_json(output.clone())?);
         return Ok(());
@@ -1443,11 +1523,10 @@ fn run_optimize_with_executor(
 }
 
 fn run_optimize_output_with_executor(
-    dry_run: bool,
-    confirm: bool,
+    options: OptimizeCommandOptions,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<OptimizeCommandOutput, String> {
-    if !dry_run && !confirm {
+    if !options.dry_run && !options.confirm {
         return Err(err_code(
             CliErrorKind::Validation,
             "optimize_confirmation_required",
@@ -1455,13 +1534,24 @@ fn run_optimize_output_with_executor(
         ));
     }
 
-    let tasks = optimize_task_specs();
-    if tasks.is_empty() {
+    let all_tasks = optimize_task_specs();
+    if all_tasks.is_empty() {
         return Err(err_code(
             CliErrorKind::Unsupported,
             "optimize_no_tasks",
             "optimize is not supported on this OS",
         ));
+    }
+    let whitelist = load_optimize_whitelist_config();
+    let mut warnings = whitelist.warnings;
+    let tasks = select_optimize_tasks(
+        &all_tasks,
+        &whitelist.entries,
+        whitelist.active,
+        &mut warnings,
+    );
+    if tasks.is_empty() {
+        warnings.push("no optimize tasks selected by whitelist".to_string());
     }
 
     let manifest = Manifest {
@@ -1492,7 +1582,7 @@ fn run_optimize_output_with_executor(
             .collect(),
     };
 
-    let mode = if dry_run {
+    let mode = if options.dry_run {
         ExecutionMode::DryRun
     } else {
         ExecutionMode::Apply
@@ -1502,7 +1592,6 @@ fn run_optimize_output_with_executor(
     let runtime = new_cli_runtime()?;
 
     let mut affected_items = 0_u64;
-    let mut warnings = Vec::new();
     let mut executed_tasks = Vec::with_capacity(tasks.len());
     for task in &tasks {
         let mut params = std::collections::HashMap::new();
@@ -1540,7 +1629,11 @@ fn run_optimize_output_with_executor(
                 &manifest,
                 &rule,
                 mode,
-                if confirm { Some("confirmed") } else { None },
+                if options.confirm {
+                    Some("confirmed")
+                } else {
+                    None
+                },
                 &policy,
                 clean_executor,
                 Some(&sink),
@@ -1551,7 +1644,9 @@ fn run_optimize_output_with_executor(
         executed_tasks.push(task.label.to_string());
     }
 
-    let (post_check_run, post_check_overall_passed, post_check_suggested_actions) = if dry_run {
+    let (post_check_run, post_check_overall_passed, post_check_suggested_actions) = if options
+        .dry_run
+    {
         (false, None, Vec::new())
     } else {
         let post_check = run_check_output(false);
@@ -1567,9 +1662,16 @@ fn run_optimize_output_with_executor(
         }
         (true, Some(post_check.overall_passed), suggested_actions)
     };
+    let debug_log_path = write_optimize_debug(
+        options.debug,
+        if options.dry_run { "dry_run" } else { "apply" },
+        tasks.len(),
+        executed_tasks.len(),
+        affected_items,
+    );
 
     Ok(OptimizeCommandOutput {
-        mode: if dry_run {
+        mode: if options.dry_run {
             "dry_run".to_string()
         } else {
             "apply".to_string()
@@ -1581,6 +1683,9 @@ fn run_optimize_output_with_executor(
         post_check_run,
         post_check_overall_passed,
         post_check_suggested_actions,
+        debug_log_path: debug_log_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         warnings,
         audit_events: sink.event_count(),
     })
@@ -4047,6 +4152,10 @@ fn optimize_json(out: OptimizeCommandOutput) -> Result<String, String> {
     to_json_envelope("system.optimize", out)
 }
 
+fn optimize_whitelist_json(out: OptimizeWhitelistOutput) -> Result<String, String> {
+    to_json_envelope("system.optimize.whitelist", out)
+}
+
 fn purge_paths_json(roots: Vec<String>) -> Result<String, String> {
     to_json_envelope("system.purge.paths", PurgePathsOutput { roots })
 }
@@ -4077,6 +4186,19 @@ fn clean_whitelist_output() -> Result<CleanWhitelistOutput, String> {
         entries: config.entries.len(),
         created,
         defaults_written,
+    })
+}
+
+fn optimize_whitelist_output() -> Result<OptimizeWhitelistOutput, String> {
+    let path = optimize_whitelist_path()?;
+    let (created, defaults_written) = ensure_optimize_whitelist_file(&path)?;
+    let config = load_optimize_whitelist_config();
+    Ok(OptimizeWhitelistOutput {
+        path: path.to_string_lossy().to_string(),
+        entries: config.entries.len(),
+        created,
+        defaults_written,
+        available_tasks: optimize_task_specs().len(),
     })
 }
 
@@ -4130,6 +4252,22 @@ fn clean_whitelist_text(out: &CleanWhitelistOutput) -> String {
     let _ = writeln!(
         text,
         "hint: edit this file to add absolute paths or prefix patterns ending with *",
+    );
+    text
+}
+
+fn optimize_whitelist_text(out: &OptimizeWhitelistOutput) -> String {
+    let mut text = String::new();
+    let _ = writeln!(text, "optimize whitelist");
+    let _ = writeln!(text, "path: {}", out.path);
+    let _ = writeln!(text, "entries: {}", out.entries);
+    let _ = writeln!(text, "available_tasks: {}", out.available_tasks);
+    if out.defaults_written {
+        let _ = writeln!(text, "defaults_written: true");
+    }
+    let _ = writeln!(
+        text,
+        "hint: keep one optimize task id per line (comment lines start with #)"
     );
     text
 }
@@ -4292,6 +4430,9 @@ fn optimize_text(out: &OptimizeCommandOutput) -> String {
         for action in &out.post_check_suggested_actions {
             let _ = writeln!(text, "- {action}");
         }
+    }
+    if let Some(path) = &out.debug_log_path {
+        let _ = writeln!(text, "Debug log: {path}");
     }
     if !out.warnings.is_empty() {
         let _ = writeln!(text, "Warnings:");
@@ -4607,6 +4748,13 @@ fn clean_whitelist_path() -> Result<PathBuf, String> {
     Ok(preen_state_dir()?.join(CLEAN_WHITELIST_FILE_NAME))
 }
 
+fn optimize_whitelist_path() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("PREEN_OPTIMIZE_WHITELIST_PATH") {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(preen_state_dir()?.join(OPTIMIZE_WHITELIST_FILE_NAME))
+}
+
 fn clean_preview_list_path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("PREEN_CLEAN_PREVIEW_LIST_PATH") {
         return Ok(PathBuf::from(path));
@@ -4684,6 +4832,15 @@ fn uninstall_debug_log_path() -> Option<PathBuf> {
         .map(|dir| dir.join(UNINSTALL_DEBUG_LOG_FILE_NAME))
 }
 
+fn optimize_debug_log_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PREEN_OPTIMIZE_DEBUG_LOG_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    preen_state_dir()
+        .ok()
+        .map(|dir| dir.join(OPTIMIZE_DEBUG_LOG_FILE_NAME))
+}
+
 fn load_clean_whitelist_config() -> Result<CleanWhitelistConfig, String> {
     let path = match clean_whitelist_path() {
         Ok(path) => path,
@@ -4741,6 +4898,56 @@ fn load_clean_whitelist_config() -> Result<CleanWhitelistConfig, String> {
     })
 }
 
+fn load_optimize_whitelist_config() -> OptimizeWhitelistConfig {
+    let path = match optimize_whitelist_path() {
+        Ok(path) => path,
+        Err(error) => {
+            return OptimizeWhitelistConfig {
+                path: PathBuf::new(),
+                entries: Vec::new(),
+                warnings: vec![format!("optimize whitelist unavailable: {error}")],
+                active: false,
+            };
+        }
+    };
+    if !path.exists() {
+        return OptimizeWhitelistConfig {
+            path,
+            entries: Vec::new(),
+            warnings: Vec::new(),
+            active: false,
+        };
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return OptimizeWhitelistConfig {
+                path,
+                entries: Vec::new(),
+                warnings: vec![format!("optimize whitelist unavailable: {error}")],
+                active: false,
+            };
+        }
+    };
+    let mut entries = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if seen.insert(trimmed.to_string()) {
+            entries.push(trimmed.to_string());
+        }
+    }
+    OptimizeWhitelistConfig {
+        path,
+        entries,
+        warnings: Vec::new(),
+        active: true,
+    }
+}
+
 fn ensure_clean_whitelist_file(path: &Path) -> Result<(bool, bool), String> {
     if path.exists() {
         return Ok((false, false));
@@ -4758,6 +4965,26 @@ fn ensure_clean_whitelist_file(path: &Path) -> Result<(bool, bool), String> {
     }
     fs::write(path, content)
         .map_err(|e| err_with(CliErrorKind::Io, "clean whitelist write failed", e))?;
+    Ok((true, true))
+}
+
+fn ensure_optimize_whitelist_file(path: &Path) -> Result<(bool, bool), String> {
+    if path.exists() {
+        return Ok((false, false));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| err_with(CliErrorKind::Io, "optimize whitelist dir create failed", e))?;
+    }
+    let defaults = optimize_task_specs();
+    let mut content = String::new();
+    content.push_str("# Preen optimize whitelist\n");
+    content.push_str("# One optimize task id per line.\n");
+    for task in defaults {
+        let _ = writeln!(content, "{}", task.id);
+    }
+    fs::write(path, content)
+        .map_err(|e| err_with(CliErrorKind::Io, "optimize whitelist write failed", e))?;
     Ok((true, true))
 }
 
@@ -5048,6 +5275,34 @@ fn write_uninstall_debug(
         scanned_entries,
         target_count,
         roots.join(","),
+    );
+    Some(path)
+}
+
+fn write_optimize_debug(
+    enabled: bool,
+    mode: &str,
+    selected_tasks: usize,
+    executed_tasks: usize,
+    affected_items: u64,
+) -> Option<PathBuf> {
+    if !enabled {
+        return None;
+    }
+    let path = optimize_debug_log_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let timestamp = OffsetDateTime::now_utc().format(&Rfc3339).ok()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let _ = writeln!(
+        file,
+        "time={} mode={} selected_tasks={} executed_tasks={} affected_items={}",
+        timestamp, mode, selected_tasks, executed_tasks, affected_items
     );
     Some(path)
 }
@@ -9165,14 +9420,24 @@ pub fn uninstall_paths_text_for_test() -> String {
 }
 
 pub fn optimize_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_json::Value, String> {
-    let output = run_optimize_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
+    let options = OptimizeCommandOptions {
+        dry_run,
+        confirm,
+        debug: false,
+    };
+    let output = run_optimize_output_with_executor(options, &OsActionExecutor)?;
     let json = optimize_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "optimize output parse failed", e))
 }
 
 pub fn optimize_text_output_for_test(dry_run: bool, confirm: bool) -> Result<String, String> {
-    let output = run_optimize_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
+    let options = OptimizeCommandOptions {
+        dry_run,
+        confirm,
+        debug: false,
+    };
+    let output = run_optimize_output_with_executor(options, &OsActionExecutor)?;
     Ok(optimize_text(&output))
 }
 
@@ -9181,10 +9446,44 @@ pub fn optimize_output_with_executor_for_test(
     confirm: bool,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<serde_json::Value, String> {
-    let output = run_optimize_output_with_executor(dry_run, confirm, clean_executor)?;
+    let options = OptimizeCommandOptions {
+        dry_run,
+        confirm,
+        debug: false,
+    };
+    let output = run_optimize_output_with_executor(options, clean_executor)?;
     let json = optimize_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "optimize output parse failed", e))
+}
+
+pub fn optimize_output_with_debug_for_test(
+    dry_run: bool,
+    confirm: bool,
+    debug: bool,
+    clean_executor: &dyn ActionExecutorPort,
+) -> Result<serde_json::Value, String> {
+    let options = OptimizeCommandOptions {
+        dry_run,
+        confirm,
+        debug,
+    };
+    let output = run_optimize_output_with_executor(options, clean_executor)?;
+    let json = optimize_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "optimize output parse failed", e))
+}
+
+pub fn optimize_whitelist_output_for_test() -> Result<serde_json::Value, String> {
+    let output = optimize_whitelist_output()?;
+    let json = optimize_whitelist_json(output)?;
+    serde_json::from_str(&json).map_err(|e| {
+        err_with(
+            CliErrorKind::Internal,
+            "optimize whitelist output parse failed",
+            e,
+        )
+    })
 }
 
 pub fn check_output_for_test(fix: bool) -> Result<serde_json::Value, String> {
@@ -10082,6 +10381,10 @@ enum CliCommand {
         dry_run: bool,
         #[arg(long, conflicts_with = "dry_run")]
         confirm: bool,
+        #[arg(long, conflicts_with_all = ["dry_run", "confirm", "debug"])]
+        whitelist: bool,
+        #[arg(long)]
+        debug: bool,
         #[arg(long)]
         json: bool,
     },
