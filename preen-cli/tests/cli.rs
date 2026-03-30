@@ -11,25 +11,25 @@ use preen_cli::{
     Cli, CliError, CliErrorKind, analyze_output_for_test, analyze_output_with_depth_for_test,
     analyze_text_output_for_test, check_output_for_test, check_registry_freshness_for_test,
     check_text_output_for_test, clean_output_for_test, clean_runtime_error_detail_code_for_test,
-    clean_selection_summary_for_test, clean_text_output_for_test, cli_label_for_test,
-    clone_rule_pack_for_test, completion_output_for_test, completion_text_output_for_test,
-    default_signature_source_for_test, enforce_clean_scope_for_test,
-    enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
-    format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
-    install_plugin_in_dir_for_test, installer_output_for_test, installer_paths_json_for_test,
-    installer_paths_text_for_test, installer_runtime_error_detail_code_for_test,
-    installer_text_output_for_test, is_git_filter_unsupported_error_for_test,
-    is_system_detail_code_for_test, list_plugins_with_options_for_test, load_lockfile_at,
-    map_clone_error_detail_code_for_test, map_error_with_detail_code_for_test,
-    optimize_output_for_test, optimize_output_with_executor_for_test,
-    optimize_runtime_error_detail_code_for_test, optimize_text_output_for_test, parse_install_spec,
-    parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
-    plugin_install_text_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
-    plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
-    plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
-    plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
-    plugin_update_json_for_test, plugin_update_text_for_test, plugin_verify_for_test,
-    plugin_verify_json_for_test, plugin_verify_text_for_test,
+    clean_selection_summary_for_test, clean_text_output_for_test, clean_whitelist_output_for_test,
+    cli_label_for_test, clone_rule_pack_for_test, completion_output_for_test,
+    completion_text_output_for_test, default_signature_source_for_test,
+    enforce_clean_scope_for_test, enforce_installer_scope_for_test,
+    enforce_uninstall_scope_for_test, error_json_for_test, format_bytes_for_test,
+    hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
+    installer_output_for_test, installer_paths_json_for_test, installer_paths_text_for_test,
+    installer_runtime_error_detail_code_for_test, installer_text_output_for_test,
+    is_git_filter_unsupported_error_for_test, is_system_detail_code_for_test,
+    list_plugins_with_options_for_test, load_lockfile_at, map_clone_error_detail_code_for_test,
+    map_error_with_detail_code_for_test, optimize_output_for_test,
+    optimize_output_with_executor_for_test, optimize_runtime_error_detail_code_for_test,
+    optimize_text_output_for_test, parse_install_spec, parse_plugin_spec,
+    plugin_info_json_for_test, plugin_install_json_for_test, plugin_install_text_for_test,
+    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
+    plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
+    plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
+    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
+    plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
     purge_paths_json_for_test, purge_paths_text_for_test, purge_text_output_for_test,
@@ -1452,6 +1452,50 @@ fn clean_dry_run_executes_with_temp_path_override() {
         std::env::remove_var("PREEN_CLEAN_PATHS");
     }
     assert!(result.is_ok());
+}
+
+#[test]
+fn clean_whitelist_json_mode_creates_default_file() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_CLEAN_WHITELIST_PATH");
+        }
+        let output = clean_whitelist_output_for_test().unwrap();
+        assert_eq!(output["kind"].as_str(), Some("system.clean.whitelist"));
+        let path = output["data"]["path"].as_str().unwrap();
+        assert!(Path::new(path).exists());
+        assert!(output["data"]["entries"].as_u64().unwrap_or(0) >= 1);
+    });
+}
+
+#[test]
+fn clean_debug_mode_writes_debug_log() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let cache_dir = temp.path().join("cache");
+    let debug_log = temp.path().join("clean-debug.log");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("a.txt"), b"data").unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_CLEAN_PATHS", cache_dir.as_os_str());
+        std::env::set_var("PREEN_CLEAN_DEBUG_LOG_PATH", debug_log.as_os_str());
+    }
+
+    let cli = Cli::try_parse_from(["preen", "clean", "--dry-run", "--debug", "--json"]).unwrap();
+    let result = run_typed(cli);
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_CLEAN_PATHS");
+        std::env::remove_var("PREEN_CLEAN_DEBUG_LOG_PATH");
+    }
+    assert!(result.is_ok());
+    assert!(debug_log.exists());
+    let content = fs::read_to_string(debug_log).unwrap();
+    assert!(content.contains("scanned_items="));
 }
 
 #[test]
@@ -3070,6 +3114,8 @@ fn top_level_system_command_option_matrix_parses() {
     let cases: Vec<Vec<&str>> = vec![
         vec!["preen", "clean", "--dry-run", "--json"],
         vec!["preen", "clean", "--confirm", "--json"],
+        vec!["preen", "clean", "--whitelist", "--json"],
+        vec!["preen", "clean", "--dry-run", "--debug", "--json"],
         vec![
             "preen",
             "clean",
@@ -3115,6 +3161,7 @@ fn top_level_system_command_option_matrix_parses() {
 fn top_level_system_commands_short_flags_parse() {
     let cases: Vec<Vec<&str>> = vec![
         vec!["preen", "clean", "-n"],
+        vec!["preen", "clean", "--whitelist"],
         vec!["preen", "uninstall", "DemoApp", "-n"],
         vec!["preen", "optimize", "-n"],
         vec!["preen", "purge", "-n"],
@@ -3220,6 +3267,9 @@ fn plugin_progress_line_format_is_stable() {
 fn top_level_system_command_option_matrix_rejects_conflicts() {
     let invalid_cases: &[&[&str]] = &[
         &["preen", "clean", "--dry-run", "--confirm"],
+        &["preen", "clean", "--whitelist", "--confirm"],
+        &["preen", "clean", "--whitelist", "--dry-run"],
+        &["preen", "clean", "--whitelist", "--strategy", "trash"],
         &["preen", "uninstall", "DemoApp", "--dry-run", "--confirm"],
         &["preen", "uninstall", "DemoApp", "--paths"],
         &["preen", "uninstall", "--paths", "--dry-run"],
@@ -3301,6 +3351,8 @@ fn system_option_matrix_accepts_valid_flag_combinations() {
     let valid_cases = [
         vec!["preen", "clean", "--dry-run"],
         vec!["preen", "clean", "--confirm"],
+        vec!["preen", "clean", "--whitelist"],
+        vec!["preen", "clean", "--dry-run", "--debug"],
         vec!["preen", "optimize", "--dry-run"],
         vec!["preen", "optimize", "--confirm"],
         vec!["preen", "purge", "--dry-run"],
@@ -3334,6 +3386,9 @@ fn system_option_matrix_accepts_valid_flag_combinations() {
 fn system_option_matrix_rejects_conflicting_flags() {
     let invalid_cases = [
         vec!["preen", "clean", "--dry-run", "--confirm"],
+        vec!["preen", "clean", "--whitelist", "--confirm"],
+        vec!["preen", "clean", "--whitelist", "--dry-run"],
+        vec!["preen", "clean", "--whitelist", "--strategy", "delete"],
         vec!["preen", "optimize", "--dry-run", "--confirm"],
         vec!["preen", "purge", "--paths", "--dry-run"],
         vec!["preen", "purge", "--paths", "--confirm"],

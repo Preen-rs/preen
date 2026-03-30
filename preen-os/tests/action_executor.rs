@@ -669,6 +669,7 @@ async fn run_command_apply_executes_when_allowlisted() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn run_command_rejects_when_allowlist_missing() {
     let _guard = env_lock();
     let _env = EnvVarGuard::clear("PREEN_RUN_COMMAND_ALLOWLIST");
@@ -687,6 +688,7 @@ async fn run_command_rejects_when_allowlist_missing() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn run_command_rejects_when_not_allowlisted() {
     let _guard = env_lock();
     let _env = EnvVarGuard::clear("PREEN_RUN_COMMAND_ALLOWLIST");
@@ -753,6 +755,7 @@ async fn run_command_non_zero_exit_is_classified() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn run_command_accepts_allowlist_from_env() {
     let _guard = env_lock();
     let _env = EnvVarGuard::set("PREEN_RUN_COMMAND_ALLOWLIST", "echo");
@@ -769,6 +772,7 @@ async fn run_command_accepts_allowlist_from_env() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn run_command_params_allowlist_overrides_env_allowlist() {
     let _guard = env_lock();
     let _env = EnvVarGuard::set("PREEN_RUN_COMMAND_ALLOWLIST", "echo");
@@ -787,6 +791,7 @@ async fn run_command_params_allowlist_overrides_env_allowlist() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn run_command_empty_param_allowlist_does_not_fallback_to_env() {
     let _guard = env_lock();
     let _env = EnvVarGuard::set("PREEN_RUN_COMMAND_ALLOWLIST", "echo");

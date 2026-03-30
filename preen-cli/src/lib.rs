@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use std::cmp::Ordering;
 use std::fmt::{Display, Write as FmtWrite};
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -86,6 +87,13 @@ const DEFAULT_PURGE_ARTIFACT_NAMES: [&str; 10] = [
 ];
 const DEFAULT_INSTALLER_EXTENSIONS: [&str; 12] = [
     "dmg", "pkg", "zip", "tar", "tgz", "gz", "bz2", "xz", "deb", "rpm", "appimage", "iso",
+];
+const CLEAN_WHITELIST_FILE_NAME: &str = "clean-whitelist.txt";
+const CLEAN_PREVIEW_LIST_FILE_NAME: &str = "clean-list.txt";
+const CLEAN_DEBUG_LOG_FILE_NAME: &str = "clean-debug.log";
+const DEFAULT_CLEAN_WHITELIST_PATTERNS: [&str; 2] = [
+    "~/Library/Application Support/Preen/plugins",
+    "~/.config/preen/plugins",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,8 +207,14 @@ struct CleanCommandOutput {
     target_count: usize,
     estimated_freed_bytes: u64,
     preview_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_list_path: Option<String>,
     affected_items: u64,
     freed_bytes: u64,
+    whitelist_entries: usize,
+    whitelist_hits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug_log_path: Option<String>,
     risk_summary: CleanRiskSummary,
     warnings: Vec<String>,
     audit_events: usize,
@@ -210,6 +224,29 @@ struct CleanCommandOutput {
 struct CleanRiskSummary {
     high_targets: usize,
     requires_confirmation: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CleanCommandOptions {
+    dry_run: bool,
+    confirm: bool,
+    strategy_arg: Option<CleanStrategyArg>,
+    debug: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CleanWhitelistConfig {
+    path: PathBuf,
+    entries: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CleanWhitelistOutput {
+    path: String,
+    entries: usize,
+    created: bool,
+    defaults_written: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,9 +527,19 @@ fn run_typed_with_verifier_and_clean_executor(
             dry_run,
             confirm,
             strategy,
+            whitelist,
+            debug,
             json,
-        } => run_clean_with_executor(*dry_run, *confirm, *strategy, *json, clean_executor)
-            .map_err(CliError::from),
+        } => run_clean_with_executor(
+            *dry_run,
+            *confirm,
+            *strategy,
+            *whitelist,
+            *debug,
+            *json,
+            clean_executor,
+        )
+        .map_err(CliError::from),
         CliCommand::Purge {
             dry_run,
             confirm,
@@ -788,7 +835,7 @@ impl CleanStrategy {
     }
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum CleanStrategyArg {
     Delete,
     Trash,
@@ -857,10 +904,28 @@ fn run_clean_with_executor(
     dry_run: bool,
     confirm: bool,
     strategy_arg: Option<CleanStrategyArg>,
+    whitelist: bool,
+    debug: bool,
     json: bool,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<(), String> {
-    let output = run_clean_output_with_executor(dry_run, confirm, strategy_arg, clean_executor)?;
+    if whitelist {
+        let out = clean_whitelist_output()?;
+        if json {
+            println!("{}", clean_whitelist_json(out)?);
+        } else {
+            print!("{}", clean_whitelist_text(&out));
+        }
+        return Ok(());
+    }
+
+    let options = CleanCommandOptions {
+        dry_run,
+        confirm,
+        strategy_arg,
+        debug,
+    };
+    let output = run_clean_output_with_executor(options, clean_executor)?;
 
     if json {
         println!(
@@ -3471,16 +3536,20 @@ fn run_clean_output(
     strategy_arg: Option<CleanStrategyArg>,
 ) -> Result<CleanCommandOutput, String> {
     let clean_executor = OsActionExecutor;
-    run_clean_output_with_executor(dry_run, confirm, strategy_arg, &clean_executor)
+    let options = CleanCommandOptions {
+        dry_run,
+        confirm,
+        strategy_arg,
+        debug: false,
+    };
+    run_clean_output_with_executor(options, &clean_executor)
 }
 
 fn run_clean_output_with_executor(
-    dry_run: bool,
-    confirm: bool,
-    strategy_arg: Option<CleanStrategyArg>,
+    options: CleanCommandOptions,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<CleanCommandOutput, String> {
-    if !dry_run && !confirm {
+    if !options.dry_run && !options.confirm {
         return Err(err_code(
             CliErrorKind::Validation,
             "clean_confirmation_required",
@@ -3497,27 +3566,39 @@ fn run_clean_output_with_executor(
         ));
     }
 
+    let whitelist = load_clean_whitelist_config()?;
     let runtime = new_cli_runtime()?;
     let scan_result = runtime
         .block_on(scan_clean_candidates(&clean_paths))
         .map_err(|e| err_with(CliErrorKind::Internal, "clean scan failed", e))?;
     let selection = build_clean_selection(&scan_result, &clean_paths, clean_max_items());
+    let (selection, whitelist_hits) = apply_clean_whitelist(selection, &whitelist.entries);
     let selected_paths = selection
         .iter()
         .map(|item| item.path.clone())
         .collect::<Vec<_>>();
     let estimated_freed_bytes = selection.iter().map(|item| item.size).sum();
     enforce_clean_scope(&selected_paths, &clean_paths)?;
-    let strategy = resolve_clean_strategy(strategy_arg);
+    let strategy = resolve_clean_strategy(options.strategy_arg);
     let preview = clean_preview_paths(&selected_paths, clean_preview_limit());
+    let preview_list_path = write_clean_preview_list(options.dry_run, &selected_paths);
+    let debug_log_path = write_clean_debug(
+        options.debug,
+        &clean_paths,
+        scan_result.items.len(),
+        selected_paths.len(),
+        whitelist.entries.len(),
+        whitelist_hits,
+    );
+    let mut warnings = whitelist.warnings.clone();
     let risk_summary = CleanRiskSummary {
         high_targets: selected_paths.len(),
-        requires_confirmation: !dry_run,
+        requires_confirmation: !options.dry_run,
     };
 
     if selected_paths.is_empty() {
         return Ok(CleanCommandOutput {
-            mode: if dry_run {
+            mode: if options.dry_run {
                 "dry_run".to_string()
             } else {
                 "apply".to_string()
@@ -3527,10 +3608,18 @@ fn run_clean_output_with_executor(
             target_count: 0,
             estimated_freed_bytes: 0,
             preview_paths: Vec::new(),
+            preview_list_path: preview_list_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             affected_items: 0,
             freed_bytes: 0,
+            whitelist_entries: whitelist.entries.len(),
+            whitelist_hits,
+            debug_log_path: debug_log_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             risk_summary,
-            warnings: vec!["no cleanable items selected".to_string()],
+            warnings: warning_with_default(warnings),
             audit_events: 0,
         });
     }
@@ -3592,14 +3681,15 @@ fn run_clean_output_with_executor(
             &runtime,
             &manifest,
             &rule,
-            dry_run,
-            confirm,
+            options.dry_run,
+            options.confirm,
             clean_executor,
             map_clean_runtime_error,
         )?;
+    warnings.extend(runtime_warnings);
 
     Ok(CleanCommandOutput {
-        mode: if dry_run {
+        mode: if options.dry_run {
             "dry_run".to_string()
         } else {
             "apply".to_string()
@@ -3609,10 +3699,18 @@ fn run_clean_output_with_executor(
         target_count: selected_paths.len(),
         estimated_freed_bytes,
         preview_paths: preview,
+        preview_list_path: preview_list_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         affected_items,
         freed_bytes,
+        whitelist_entries: whitelist.entries.len(),
+        whitelist_hits,
+        debug_log_path: debug_log_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         risk_summary,
-        warnings: runtime_warnings,
+        warnings,
         audit_events,
     })
 }
@@ -3789,6 +3887,10 @@ fn clean_json(out: CleanCommandOutput) -> Result<String, String> {
     to_json_envelope("system.clean", out)
 }
 
+fn clean_whitelist_json(out: CleanWhitelistOutput) -> Result<String, String> {
+    to_json_envelope("system.clean.whitelist", out)
+}
+
 fn purge_json(out: PurgeCommandOutput) -> Result<String, String> {
     to_json_envelope("system.purge", out)
 }
@@ -3826,6 +3928,18 @@ fn paths_text(header: &str, roots: &[String]) -> String {
     text
 }
 
+fn clean_whitelist_output() -> Result<CleanWhitelistOutput, String> {
+    let path = clean_whitelist_path()?;
+    let (created, defaults_written) = ensure_clean_whitelist_file(&path)?;
+    let config = load_clean_whitelist_config()?;
+    Ok(CleanWhitelistOutput {
+        path: path.to_string_lossy().to_string(),
+        entries: config.entries.len(),
+        created,
+        defaults_written,
+    })
+}
+
 fn clean_text(out: &CleanCommandOutput) -> String {
     let mut text = String::new();
     let _ = writeln!(
@@ -3848,9 +3962,35 @@ fn clean_text(out: &CleanCommandOutput) -> String {
     for preview_item in &out.preview_paths {
         let _ = writeln!(text, "selected: {preview_item}");
     }
+    if let Some(path) = &out.preview_list_path {
+        let _ = writeln!(text, "preview_list: {path}");
+    }
+    let _ = writeln!(
+        text,
+        "whitelist: entries={} filtered={}",
+        out.whitelist_entries, out.whitelist_hits
+    );
+    if let Some(path) = &out.debug_log_path {
+        let _ = writeln!(text, "debug_log: {path}");
+    }
     for warning in &out.warnings {
         let _ = writeln!(text, "warning: {warning}");
     }
+    text
+}
+
+fn clean_whitelist_text(out: &CleanWhitelistOutput) -> String {
+    let mut text = String::new();
+    let _ = writeln!(text, "clean whitelist");
+    let _ = writeln!(text, "path: {}", out.path);
+    let _ = writeln!(text, "entries: {}", out.entries);
+    if out.defaults_written {
+        let _ = writeln!(text, "defaults_written: true");
+    }
+    let _ = writeln!(
+        text,
+        "hint: edit this file to add absolute paths or prefix patterns ending with *",
+    );
     text
 }
 
@@ -4293,6 +4433,257 @@ fn resolve_clean_paths() -> Vec<String> {
         "linux" => vec![home.join(".cache").to_string_lossy().to_string()],
         _ => Vec::new(),
     }
+}
+
+fn clean_whitelist_path() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("PREEN_CLEAN_WHITELIST_PATH") {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(preen_state_dir()?.join(CLEAN_WHITELIST_FILE_NAME))
+}
+
+fn clean_preview_list_path() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("PREEN_CLEAN_PREVIEW_LIST_PATH") {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(preen_state_dir()?.join(CLEAN_PREVIEW_LIST_FILE_NAME))
+}
+
+fn clean_debug_log_path() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("PREEN_CLEAN_DEBUG_LOG_PATH") {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(preen_state_dir()?.join(CLEAN_DEBUG_LOG_FILE_NAME))
+}
+
+fn load_clean_whitelist_config() -> Result<CleanWhitelistConfig, String> {
+    let path = match clean_whitelist_path() {
+        Ok(path) => path,
+        Err(error) => {
+            return Ok(CleanWhitelistConfig {
+                path: PathBuf::new(),
+                entries: Vec::new(),
+                warnings: vec![format!("clean whitelist unavailable: {error}")],
+            });
+        }
+    };
+    let mut warnings = Vec::new();
+    if let Err(error) = ensure_clean_whitelist_file(&path) {
+        let _ = error;
+        return Ok(CleanWhitelistConfig {
+            path,
+            entries: Vec::new(),
+            warnings,
+        });
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            let _ = error;
+            return Ok(CleanWhitelistConfig {
+                path,
+                entries: Vec::new(),
+                warnings,
+            });
+        }
+    };
+    let mut entries = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+    for (idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(normalized) = normalize_clean_whitelist_pattern(trimmed) else {
+            warnings.push(format!(
+                "clean whitelist ignored invalid entry at line {}: {}",
+                idx + 1,
+                trimmed
+            ));
+            continue;
+        };
+        if seen.insert(normalized.clone()) {
+            entries.push(normalized);
+        }
+    }
+    Ok(CleanWhitelistConfig {
+        path,
+        entries,
+        warnings,
+    })
+}
+
+fn ensure_clean_whitelist_file(path: &Path) -> Result<(bool, bool), String> {
+    if path.exists() {
+        return Ok((false, false));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| err_with(CliErrorKind::Io, "clean whitelist dir create failed", e))?;
+    }
+    let defaults = default_clean_whitelist_entries();
+    let mut content = String::new();
+    content.push_str("# Preen clean whitelist\n");
+    content.push_str("# One absolute path per line. Use a trailing * for prefix match.\n");
+    for entry in &defaults {
+        let _ = writeln!(content, "{entry}");
+    }
+    fs::write(path, content)
+        .map_err(|e| err_with(CliErrorKind::Io, "clean whitelist write failed", e))?;
+    Ok((true, true))
+}
+
+fn default_clean_whitelist_entries() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        let home_value = home.to_string_lossy().to_string();
+        for raw in DEFAULT_CLEAN_WHITELIST_PATTERNS {
+            out.push(raw.replace('~', &home_value));
+        }
+    }
+    if let Ok(state_dir) = preen_state_dir() {
+        out.push(state_dir.join("plugins").to_string_lossy().to_string());
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn normalize_clean_whitelist_pattern(value: &str) -> Option<String> {
+    let expanded = expand_tilde(value.trim());
+    if expanded.is_empty() {
+        return None;
+    }
+    if expanded.contains('\0') {
+        return None;
+    }
+    let wildcard_count = expanded.matches('*').count();
+    if wildcard_count > 1 || (wildcard_count == 1 && !expanded.ends_with('*')) {
+        return None;
+    }
+    let mut candidate = expanded
+        .trim_end_matches('*')
+        .trim_end_matches('/')
+        .to_string();
+    if candidate.is_empty() {
+        return None;
+    }
+    if candidate.contains("/../") || candidate.ends_with("/..") || candidate.contains("/./") {
+        return None;
+    }
+    let as_path = PathBuf::from(&candidate);
+    if !as_path.is_absolute() {
+        return None;
+    }
+    if !is_safe_remove_target(&as_path) {
+        return None;
+    }
+    if as_path.exists()
+        && let Ok(canonical) = fs::canonicalize(&as_path)
+    {
+        candidate = canonical.to_string_lossy().to_string();
+    }
+    if wildcard_count == 1 {
+        candidate.push('*');
+    }
+    Some(candidate)
+}
+
+fn expand_tilde(value: &str) -> String {
+    if let Some(stripped) = value.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(stripped).to_string_lossy().to_string();
+    }
+    value.to_string()
+}
+
+fn apply_clean_whitelist(
+    selection: Vec<CleanSelectedItem>,
+    whitelist_entries: &[String],
+) -> (Vec<CleanSelectedItem>, usize) {
+    if whitelist_entries.is_empty() {
+        return (selection, 0);
+    }
+    let mut filtered = Vec::with_capacity(selection.len());
+    let mut hits = 0usize;
+    for item in selection {
+        if clean_whitelist_matches(&item.path, whitelist_entries) {
+            hits += 1;
+            continue;
+        }
+        filtered.push(item);
+    }
+    (filtered, hits)
+}
+
+fn clean_whitelist_matches(path: &str, whitelist_entries: &[String]) -> bool {
+    whitelist_entries.iter().any(|entry| {
+        if let Some(prefix) = entry.strip_suffix('*') {
+            return path.starts_with(prefix);
+        }
+        path == entry || path.starts_with(&format!("{entry}/"))
+    })
+}
+
+fn write_clean_preview_list(dry_run: bool, selected_paths: &[String]) -> Option<PathBuf> {
+    if !dry_run {
+        return None;
+    }
+    let path = clean_preview_list_path().ok()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let mut content = String::new();
+    for value in selected_paths {
+        let _ = writeln!(content, "{value}");
+    }
+    fs::write(&path, content).ok()?;
+    Some(path)
+}
+
+fn write_clean_debug(
+    enabled: bool,
+    roots: &[String],
+    scanned_items: usize,
+    target_count: usize,
+    whitelist_entries: usize,
+    whitelist_hits: usize,
+) -> Option<PathBuf> {
+    if !enabled {
+        return None;
+    }
+    let path = clean_debug_log_path().ok()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let timestamp = OffsetDateTime::now_utc().format(&Rfc3339).ok()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let _ = writeln!(
+        file,
+        "time={} scanned_items={} target_count={} whitelist_entries={} whitelist_hits={} roots={}",
+        timestamp,
+        scanned_items,
+        target_count,
+        whitelist_entries,
+        whitelist_hits,
+        roots.join(","),
+    );
+    Some(path)
+}
+
+fn warning_with_default(mut warnings: Vec<String>) -> Vec<String> {
+    if !warnings
+        .iter()
+        .any(|value| value == "no cleanable items selected")
+    {
+        warnings.push("no cleanable items selected".to_string());
+    }
+    warnings
 }
 
 fn resolve_purge_roots() -> Vec<String> {
@@ -8066,6 +8457,18 @@ pub fn clean_output_for_test(
         .map_err(|e| err_with(CliErrorKind::Internal, "clean output parse failed", e))
 }
 
+pub fn clean_whitelist_output_for_test() -> Result<serde_json::Value, String> {
+    let output = clean_whitelist_output()?;
+    let json = clean_whitelist_json(output)?;
+    serde_json::from_str(&json).map_err(|e| {
+        err_with(
+            CliErrorKind::Internal,
+            "clean whitelist output parse failed",
+            e,
+        )
+    })
+}
+
 pub fn clean_text_output_for_test(
     dry_run: bool,
     confirm: bool,
@@ -8082,7 +8485,13 @@ pub fn clean_text_output_for_test(
         }
         None => None,
     };
-    let output = run_clean_output_with_executor(dry_run, confirm, strategy_arg, &OsActionExecutor)?;
+    let options = CleanCommandOptions {
+        dry_run,
+        confirm,
+        strategy_arg,
+        debug: false,
+    };
+    let output = run_clean_output_with_executor(options, &OsActionExecutor)?;
     if output.target_count == 0 {
         return Ok("clean completed: no cleanable items selected\n".to_string());
     }
@@ -9073,8 +9482,12 @@ enum CliCommand {
         dry_run: bool,
         #[arg(long, conflicts_with = "dry_run")]
         confirm: bool,
-        #[arg(long, value_enum)]
+        #[arg(long, value_enum, conflicts_with = "whitelist")]
         strategy: Option<CleanStrategyArg>,
+        #[arg(long, conflicts_with_all = ["dry_run", "confirm", "strategy"])]
+        whitelist: bool,
+        #[arg(long)]
+        debug: bool,
         #[arg(long)]
         json: bool,
     },
