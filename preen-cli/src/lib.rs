@@ -66,7 +66,7 @@ const ERROR_CODE_TOKEN: &str = "preen_code:";
 const DEFAULT_REGISTRY_MAX_AGE_DAYS: i64 = 30;
 const DEFAULT_PURGE_SCAN_DEPTH: usize = 6;
 const DEFAULT_PURGE_PREVIEW_LIMIT: usize = 20;
-const DEFAULT_INSTALLER_SCAN_DEPTH: usize = 5;
+const DEFAULT_INSTALLER_SCAN_DEPTH: usize = 2;
 const DEFAULT_INSTALLER_PREVIEW_LIMIT: usize = 20;
 const DEFAULT_UNINSTALL_SCAN_DEPTH: usize = 4;
 const DEFAULT_UNINSTALL_PREVIEW_LIMIT: usize = 20;
@@ -85,8 +85,9 @@ const DEFAULT_PURGE_ARTIFACT_NAMES: [&str; 10] = [
     ".venv",
     "__pycache__",
 ];
-const DEFAULT_INSTALLER_EXTENSIONS: [&str; 12] = [
-    "dmg", "pkg", "zip", "tar", "tgz", "gz", "bz2", "xz", "deb", "rpm", "appimage", "iso",
+const DEFAULT_INSTALLER_EXTENSIONS: [&str; 14] = [
+    "dmg", "pkg", "mpkg", "iso", "xip", "zip", "tar", "tgz", "gz", "bz2", "xz", "deb", "rpm",
+    "appimage",
 ];
 const CLEAN_WHITELIST_FILE_NAME: &str = "clean-whitelist.txt";
 const CLEAN_PREVIEW_LIST_FILE_NAME: &str = "clean-list.txt";
@@ -94,6 +95,8 @@ const CLEAN_DEBUG_LOG_FILE_NAME: &str = "clean-debug.log";
 const PURGE_PATHS_FILE_NAME: &str = "purge-paths.txt";
 const PURGE_PREVIEW_LIST_FILE_NAME: &str = "purge-list.txt";
 const PURGE_DEBUG_LOG_FILE_NAME: &str = "purge-debug.log";
+const INSTALLER_PREVIEW_LIST_FILE_NAME: &str = "installer-list.txt";
+const INSTALLER_DEBUG_LOG_FILE_NAME: &str = "installer-debug.log";
 const DEFAULT_CLEAN_WHITELIST_PATTERNS: [&str; 2] = [
     "~/Library/Application Support/Preen/plugins",
     "~/.config/preen/plugins",
@@ -296,13 +299,25 @@ struct InstallerCommandOutput {
     mode: String,
     scanned_roots: usize,
     scanned_files: usize,
+    scan_depth: usize,
     target_count: usize,
     estimated_freed_bytes: u64,
     preview_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_list_path: Option<String>,
     affected_items: u64,
     freed_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug_log_path: Option<String>,
     warnings: Vec<String>,
     audit_events: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InstallerCommandOptions {
+    dry_run: bool,
+    confirm: bool,
+    debug: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -569,8 +584,9 @@ fn run_typed_with_verifier_and_clean_executor(
             dry_run,
             confirm,
             paths,
+            debug,
             json,
-        } => run_installer_with_executor(*dry_run, *confirm, *paths, *json, clean_executor)
+        } => run_installer_with_executor(*dry_run, *confirm, *paths, *debug, *json, clean_executor)
             .map_err(CliError::from),
         CliCommand::Uninstall {
             target,
@@ -1001,6 +1017,7 @@ fn run_installer_with_executor(
     dry_run: bool,
     confirm: bool,
     paths: bool,
+    debug: bool,
     json: bool,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<(), String> {
@@ -1014,7 +1031,12 @@ fn run_installer_with_executor(
         return Ok(());
     }
 
-    let output = run_installer_output_with_executor(dry_run, confirm, clean_executor)?;
+    let options = InstallerCommandOptions {
+        dry_run,
+        confirm,
+        debug,
+    };
+    let output = run_installer_output_with_executor(options, clean_executor)?;
     if json {
         println!("{}", installer_json(output.clone())?);
         return Ok(());
@@ -1026,11 +1048,10 @@ fn run_installer_with_executor(
 }
 
 fn run_installer_output_with_executor(
-    dry_run: bool,
-    confirm: bool,
+    options: InstallerCommandOptions,
     clean_executor: &dyn ActionExecutorPort,
 ) -> Result<InstallerCommandOutput, String> {
-    if !dry_run && !confirm {
+    if !options.dry_run && !options.confirm {
         return Err(err_code(
             CliErrorKind::Validation,
             "installer_confirmation_required",
@@ -1046,9 +1067,10 @@ fn run_installer_output_with_executor(
             "installer has no configured scan roots",
         ));
     }
+    let scan_depth = installer_scan_depth();
 
     let (selection, scanned_files, mut warnings) =
-        scan_installer_candidates(&roots, installer_scan_depth(), installer_min_size_bytes());
+        scan_installer_candidates(&roots, scan_depth, installer_min_size_bytes());
     let selected_paths = selection
         .iter()
         .map(|item| item.path.clone())
@@ -1056,22 +1078,37 @@ fn run_installer_output_with_executor(
     let estimated_freed_bytes: u64 = selection.iter().map(|item| item.size).sum();
     enforce_installer_scope(&selected_paths, &roots)?;
     let preview_paths = clean_preview_paths(&selected_paths, installer_preview_limit());
+    let preview_list_path = write_installer_preview_list(options.dry_run, &selected_paths);
+    let debug_log_path = write_installer_debug(
+        options.debug,
+        &roots,
+        scan_depth,
+        scanned_files,
+        selected_paths.len(),
+    );
 
     if selected_paths.is_empty() {
         warnings.push("no installer files selected".to_string());
         return Ok(InstallerCommandOutput {
-            mode: if dry_run {
+            mode: if options.dry_run {
                 "dry_run".to_string()
             } else {
                 "apply".to_string()
             },
             scanned_roots: roots.len(),
             scanned_files,
+            scan_depth,
             target_count: 0,
             estimated_freed_bytes: 0,
             preview_paths: Vec::new(),
+            preview_list_path: preview_list_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             affected_items: 0,
             freed_bytes: 0,
+            debug_log_path: debug_log_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             warnings,
             audit_events: 0,
         });
@@ -1135,26 +1172,33 @@ fn run_installer_output_with_executor(
             &runtime,
             &manifest,
             &rule,
-            dry_run,
-            confirm,
+            options.dry_run,
+            options.confirm,
             clean_executor,
             map_installer_runtime_error,
         )?;
     warnings.extend(runtime_warnings);
 
     Ok(InstallerCommandOutput {
-        mode: if dry_run {
+        mode: if options.dry_run {
             "dry_run".to_string()
         } else {
             "apply".to_string()
         },
         scanned_roots: roots.len(),
         scanned_files,
+        scan_depth,
         target_count: selected_paths.len(),
         estimated_freed_bytes,
         preview_paths,
+        preview_list_path: preview_list_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         affected_items,
         freed_bytes,
+        debug_log_path: debug_log_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         warnings,
         audit_events,
     })
@@ -4100,6 +4144,7 @@ fn installer_text(out: &InstallerCommandOutput) -> String {
     let _ = writeln!(text, "Installer ({mode})");
     let _ = writeln!(text, "Scanned roots: {}", out.scanned_roots);
     let _ = writeln!(text, "Scanned files: {}", out.scanned_files);
+    let _ = writeln!(text, "Scan depth: {}", out.scan_depth);
     let _ = writeln!(text, "Targets: {}", out.target_count);
     let _ = writeln!(
         text,
@@ -4112,8 +4157,14 @@ fn installer_text(out: &InstallerCommandOutput) -> String {
             let _ = writeln!(text, "- {path}");
         }
     }
+    if let Some(path) = &out.preview_list_path {
+        let _ = writeln!(text, "Preview list: {path}");
+    }
     let _ = writeln!(text, "Affected items: {}", out.affected_items);
     let _ = writeln!(text, "Freed bytes: {}", format_bytes(out.freed_bytes));
+    if let Some(path) = &out.debug_log_path {
+        let _ = writeln!(text, "Debug log: {path}");
+    }
     if !out.warnings.is_empty() {
         let _ = writeln!(text, "Warnings:");
         for warning in &out.warnings {
@@ -4545,6 +4596,24 @@ fn purge_debug_log_path() -> Option<PathBuf> {
         .map(|dir| dir.join(PURGE_DEBUG_LOG_FILE_NAME))
 }
 
+fn installer_preview_list_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PREEN_INSTALLER_PREVIEW_LIST_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    preen_state_dir()
+        .ok()
+        .map(|dir| dir.join(INSTALLER_PREVIEW_LIST_FILE_NAME))
+}
+
+fn installer_debug_log_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PREEN_INSTALLER_DEBUG_LOG_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    preen_state_dir()
+        .ok()
+        .map(|dir| dir.join(INSTALLER_DEBUG_LOG_FILE_NAME))
+}
+
 fn load_clean_whitelist_config() -> Result<CleanWhitelistConfig, String> {
     let path = match clean_whitelist_path() {
         Ok(path) => path,
@@ -4815,6 +4884,54 @@ fn write_purge_debug(
     Some(path)
 }
 
+fn write_installer_preview_list(dry_run: bool, selected_paths: &[String]) -> Option<PathBuf> {
+    if !dry_run {
+        return None;
+    }
+    let path = installer_preview_list_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let mut content = String::new();
+    for value in selected_paths {
+        let _ = writeln!(content, "{value}");
+    }
+    fs::write(&path, content).ok()?;
+    Some(path)
+}
+
+fn write_installer_debug(
+    enabled: bool,
+    roots: &[String],
+    scan_depth: usize,
+    scanned_files: usize,
+    target_count: usize,
+) -> Option<PathBuf> {
+    if !enabled {
+        return None;
+    }
+    let path = installer_debug_log_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let timestamp = OffsetDateTime::now_utc().format(&Rfc3339).ok()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let _ = writeln!(
+        file,
+        "time={} scan_depth={} scanned_files={} target_count={} roots={}",
+        timestamp,
+        scan_depth,
+        scanned_files,
+        target_count,
+        roots.join(","),
+    );
+    Some(path)
+}
+
 fn warning_with_default(mut warnings: Vec<String>) -> Vec<String> {
     if !warnings
         .iter()
@@ -4881,10 +4998,36 @@ fn resolve_installer_roots() -> Vec<String> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
-    vec![
-        home.join("Downloads").to_string_lossy().to_string(),
-        home.join("Desktop").to_string_lossy().to_string(),
-    ]
+    let mut roots = vec![
+        home.join("Downloads"),
+        home.join("Desktop"),
+        home.join("Documents"),
+        home.join("Public"),
+        home.join("Library").join("Downloads"),
+        home.join("Library")
+            .join("Mobile Documents")
+            .join("com~apple~CloudDocs")
+            .join("Downloads"),
+        home.join("Library")
+            .join("Containers")
+            .join("com.apple.mail")
+            .join("Data")
+            .join("Library")
+            .join("Mail Downloads"),
+        home.join("Library")
+            .join("Application Support")
+            .join("Telegram Desktop"),
+        home.join("Downloads").join("Telegram Desktop"),
+        home.join("Library").join("Caches").join("Homebrew"),
+    ];
+    if cfg!(target_os = "macos") {
+        roots.push(PathBuf::from("/Users/Shared"));
+        roots.push(PathBuf::from("/Users/Shared/Downloads"));
+    }
+    roots
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
 }
 
 fn resolve_uninstall_roots() -> Vec<String> {
@@ -5314,9 +5457,53 @@ fn is_installer_file(path: &Path) -> bool {
         return true;
     }
     if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-        return DEFAULT_INSTALLER_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str());
+        let ext = ext.to_ascii_lowercase();
+        if ext == "zip" {
+            return zip_contains_installer_payload(path);
+        }
+        return DEFAULT_INSTALLER_EXTENSIONS.contains(&ext.as_str());
     }
     false
+}
+
+fn zip_contains_installer_payload(path: &Path) -> bool {
+    const MAX_ZIP_ENTRIES: usize = 50;
+    if let Some(listing) = run_zip_listing(path, &["zipinfo", "-1"]) {
+        return zip_listing_has_installer_payload(&listing, MAX_ZIP_ENTRIES);
+    }
+    if let Some(listing) = run_zip_listing(path, &["unzip", "-Z", "-1"]) {
+        return zip_listing_has_installer_payload(&listing, MAX_ZIP_ENTRIES);
+    }
+    // Keep existing behavior when listing tools are unavailable.
+    true
+}
+
+fn run_zip_listing(path: &Path, cmd: &[&str]) -> Option<String> {
+    let (program, args) = cmd.split_first()?;
+    let out = ProcessCommand::new(program)
+        .args(args)
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+fn zip_listing_has_installer_payload(listing: &str, max_entries: usize) -> bool {
+    listing
+        .lines()
+        .take(max_entries)
+        .map(|line| line.trim().to_ascii_lowercase())
+        .any(|entry| {
+            entry.ends_with(".app")
+                || entry.contains(".app/")
+                || entry.ends_with(".pkg")
+                || entry.contains(".pkg/")
+                || entry.ends_with(".dmg")
+                || entry.ends_with(".xip")
+        })
 }
 
 fn scan_uninstall_candidates(
@@ -8731,15 +8918,41 @@ pub fn installer_output_for_test(
     dry_run: bool,
     confirm: bool,
 ) -> Result<serde_json::Value, String> {
-    let output = run_installer_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
+    let options = InstallerCommandOptions {
+        dry_run,
+        confirm,
+        debug: false,
+    };
+    let output = run_installer_output_with_executor(options, &OsActionExecutor)?;
     let json = installer_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "installer output parse failed", e))
 }
 
 pub fn installer_text_output_for_test(dry_run: bool, confirm: bool) -> Result<String, String> {
-    let output = run_installer_output_with_executor(dry_run, confirm, &OsActionExecutor)?;
+    let options = InstallerCommandOptions {
+        dry_run,
+        confirm,
+        debug: false,
+    };
+    let output = run_installer_output_with_executor(options, &OsActionExecutor)?;
     Ok(installer_text(&output))
+}
+
+pub fn installer_output_with_debug_for_test(
+    dry_run: bool,
+    confirm: bool,
+    debug: bool,
+) -> Result<serde_json::Value, String> {
+    let options = InstallerCommandOptions {
+        dry_run,
+        confirm,
+        debug,
+    };
+    let output = run_installer_output_with_executor(options, &OsActionExecutor)?;
+    let json = installer_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "installer output parse failed", e))
 }
 
 pub fn installer_paths_json_for_test() -> Result<serde_json::Value, String> {
@@ -9745,6 +9958,8 @@ enum CliCommand {
         confirm: bool,
         #[arg(long, conflicts_with_all = ["dry_run", "confirm"])]
         paths: bool,
+        #[arg(long)]
+        debug: bool,
         #[arg(long)]
         json: bool,
     },

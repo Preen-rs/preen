@@ -17,19 +17,20 @@ use preen_cli::{
     enforce_clean_scope_for_test, enforce_installer_scope_for_test,
     enforce_uninstall_scope_for_test, error_json_for_test, format_bytes_for_test,
     hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
-    installer_output_for_test, installer_paths_json_for_test, installer_paths_text_for_test,
-    installer_runtime_error_detail_code_for_test, installer_text_output_for_test,
-    is_git_filter_unsupported_error_for_test, is_system_detail_code_for_test,
-    list_plugins_with_options_for_test, load_lockfile_at, map_clone_error_detail_code_for_test,
-    map_error_with_detail_code_for_test, optimize_output_for_test,
-    optimize_output_with_executor_for_test, optimize_runtime_error_detail_code_for_test,
-    optimize_text_output_for_test, parse_install_spec, parse_plugin_spec,
-    plugin_info_json_for_test, plugin_install_json_for_test, plugin_install_text_for_test,
-    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
-    plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
-    plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
-    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
-    plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
+    installer_output_for_test, installer_output_with_debug_for_test, installer_paths_json_for_test,
+    installer_paths_text_for_test, installer_runtime_error_detail_code_for_test,
+    installer_text_output_for_test, is_git_filter_unsupported_error_for_test,
+    is_system_detail_code_for_test, list_plugins_with_options_for_test, load_lockfile_at,
+    map_clone_error_detail_code_for_test, map_error_with_detail_code_for_test,
+    optimize_output_for_test, optimize_output_with_executor_for_test,
+    optimize_runtime_error_detail_code_for_test, optimize_text_output_for_test, parse_install_spec,
+    parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
+    plugin_install_text_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
+    plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
+    plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
+    plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
+    plugin_update_json_for_test, plugin_update_text_for_test, plugin_verify_for_test,
+    plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
     purge_output_with_debug_for_test, purge_paths_json_for_test, purge_paths_text_for_test,
@@ -1675,6 +1676,7 @@ fn system_command_text_contract_matrix_has_required_markers() {
     assert!(installer.contains("Installer (dry-run)"));
     assert!(installer.contains("Scanned roots:"));
     assert!(installer.contains("Scanned files:"));
+    assert!(installer.contains("Scan depth:"));
     assert!(installer.contains("Targets:"));
     assert!(installer.contains("Audit events:"));
 
@@ -2810,20 +2812,33 @@ fn installer_dry_run_json_happy_path() {
     let _guard = ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let installer = temp.path().join("Setup.pkg");
+    let preview_list = temp.path().join("installer-list.txt");
     fs::write(&installer, vec![0u8; 11 * 1024 * 1024]).unwrap();
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::set_var("PREEN_INSTALLER_PATHS", temp.path().as_os_str());
+        std::env::set_var(
+            "PREEN_INSTALLER_PREVIEW_LIST_PATH",
+            preview_list.as_os_str(),
+        );
     }
 
     let output = installer_output_for_test(true, false).unwrap();
     assert_eq!(output["kind"].as_str(), Some("system.installer"));
     assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
+    assert_eq!(output["data"]["scan_depth"].as_u64(), Some(2));
     assert!(output["data"]["target_count"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(
+        output["data"]["preview_list_path"].as_str(),
+        Some(preview_list.to_string_lossy().as_ref())
+    );
+    let preview_text = fs::read_to_string(preview_list).unwrap();
+    assert!(preview_text.contains("Setup.pkg"));
 
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::remove_var("PREEN_INSTALLER_PATHS");
+        std::env::remove_var("PREEN_INSTALLER_PREVIEW_LIST_PATH");
     }
 }
 
@@ -2847,6 +2862,35 @@ fn installer_apply_confirm_deletes_targets() {
     // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         std::env::remove_var("PREEN_INSTALLER_PATHS");
+    }
+}
+
+#[test]
+fn installer_debug_writes_log_when_enabled() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let installer = temp.path().join("archive.pkg");
+    let debug_log = temp.path().join("installer-debug.log");
+    fs::write(&installer, vec![0u8; 11 * 1024 * 1024]).unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_INSTALLER_PATHS", temp.path().as_os_str());
+        std::env::set_var("PREEN_INSTALLER_DEBUG_LOG_PATH", debug_log.as_os_str());
+    }
+
+    let output = installer_output_with_debug_for_test(true, false, true).unwrap();
+    assert_eq!(
+        output["data"]["debug_log_path"].as_str(),
+        Some(debug_log.to_string_lossy().as_ref())
+    );
+    let log = fs::read_to_string(debug_log).unwrap();
+    assert!(log.contains("scan_depth=2"));
+    assert!(log.contains("target_count=1"));
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_INSTALLER_PATHS");
+        std::env::remove_var("PREEN_INSTALLER_DEBUG_LOG_PATH");
     }
 }
 
@@ -3215,6 +3259,7 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "purge", "--confirm", "--json"],
         vec!["preen", "purge", "--paths", "--json"],
         vec!["preen", "installer", "--dry-run", "--json"],
+        vec!["preen", "installer", "--dry-run", "--debug", "--json"],
         vec!["preen", "installer", "--confirm", "--json"],
         vec!["preen", "installer", "--paths", "--json"],
         vec!["preen", "check", "--fix", "--json"],
@@ -3238,6 +3283,7 @@ fn top_level_system_commands_short_flags_parse() {
         vec!["preen", "purge", "-n"],
         vec!["preen", "purge", "--debug"],
         vec!["preen", "installer", "-n"],
+        vec!["preen", "installer", "--debug"],
         vec!["preen", "touchid", "-n"],
         vec!["preen", "completion", "-n"],
         vec!["preen", "update", "-f"],
@@ -3432,6 +3478,7 @@ fn system_option_matrix_accepts_valid_flag_combinations() {
         vec!["preen", "purge", "--confirm"],
         vec!["preen", "purge", "--paths"],
         vec!["preen", "installer", "--dry-run"],
+        vec!["preen", "installer", "--dry-run", "--debug"],
         vec!["preen", "installer", "--confirm"],
         vec!["preen", "installer", "--paths"],
         vec!["preen", "uninstall", "Demo.app", "--dry-run"],
