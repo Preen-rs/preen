@@ -102,6 +102,7 @@ const UNINSTALL_DEBUG_LOG_FILE_NAME: &str = "uninstall-debug.log";
 const OPTIMIZE_WHITELIST_FILE_NAME: &str = "optimize-whitelist.txt";
 const OPTIMIZE_DEBUG_LOG_FILE_NAME: &str = "optimize-debug.log";
 const CHECK_DEBUG_LOG_FILE_NAME: &str = "check-debug.log";
+const ANALYZE_DEBUG_LOG_FILE_NAME: &str = "analyze-debug.log";
 const DEFAULT_CLEAN_WHITELIST_PATTERNS: [&str; 2] = [
     "~/Library/Application Support/Preen/plugins",
     "~/.config/preen/plugins",
@@ -437,6 +438,7 @@ struct AnalyzeOutput {
     root: String,
     path: String,
     max_depth: usize,
+    top_entries_limit: usize,
     scanned_entries: usize,
     total_files: u64,
     total_dirs: u64,
@@ -445,6 +447,8 @@ struct AnalyzeOutput {
     truncated_dirs: u64,
     entries: Vec<AnalyzeEntryOutput>,
     top_entries: Vec<AnalyzeEntryOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug_log_path: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -668,8 +672,9 @@ fn run_typed_with_verifier_and_clean_executor(
         CliCommand::Analyze {
             path,
             max_depth,
+            debug,
             json,
-        } => run_analyze(path.clone(), *max_depth, *json).map_err(CliError::from),
+        } => run_analyze(path.clone(), *max_depth, *debug, *json).map_err(CliError::from),
         CliCommand::Status { json } => run_status(*json).map_err(CliError::from),
         CliCommand::Check { fix, debug, json } => {
             run_check(*fix, *debug, *json).map_err(CliError::from)
@@ -1930,8 +1935,13 @@ fn print_check_output(out: &SystemCheckOutput) {
     print!("{}", check_text(out));
 }
 
-fn run_analyze(path: Option<PathBuf>, max_depth: Option<usize>, json: bool) -> Result<(), String> {
-    let output = run_analyze_output(path, max_depth)?;
+fn run_analyze(
+    path: Option<PathBuf>,
+    max_depth: Option<usize>,
+    debug: bool,
+    json: bool,
+) -> Result<(), String> {
+    let output = run_analyze_output(path, max_depth, debug)?;
     if json {
         println!("{}", analyze_json(output.clone())?);
         return Ok(());
@@ -1943,6 +1953,7 @@ fn run_analyze(path: Option<PathBuf>, max_depth: Option<usize>, json: bool) -> R
 fn run_analyze_output(
     path: Option<PathBuf>,
     max_depth_override: Option<usize>,
+    debug: bool,
 ) -> Result<AnalyzeOutput, String> {
     let mut warnings = Vec::new();
     let root = normalize_analyze_root(resolve_analyze_root(path)?)?;
@@ -1962,6 +1973,7 @@ fn run_analyze_output(
     }
 
     let max_depth = analyze_max_depth(max_depth_override);
+    let top_entries_limit = analyze_top_entries();
     let mut scanned_entries = 0_usize;
     let mut top_entries = Vec::new();
     let mut aggregate_stats = AnalyzeStats {
@@ -2051,13 +2063,26 @@ fn run_analyze_output(
             .cmp(&left.size_bytes)
             .then_with(|| left.path.cmp(&right.path))
     });
-    top_entries.truncate(analyze_top_entries());
+    top_entries.truncate(top_entries_limit);
     let warnings = dedupe_warnings_with_limit(warnings, analyze_warning_limit());
+    let debug_log_path = write_analyze_debug(
+        debug,
+        &root,
+        max_depth,
+        top_entries_limit,
+        scanned_entries,
+        aggregate_stats.files,
+        aggregate_stats.dirs,
+        aggregate_stats.size_bytes,
+        aggregate_stats.truncated_dirs,
+        warnings.len(),
+    );
     let root_display = root.display().to_string();
     Ok(AnalyzeOutput {
         root: root_display.clone(),
         path: root_display,
         max_depth,
+        top_entries_limit,
         scanned_entries,
         total_files: aggregate_stats.files,
         total_dirs: aggregate_stats.dirs,
@@ -2066,6 +2091,9 @@ fn run_analyze_output(
         truncated_dirs: aggregate_stats.truncated_dirs,
         entries: top_entries.clone(),
         top_entries,
+        debug_log_path: debug_log_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         warnings,
     })
 }
@@ -4504,6 +4532,7 @@ fn analyze_text(out: &AnalyzeOutput) -> String {
     let _ = writeln!(text, "summary: kind=system_analyze");
     let _ = writeln!(text, "root: {}", out.root);
     let _ = writeln!(text, "max_depth: {}", out.max_depth);
+    let _ = writeln!(text, "top_entries_limit: {}", out.top_entries_limit);
     let _ = writeln!(text, "scanned_entries: {}", out.scanned_entries);
     let _ = writeln!(text, "total_files: {}", out.total_files);
     let _ = writeln!(text, "total_dirs: {}", out.total_dirs);
@@ -4519,6 +4548,9 @@ fn analyze_text(out: &AnalyzeOutput) -> String {
             format_bytes(entry.size_bytes),
             entry.path
         );
+    }
+    if let Some(path) = &out.debug_log_path {
+        let _ = writeln!(text, "debug_log: {path}");
     }
     if !out.warnings.is_empty() {
         let _ = writeln!(text, "warnings: count={}", out.warnings.len());
@@ -4867,6 +4899,15 @@ fn check_debug_log_path() -> Option<PathBuf> {
     preen_state_dir()
         .ok()
         .map(|dir| dir.join(CHECK_DEBUG_LOG_FILE_NAME))
+}
+
+fn analyze_debug_log_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PREEN_ANALYZE_DEBUG_LOG_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    preen_state_dir()
+        .ok()
+        .map(|dir| dir.join(ANALYZE_DEBUG_LOG_FILE_NAME))
 }
 
 fn load_clean_whitelist_config() -> Result<CleanWhitelistConfig, String> {
@@ -5360,6 +5401,49 @@ fn write_check_debug(
         file,
         "time={} mode={} checks={} passed={} overall_passed={} fixes_applied={}",
         timestamp, mode, check_count, passed_count, overall_passed, fixes_applied
+    );
+    Some(path)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_analyze_debug(
+    enabled: bool,
+    root: &Path,
+    max_depth: usize,
+    top_entries_limit: usize,
+    scanned_entries: usize,
+    total_files: u64,
+    total_dirs: u64,
+    total_size_bytes: u64,
+    truncated_dirs: u64,
+    warnings_count: usize,
+) -> Option<PathBuf> {
+    if !enabled {
+        return None;
+    }
+    let path = analyze_debug_log_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let timestamp = OffsetDateTime::now_utc().format(&Rfc3339).ok()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let _ = writeln!(
+        file,
+        "time={} root={} max_depth={} top_entries_limit={} scanned_entries={} total_files={} total_dirs={} total_size_bytes={} truncated_dirs={} warnings={}",
+        timestamp,
+        root.display(),
+        max_depth,
+        top_entries_limit,
+        scanned_entries,
+        total_files,
+        total_dirs,
+        total_size_bytes,
+        truncated_dirs,
+        warnings_count
     );
     Some(path)
 }
@@ -9566,7 +9650,7 @@ pub fn check_output_with_debug_for_test(
 }
 
 pub fn analyze_output_for_test(path: Option<&Path>) -> Result<serde_json::Value, String> {
-    let output = run_analyze_output(path.map(|value| value.to_path_buf()), None)?;
+    let output = run_analyze_output(path.map(|value| value.to_path_buf()), None, false)?;
     let json = analyze_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "analyze output parse failed", e))
@@ -9576,15 +9660,26 @@ pub fn analyze_output_with_depth_for_test(
     path: Option<&Path>,
     max_depth: Option<usize>,
 ) -> Result<serde_json::Value, String> {
-    let output = run_analyze_output(path.map(|value| value.to_path_buf()), max_depth)?;
+    let output = run_analyze_output(path.map(|value| value.to_path_buf()), max_depth, false)?;
     let json = analyze_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "analyze output parse failed", e))
 }
 
 pub fn analyze_text_output_for_test(path: Option<&Path>) -> Result<String, String> {
-    let output = run_analyze_output(path.map(|value| value.to_path_buf()), None)?;
+    let output = run_analyze_output(path.map(|value| value.to_path_buf()), None, false)?;
     Ok(analyze_text(&output))
+}
+
+pub fn analyze_output_with_debug_for_test(
+    path: Option<&Path>,
+    max_depth: Option<usize>,
+    debug: bool,
+) -> Result<serde_json::Value, String> {
+    let output = run_analyze_output(path.map(|value| value.to_path_buf()), max_depth, debug)?;
+    let json = analyze_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "analyze output parse failed", e))
 }
 
 pub fn status_output_for_test() -> Result<serde_json::Value, String> {
@@ -10459,6 +10554,8 @@ enum CliCommand {
         path: Option<PathBuf>,
         #[arg(long)]
         max_depth: Option<usize>,
+        #[arg(long)]
+        debug: bool,
         #[arg(long)]
         json: bool,
     },

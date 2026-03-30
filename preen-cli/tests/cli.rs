@@ -8,17 +8,17 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use clap::Parser;
 use preen_cli::{
-    Cli, CliError, CliErrorKind, analyze_output_for_test, analyze_output_with_depth_for_test,
-    analyze_text_output_for_test, check_output_for_test, check_output_with_debug_for_test,
-    check_registry_freshness_for_test, check_text_output_for_test, clean_output_for_test,
-    clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test,
-    clean_text_output_for_test, clean_whitelist_output_for_test, cli_label_for_test,
-    clone_rule_pack_for_test, completion_output_for_test, completion_text_output_for_test,
-    default_signature_source_for_test, enforce_clean_scope_for_test,
-    enforce_installer_scope_for_test, enforce_uninstall_scope_for_test, error_json_for_test,
-    format_bytes_for_test, hint_for_detail_code_for_test, hint_message_for_test,
-    install_plugin_in_dir_for_test, installer_output_for_test,
-    installer_output_with_debug_for_test, installer_paths_json_for_test,
+    Cli, CliError, CliErrorKind, analyze_output_for_test, analyze_output_with_debug_for_test,
+    analyze_output_with_depth_for_test, analyze_text_output_for_test, check_output_for_test,
+    check_output_with_debug_for_test, check_registry_freshness_for_test,
+    check_text_output_for_test, clean_output_for_test, clean_runtime_error_detail_code_for_test,
+    clean_selection_summary_for_test, clean_text_output_for_test, clean_whitelist_output_for_test,
+    cli_label_for_test, clone_rule_pack_for_test, completion_output_for_test,
+    completion_text_output_for_test, default_signature_source_for_test,
+    enforce_clean_scope_for_test, enforce_installer_scope_for_test,
+    enforce_uninstall_scope_for_test, error_json_for_test, format_bytes_for_test,
+    hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
+    installer_output_for_test, installer_output_with_debug_for_test, installer_paths_json_for_test,
     installer_paths_text_for_test, installer_runtime_error_detail_code_for_test,
     installer_text_output_for_test, is_git_filter_unsupported_error_for_test,
     is_system_detail_code_for_test, list_plugins_with_options_for_test, load_lockfile_at,
@@ -1811,6 +1811,7 @@ fn system_support_commands_json_contract_matrix_has_required_fields() {
             "root",
             "path",
             "max_depth",
+            "top_entries_limit",
             "scanned_entries",
             "total_files",
             "total_dirs",
@@ -1963,6 +1964,7 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
     let analyze = analyze_text_output_for_test(Some(analyze_root.path())).unwrap();
     assert!(analyze.contains("summary: kind=system_analyze"));
     assert!(analyze.contains("root:"));
+    assert!(analyze.contains("top_entries_limit:"));
     assert!(analyze.contains("total_files:"));
     assert!(analyze.contains("entries: label=Top entries"));
 
@@ -2191,6 +2193,7 @@ fn analyze_json_happy_path_with_explicit_root() {
         output["data"]["root"].as_str()
     );
     assert!(output["data"]["max_depth"].as_u64().is_some());
+    assert!(output["data"]["top_entries_limit"].as_u64().unwrap_or(0) >= 1);
     assert!(output["data"]["total_files"].as_u64().unwrap_or(0) >= 2);
     assert_eq!(
         output["data"]["total_size"].as_u64(),
@@ -2199,6 +2202,35 @@ fn analyze_json_happy_path_with_explicit_root() {
     assert!(output["data"]["total_size_bytes"].as_u64().unwrap_or(0) >= 640);
     assert!(output["data"]["entries"].as_array().is_some());
     assert!(output["data"]["top_entries"].as_array().is_some());
+}
+
+#[test]
+fn analyze_debug_mode_writes_debug_log_and_reports_path() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("dir-a")).unwrap();
+    fs::write(root.join("dir-a").join("nested.bin"), vec![0_u8; 64]).unwrap();
+    let debug_path = root.join("analyze-debug-test.log");
+
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_ANALYZE_DEBUG_LOG_PATH", &debug_path);
+    }
+    let output = analyze_output_with_debug_for_test(Some(root), Some(2), true).unwrap();
+    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_ANALYZE_DEBUG_LOG_PATH");
+    }
+
+    assert_eq!(
+        output["data"]["debug_log_path"].as_str(),
+        Some(debug_path.to_string_lossy().as_ref())
+    );
+    let debug_content = fs::read_to_string(&debug_path).unwrap();
+    assert!(debug_content.contains("max_depth=2"));
+    assert!(debug_content.contains("top_entries_limit="));
+    assert!(debug_content.contains("warnings="));
 }
 
 #[test]
@@ -3382,6 +3414,7 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "optimize", "--confirm", "--json"],
         vec!["preen", "optimize", "--whitelist", "--json"],
         vec!["preen", "analyze", "/tmp", "--json"],
+        vec!["preen", "analyze", "/tmp", "--debug", "--json"],
         vec!["preen", "analyze", "/tmp", "--max-depth", "3", "--json"],
         vec!["preen", "status", "--json"],
         vec!["preen", "purge", "--dry-run", "--json"],
@@ -3414,6 +3447,7 @@ fn top_level_system_commands_short_flags_parse() {
         vec!["preen", "optimize", "-n"],
         vec!["preen", "optimize", "--debug"],
         vec!["preen", "optimize", "--whitelist"],
+        vec!["preen", "analyze", "/tmp", "--debug"],
         vec!["preen", "purge", "-n"],
         vec!["preen", "purge", "--debug"],
         vec!["preen", "installer", "-n"],
@@ -3636,6 +3670,7 @@ fn system_option_matrix_accepts_valid_flag_combinations() {
         vec!["preen", "uninstall", "Demo.app", "--confirm"],
         vec!["preen", "uninstall", "--paths"],
         vec!["preen", "analyze", "/tmp", "--max-depth", "2"],
+        vec!["preen", "analyze", "/tmp", "--debug"],
         vec!["preen", "status"],
         vec!["preen", "check", "--fix"],
         vec!["preen", "check", "--debug"],
