@@ -2008,6 +2008,7 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
             std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
         }
         assert!(update.contains("summary: kind=system_update"));
+        assert!(update.contains("mode: plan"));
         assert!(update.contains("channel=stable"));
         assert!(update.contains("suggested_command:"));
         assert!(update.contains("checks: label=Checks"));
@@ -2030,6 +2031,7 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
             std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
         }
         assert!(remove.contains("summary: kind=system_remove"));
+        assert!(remove.contains("mode: dry_run"));
         assert!(remove.contains("executable:"));
         assert!(remove.contains("detected_path:"));
         assert!(remove.contains("checks: label=Checks"));

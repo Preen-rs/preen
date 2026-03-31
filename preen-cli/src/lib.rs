@@ -4976,6 +4976,7 @@ fn update_text(out: &UpdateOutput) -> String {
         "summary: kind=system_update mode={} channel={} force={} executed={}",
         out.mode, out.channel, out.force, out.executed
     );
+    let _ = writeln!(text, "mode: {}", out.mode);
     let _ = writeln!(text, "current_version: {}", out.current_version);
     if let Some(version) = &out.latest_version {
         let _ = writeln!(text, "latest_version: {version}");
@@ -5012,6 +5013,7 @@ fn remove_text(out: &RemoveOutput) -> String {
         out.removed_paths.len(),
         out.skipped_paths.len()
     );
+    let _ = writeln!(text, "mode: {}", out.mode);
     let _ = writeln!(text, "executable: {}", out.executable);
     for path in &out.detected_paths {
         let _ = writeln!(text, "detected_path: {path}");
