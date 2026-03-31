@@ -4935,6 +4935,8 @@ fn touchid_text(out: &TouchIdOutput) -> String {
         "summary: kind=system_touchid action={} mode={} supported_os={} configured={} would_change={} applied={}",
         out.action, out.mode, out.supported_os, out.configured, out.would_change, out.applied
     );
+    let _ = writeln!(text, "mode: {}", out.mode);
+    let _ = writeln!(text, "action: {}", out.action);
     if !out.warnings.is_empty() {
         let _ = writeln!(text, "warnings: count={}", out.warnings.len());
         for warning in &out.warnings {
@@ -4954,6 +4956,8 @@ fn completion_text(out: &CompletionOutput) -> String {
         "summary: kind=system_completion mode={} shell={} installed={} changed={}",
         out.mode, out.shell, out.installed, out.changed
     );
+    let _ = writeln!(text, "mode: {}", out.mode);
+    let _ = writeln!(text, "shell: {}", out.shell);
     if let Some(path) = &out.config_path {
         let _ = writeln!(text, "config_path: {path}");
     }

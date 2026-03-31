@@ -1980,6 +1980,8 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
 
         let touchid = touchid_text_output_for_test(Some("status"), true).unwrap();
         assert!(touchid.contains("summary: kind=system_touchid"));
+        assert!(touchid.contains("mode: dry_run"));
+        assert!(touchid.contains("action: status"));
         assert!(touchid.contains("action=status"));
         assert!(touchid.contains("mode=dry_run"));
 
@@ -1993,6 +1995,8 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
             std::env::remove_var("SHELL");
         }
         assert!(completion.contains("summary: kind=system_completion"));
+        assert!(completion.contains("mode: dry_run"));
+        assert!(completion.contains("shell: zsh"));
         assert!(completion.contains("mode=dry_run"));
         assert!(completion.contains("config_path:"));
 
