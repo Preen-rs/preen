@@ -552,6 +552,7 @@ struct RemoveOutput {
     detected_paths: Vec<String>,
     removed_paths: Vec<String>,
     skipped_paths: Vec<String>,
+    checks: Vec<SystemStatusCheckOutput>,
     manual_steps: Vec<String>,
     warnings: Vec<String>,
 }
@@ -3899,6 +3900,43 @@ fn run_remove_output(dry_run: bool, confirm: bool) -> Result<RemoveOutput, Strin
 
     let install_source = detect_install_source();
     let manual_steps = remove_manual_steps(&install_source, executable_display.as_deref());
+    let mut checks = Vec::new();
+    checks.push(SystemStatusCheckOutput {
+        id: "remove_source_detected".to_string(),
+        label: "Install source detected".to_string(),
+        severity: "warning".to_string(),
+        passed: install_source != "unknown",
+        message: format!("install source: {install_source}"),
+    });
+    checks.push(SystemStatusCheckOutput {
+        id: "remove_paths_detected".to_string(),
+        label: "Managed paths detected".to_string(),
+        severity: "warning".to_string(),
+        passed: !detected_paths.is_empty(),
+        message: format!("detected managed paths: {}", detected_paths.len()),
+    });
+    checks.push(SystemStatusCheckOutput {
+        id: "remove_manual_steps_available".to_string(),
+        label: "Manual uninstall steps available".to_string(),
+        severity: "critical".to_string(),
+        passed: !manual_steps.is_empty(),
+        message: if manual_steps.is_empty() {
+            "no manual uninstall steps available".to_string()
+        } else {
+            format!("manual steps: {}", manual_steps.len())
+        },
+    });
+    checks.push(SystemStatusCheckOutput {
+        id: "remove_apply_confirmed".to_string(),
+        label: "Apply mode confirmation".to_string(),
+        severity: "critical".to_string(),
+        passed: dry_run || confirm,
+        message: if dry_run {
+            "dry run mode; no confirmation needed".to_string()
+        } else {
+            "apply mode confirmed via --confirm".to_string()
+        },
+    });
     if manual_steps.is_empty() {
         warnings.push("install source unknown; remove executable manually if needed".to_string());
     }
@@ -3913,6 +3951,7 @@ fn run_remove_output(dry_run: bool, confirm: bool) -> Result<RemoveOutput, Strin
         detected_paths,
         removed_paths,
         skipped_paths,
+        checks,
         manual_steps,
         warnings,
     })
@@ -4982,6 +5021,14 @@ fn remove_text(out: &RemoveOutput) -> String {
     }
     for path in &out.skipped_paths {
         let _ = writeln!(text, "skipped_path: {path}");
+    }
+    let _ = writeln!(text, "checks: label=Checks");
+    for check in &out.checks {
+        let _ = writeln!(
+            text,
+            "check: id={} label={} severity={} passed={} message={}",
+            check.id, check.label, check.severity, check.passed, check.message
+        );
     }
     for step in &out.manual_steps {
         let _ = writeln!(text, "manual_step: {step}");

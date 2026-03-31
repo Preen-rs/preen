@@ -1937,6 +1937,7 @@ fn system_support_commands_json_contract_matrix_has_required_fields() {
                 "detected_paths",
                 "removed_paths",
                 "skipped_paths",
+                "checks",
                 "manual_steps",
                 "warnings",
             ],
@@ -2031,6 +2032,7 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
         assert!(remove.contains("summary: kind=system_remove"));
         assert!(remove.contains("executable:"));
         assert!(remove.contains("detected_path:"));
+        assert!(remove.contains("checks: label=Checks"));
         assert!(remove.contains("manual_step:"));
     });
 }
@@ -2769,6 +2771,7 @@ fn remove_json_happy_path_dry_run() {
         assert_eq!(output["kind"].as_str(), Some("system.remove"));
         assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
         assert!(output["data"]["detected_paths"].as_array().is_some());
+        assert!(output["data"]["checks"].as_array().is_some());
         assert!(output["data"]["manual_steps"].as_array().is_some());
     });
 }
@@ -2791,9 +2794,17 @@ fn remove_unknown_source_includes_executable_manual_step() {
             .as_array()
             .cloned()
             .unwrap_or_default();
+        let checks = output["data"]["checks"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         assert!(manual_steps.iter().any(|value| {
             let step = value.as_str().unwrap_or_default();
             step.starts_with("rm -f ") && step.contains(executable)
+        }));
+        assert!(checks.iter().any(|value| {
+            value["id"].as_str() == Some("remove_source_detected")
+                && value["passed"].as_bool() == Some(false)
         }));
     });
 }
