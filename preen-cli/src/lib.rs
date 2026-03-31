@@ -3586,6 +3586,18 @@ fn completion_json(out: CompletionOutput) -> Result<String, String> {
 }
 
 fn run_update(force: bool, nightly: bool, json: bool) -> Result<(), String> {
+    if nightly {
+        let install_source = detect_install_source();
+        if install_source != "script" {
+            return Err(err_code(
+                CliErrorKind::Validation,
+                "update_nightly_unsupported_source",
+                format!(
+                    "nightly update is supported only for script installs (install_source={install_source})"
+                ),
+            ));
+        }
+    }
     let output = run_update_output(force, nightly);
     if json {
         println!("{}", update_json(output.clone())?);

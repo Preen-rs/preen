@@ -1363,6 +1363,7 @@ fn static_detail_code_contract_is_frozen() {
         "remove_path_scope_violation",
         "status_state_dir_unavailable",
         "test_all_failed",
+        "update_nightly_unsupported_source",
         "uninstall_confirmation_required",
         "uninstall_no_roots",
         "uninstall_target_required",
@@ -2714,6 +2715,33 @@ fn update_command_runs_without_error() {
         let cli = Cli::try_parse_from(["preen", "update", "--json"]).unwrap();
         let result = run_typed(cli);
         assert!(result.is_ok());
+    });
+}
+
+#[test]
+fn update_nightly_rejects_non_script_install_source() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "homebrew");
+        }
+        let cli = Cli::try_parse_from(["preen", "update", "--nightly", "--json"]).unwrap();
+        let err = run_typed(cli.clone()).unwrap_err();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert_eq!(err.kind, CliErrorKind::Validation);
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("update_nightly_unsupported_source")
+        );
+        let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+        assert_eq!(
+            parsed["data"]["detail_code"].as_str(),
+            Some("update_nightly_unsupported_source")
+        );
     });
 }
 
@@ -4236,6 +4264,10 @@ fn format_error_localizes_prefixed_system_detail_codes_in_de() {
         (
             "completion_shell_unknown",
             "Shell fuer Completion konnte nicht erkannt werden.",
+        ),
+        (
+            "update_nightly_unsupported_source",
+            "Update Nightly-Update wird nur fuer Script-Installationen unterstuetzt.",
         ),
         (
             "remove_path_resolve_failed",

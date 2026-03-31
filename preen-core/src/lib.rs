@@ -274,6 +274,15 @@ fn system_prefixed_detail_message(code: &str, locale: &str) -> Option<String> {
                 format!("shell for {command} could not be detected.")
             }
         }
+        "nightly_unsupported_source" => {
+            if locale == "de-DE" {
+                format!(
+                    "{command} Nightly-Update wird nur fuer Script-Installationen unterstuetzt."
+                )
+            } else {
+                format!("{command} nightly update is supported only for script installs.")
+            }
+        }
         "read_failed" => {
             if locale == "de-DE" {
                 format!("{command}-Konfiguration konnte nicht gelesen werden.")

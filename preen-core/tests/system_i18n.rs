@@ -64,6 +64,7 @@ fn system_detail_message_localizes_known_prefixed_detail_codes() {
         "analyze_root_not_found",
         "status_state_dir_unavailable",
         "completion_shell_unknown",
+        "update_nightly_unsupported_source",
         "remove_path_resolve_failed",
     ];
 
