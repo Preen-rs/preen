@@ -694,7 +694,11 @@ fn run_typed_with_verifier_and_clean_executor(
             nightly,
             json,
         } => run_update(*force, *nightly, *json).map_err(CliError::from),
-        CliCommand::Remove { dry_run, json } => run_remove(*dry_run, *json).map_err(CliError::from),
+        CliCommand::Remove {
+            dry_run,
+            confirm,
+            json,
+        } => run_remove(*dry_run, *confirm, *json).map_err(CliError::from),
     }
 }
 
@@ -3807,8 +3811,8 @@ fn print_update_output(out: &UpdateOutput) {
     print!("{}", update_text(out));
 }
 
-fn run_remove(dry_run: bool, json: bool) -> Result<(), String> {
-    let output = run_remove_output(dry_run)?;
+fn run_remove(dry_run: bool, confirm: bool, json: bool) -> Result<(), String> {
+    let output = run_remove_output(dry_run, confirm)?;
     if json {
         println!("{}", remove_json(output.clone())?);
         return Ok(());
@@ -3839,7 +3843,15 @@ fn collect_remove_candidate(
     Ok(())
 }
 
-fn run_remove_output(dry_run: bool) -> Result<RemoveOutput, String> {
+fn run_remove_output(dry_run: bool, confirm: bool) -> Result<RemoveOutput, String> {
+    if !dry_run && !confirm {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "remove_confirmation_required",
+            "remove apply mode requires --confirm",
+        ));
+    }
+
     let executable_path = std::env::current_exe().ok();
     let executable_display = executable_path
         .as_ref()
@@ -9999,15 +10011,15 @@ pub fn update_text_output_for_test(force: bool, nightly: bool) -> String {
     update_text(&output)
 }
 
-pub fn remove_output_for_test(dry_run: bool) -> Result<serde_json::Value, String> {
-    let output = run_remove_output(dry_run)?;
+pub fn remove_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_json::Value, String> {
+    let output = run_remove_output(dry_run, confirm)?;
     let json = remove_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "remove output parse failed", e))
 }
 
-pub fn remove_text_output_for_test(dry_run: bool) -> Result<String, String> {
-    let output = run_remove_output(dry_run)?;
+pub fn remove_text_output_for_test(dry_run: bool, confirm: bool) -> Result<String, String> {
+    let output = run_remove_output(dry_run, confirm)?;
     Ok(remove_text(&output))
 }
 
@@ -10828,6 +10840,8 @@ enum CliCommand {
     Remove {
         #[arg(long, short = 'n')]
         dry_run: bool,
+        #[arg(long, conflicts_with = "dry_run")]
+        confirm: bool,
         #[arg(long)]
         json: bool,
     },

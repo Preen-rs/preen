@@ -1357,6 +1357,7 @@ fn static_detail_code_contract_is_frozen() {
         "registry_issuer_invalid",
         "registry_signature_verify_failed",
         "registry_source_missing",
+        "remove_confirmation_required",
         "remove_execution_failed",
         "remove_path_resolve_failed",
         "remove_path_scope_violation",
@@ -1919,7 +1920,7 @@ fn system_support_commands_json_contract_matrix_has_required_fields() {
             std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
             std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
         }
-        let remove = remove_output_for_test(true).unwrap();
+        let remove = remove_output_for_test(true, false).unwrap();
         // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
         unsafe {
             std::env::remove_var("PREEN_REMOVE_STATE_DIR");
@@ -2019,7 +2020,7 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
             std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
             std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
         }
-        let remove = remove_text_output_for_test(true).unwrap();
+        let remove = remove_text_output_for_test(true, false).unwrap();
         // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
         unsafe {
             std::env::remove_var("PREEN_REMOVE_STATE_DIR");
@@ -2730,7 +2731,7 @@ fn remove_json_happy_path_dry_run() {
             std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
             std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
         }
-        let output = remove_output_for_test(true).unwrap();
+        let output = remove_output_for_test(true, false).unwrap();
         // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
         unsafe {
             std::env::remove_var("PREEN_REMOVE_STATE_DIR");
@@ -2752,7 +2753,7 @@ fn remove_unknown_source_includes_executable_manual_step() {
         unsafe {
             std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "unknown");
         }
-        let output = remove_output_for_test(true).unwrap();
+        let output = remove_output_for_test(true, false).unwrap();
         // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
         unsafe {
             std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
@@ -2787,7 +2788,7 @@ fn remove_apply_deletes_temp_paths() {
             std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_path.as_os_str());
             std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
         }
-        let output = remove_output_for_test(false).unwrap();
+        let output = remove_output_for_test(false, true).unwrap();
         // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
         unsafe {
             std::env::remove_var("PREEN_REMOVE_STATE_DIR");
@@ -2798,6 +2799,41 @@ fn remove_apply_deletes_temp_paths() {
         assert!(!state_path.exists());
         assert!(!cache_path.exists());
         assert!(output["data"]["removed_paths"].as_array().is_some());
+    });
+}
+
+#[test]
+fn remove_apply_requires_confirm() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let state_root = tempfile::tempdir().unwrap();
+        let cache_root = tempfile::tempdir().unwrap();
+        let state_path = state_root.path().join("state");
+        let cache_path = cache_root.path().join("cache");
+        fs::create_dir_all(&state_path).unwrap();
+        fs::create_dir_all(&cache_path).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_path.as_os_str());
+            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_path.as_os_str());
+        }
+        let cli = Cli::try_parse_from(["preen", "remove", "--json"]).unwrap();
+        let err = run_typed(cli.clone()).unwrap_err();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
+            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
+        }
+        assert_eq!(err.kind, CliErrorKind::Validation);
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("remove_confirmation_required")
+        );
+        let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+        assert_eq!(
+            parsed["data"]["detail_code"].as_str(),
+            Some("remove_confirmation_required")
+        );
     });
 }
 
@@ -2825,6 +2861,12 @@ fn remove_command_runs_without_error() {
         }
         assert!(result.is_ok());
     });
+}
+
+#[test]
+fn remove_rejects_dry_run_with_confirm_conflict() {
+    let parsed = Cli::try_parse_from(["preen", "remove", "--dry-run", "--confirm"]);
+    assert!(parsed.is_err());
 }
 
 #[test]
@@ -3598,6 +3640,7 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "completion", "zsh", "--dry-run", "--json"],
         vec!["preen", "update", "--force", "--nightly", "--json"],
         vec!["preen", "remove", "--dry-run", "--json"],
+        vec!["preen", "remove", "--confirm", "--json"],
     ];
     for args in cases {
         Cli::try_parse_from(args).unwrap();
@@ -3845,6 +3888,7 @@ fn system_option_matrix_accepts_valid_flag_combinations() {
         vec!["preen", "completion", "zsh", "--dry-run"],
         vec!["preen", "update", "--force", "--nightly"],
         vec!["preen", "remove", "--dry-run"],
+        vec!["preen", "remove", "--confirm"],
     ];
 
     for args in valid_cases {
@@ -3874,6 +3918,7 @@ fn system_option_matrix_rejects_conflicting_flags() {
         vec!["preen", "uninstall", "Demo.app", "--paths"],
         vec!["preen", "uninstall", "--paths", "--dry-run"],
         vec!["preen", "uninstall", "--paths", "--confirm"],
+        vec!["preen", "remove", "--dry-run", "--confirm"],
     ];
 
     for args in invalid_cases {
