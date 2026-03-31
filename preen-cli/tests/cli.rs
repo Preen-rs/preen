@@ -2504,6 +2504,62 @@ fn touchid_command_runs_without_error() {
 }
 
 #[test]
+fn touchid_enable_apply_writes_pam_tid_line_when_supported() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let temp = tempfile::tempdir().unwrap();
+        let pam = temp.path().join("sudo");
+        fs::write(&pam, "# sudo config\n").unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_TOUCHID_FORCE_SUPPORTED", "1");
+            std::env::set_var("PREEN_TOUCHID_SUDO_FILE", &pam);
+            std::env::remove_var("PREEN_TOUCHID_SUDO_LOCAL_FILE");
+        }
+        let output = touchid_output_for_test(Some("enable"), false).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_TOUCHID_FORCE_SUPPORTED");
+            std::env::remove_var("PREEN_TOUCHID_SUDO_FILE");
+        }
+        assert_eq!(output["data"]["applied"].as_bool(), Some(true));
+        assert_eq!(output["data"]["configured"].as_bool(), Some(true));
+        let content = fs::read_to_string(&pam).unwrap();
+        assert!(content.contains("pam_tid.so"));
+    });
+}
+
+#[test]
+fn touchid_disable_apply_removes_pam_tid_line_when_supported() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let temp = tempfile::tempdir().unwrap();
+        let pam = temp.path().join("sudo");
+        fs::write(
+            &pam,
+            "# sudo config\nauth       sufficient     pam_tid.so\nauth       include        sudo_local\n",
+        )
+        .unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_TOUCHID_FORCE_SUPPORTED", "1");
+            std::env::set_var("PREEN_TOUCHID_SUDO_FILE", &pam);
+            std::env::remove_var("PREEN_TOUCHID_SUDO_LOCAL_FILE");
+        }
+        let output = touchid_output_for_test(Some("disable"), false).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_TOUCHID_FORCE_SUPPORTED");
+            std::env::remove_var("PREEN_TOUCHID_SUDO_FILE");
+        }
+        assert_eq!(output["data"]["applied"].as_bool(), Some(true));
+        assert_eq!(output["data"]["configured"].as_bool(), Some(false));
+        let content = fs::read_to_string(&pam).unwrap();
+        assert!(!content.contains("pam_tid.so"));
+    });
+}
+
+#[test]
 fn completion_json_generates_script_for_explicit_shell() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
@@ -2536,6 +2592,55 @@ fn completion_dry_run_autodetect_writes_no_file() {
         assert_eq!(output["data"]["installed"].as_bool(), Some(false));
         assert_eq!(output["data"]["changed"].as_bool(), Some(false));
         assert!(!home.path().join(".zshrc").exists());
+    });
+}
+
+#[test]
+fn completion_bash_prefers_bash_profile_when_present() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let home = tempfile::tempdir().unwrap();
+        let bash_profile = home.path().join(".bash_profile");
+        fs::write(&bash_profile, "# existing\n").unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("HOME", home.path().as_os_str());
+            std::env::set_var("PREEN_COMPLETION_SHELL", "bash");
+        }
+        let output = completion_output_for_test(None, false).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_COMPLETION_SHELL");
+        }
+        assert_eq!(
+            output["data"]["config_path"].as_str(),
+            Some(bash_profile.to_string_lossy().as_ref())
+        );
+        assert_eq!(output["data"]["installed"].as_bool(), Some(true));
+        assert_eq!(output["data"]["changed"].as_bool(), Some(true));
+        let content = fs::read_to_string(&bash_profile).unwrap();
+        assert!(content.contains("# Preen shell completion"));
+    });
+}
+
+#[test]
+fn completion_autodetect_uses_override_when_shell_missing() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("HOME", home.path().as_os_str());
+            std::env::remove_var("SHELL");
+            std::env::set_var("PREEN_COMPLETION_SHELL", "fish");
+        }
+        let output = completion_output_for_test(None, true).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_COMPLETION_SHELL");
+        }
+        assert_eq!(output["data"]["shell"].as_str(), Some("fish"));
+        assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
     });
 }
 

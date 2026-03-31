@@ -2284,16 +2284,22 @@ fn should_emit_status_json(json_flag: bool) -> bool {
     if json_flag {
         return true;
     }
-    if let Ok(value) = std::env::var("PREEN_STATUS_FORCE_JSON") {
-        let normalized = value.trim().to_ascii_lowercase();
-        if matches!(normalized.as_str(), "1" | "true" | "yes" | "on") {
-            return true;
-        }
-        if matches!(normalized.as_str(), "0" | "false" | "no" | "off") {
-            return false;
-        }
+    if let Some(forced) = bool_env("PREEN_STATUS_FORCE_JSON") {
+        return forced;
     }
     !std::io::stdout().is_terminal()
+}
+
+fn bool_env(name: &str) -> Option<bool> {
+    let value = std::env::var(name).ok()?;
+    let normalized = value.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "1" | "true" | "yes" | "on") {
+        return Some(true);
+    }
+    if matches!(normalized.as_str(), "0" | "false" | "no" | "off") {
+        return Some(false);
+    }
+    None
 }
 
 fn run_status_output() -> Result<StatusOutput, String> {
@@ -3079,8 +3085,8 @@ fn run_touchid(action: Option<TouchIdActionArg>, dry_run: bool, json: bool) -> R
 
 fn run_touchid_output(action: TouchIdActionArg, dry_run: bool) -> Result<TouchIdOutput, String> {
     let mut warnings = Vec::new();
-    let supported_os = cfg!(target_os = "macos");
-    let configured = if supported_os {
+    let supported_os = touchid_supported();
+    let mut configured = if supported_os {
         touchid_is_configured(&mut warnings)?
     } else {
         warnings.push(format!(
@@ -3096,14 +3102,11 @@ fn run_touchid_output(action: TouchIdActionArg, dry_run: bool) -> Result<TouchId
         TouchIdActionArg::Disable => configured,
     };
 
-    let mut applied = false;
-    if !dry_run && !matches!(action, TouchIdActionArg::Status) {
-        warnings.push(
-            "touchid apply mode is not enabled in this build; run with --dry-run to preview"
-                .to_string(),
-        );
-    } else if !dry_run {
-        applied = true;
+    let mut applied = matches!(action, TouchIdActionArg::Status) && !dry_run;
+    if !dry_run && !matches!(action, TouchIdActionArg::Status) && supported_os {
+        let changed = touchid_apply(action, &mut warnings)?;
+        applied = changed;
+        configured = touchid_is_configured(&mut warnings)?;
     }
 
     Ok(TouchIdOutput {
@@ -3119,6 +3122,13 @@ fn run_touchid_output(action: TouchIdActionArg, dry_run: bool) -> Result<TouchId
         applied,
         warnings,
     })
+}
+
+fn touchid_supported() -> bool {
+    if let Some(forced) = bool_env("PREEN_TOUCHID_FORCE_SUPPORTED") {
+        return forced;
+    }
+    cfg!(target_os = "macos")
 }
 
 fn touchid_is_configured(warnings: &mut Vec<String>) -> Result<bool, String> {
@@ -3148,6 +3158,135 @@ fn touchid_is_configured(warnings: &mut Vec<String>) -> Result<bool, String> {
     }
 
     Ok(configured)
+}
+
+fn touchid_apply(action: TouchIdActionArg, warnings: &mut Vec<String>) -> Result<bool, String> {
+    let sudo_file =
+        std::env::var("PREEN_TOUCHID_SUDO_FILE").unwrap_or_else(|_| "/etc/pam.d/sudo".to_string());
+    let sudo_local_file = std::env::var("PREEN_TOUCHID_SUDO_LOCAL_FILE")
+        .unwrap_or_else(|_| "/etc/pam.d/sudo_local".to_string());
+    let sudo_path = PathBuf::from(sudo_file);
+    let sudo_local_path = PathBuf::from(sudo_local_file);
+    let pam_tid_line = "auth       sufficient     pam_tid.so";
+    match action {
+        TouchIdActionArg::Status => Ok(false),
+        TouchIdActionArg::Enable => {
+            if touchid_file_has_line(&sudo_local_path, pam_tid_line)? {
+                return Ok(false);
+            }
+            if touchid_file_has_line(&sudo_path, pam_tid_line)? {
+                return Ok(false);
+            }
+            let target = match fs::read_to_string(&sudo_path) {
+                Ok(content) if content.contains("sudo_local") => sudo_local_path.clone(),
+                _ => sudo_path.clone(),
+            };
+            touchid_append_line(&target, pam_tid_line, warnings)
+        }
+        TouchIdActionArg::Disable => {
+            let removed_local = touchid_remove_line(&sudo_local_path, pam_tid_line, warnings)?;
+            let removed_sudo = touchid_remove_line(&sudo_path, pam_tid_line, warnings)?;
+            Ok(removed_local || removed_sudo)
+        }
+    }
+}
+
+fn touchid_file_has_line(path: &Path, line_fragment: &str) -> Result<bool, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(err(
+                CliErrorKind::Io,
+                format!("touchid read failed for {}: {error}", path.display()),
+            ));
+        }
+    };
+    Ok(content.lines().any(|line| line.contains(line_fragment)))
+}
+
+fn touchid_append_line(
+    path: &Path,
+    line: &str,
+    warnings: &mut Vec<String>,
+) -> Result<bool, String> {
+    let mut content = match fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(err(
+                CliErrorKind::Io,
+                format!("touchid read failed for {}: {error}", path.display()),
+            ));
+        }
+    };
+    if content.lines().any(|item| item.contains("pam_tid.so")) {
+        return Ok(false);
+    }
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(line);
+    content.push('\n');
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            err(
+                CliErrorKind::Io,
+                format!(
+                    "touchid dir create failed for {}: {error}",
+                    parent.display()
+                ),
+            )
+        })?;
+    }
+    match fs::write(path, content) {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            warnings.push(format!(
+                "touchid write failed for {}: {error}",
+                path.display()
+            ));
+            Ok(false)
+        }
+    }
+}
+
+fn touchid_remove_line(
+    path: &Path,
+    line_fragment: &str,
+    warnings: &mut Vec<String>,
+) -> Result<bool, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(err(
+                CliErrorKind::Io,
+                format!("touchid read failed for {}: {error}", path.display()),
+            ));
+        }
+    };
+    let filtered: Vec<&str> = content
+        .lines()
+        .filter(|line| !line.contains(line_fragment))
+        .collect();
+    if filtered.len() == content.lines().count() {
+        return Ok(false);
+    }
+    let mut next = filtered.join("\n");
+    if !next.is_empty() {
+        next.push('\n');
+    }
+    match fs::write(path, next) {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            warnings.push(format!(
+                "touchid write failed for {}: {error}",
+                path.display()
+            ));
+            Ok(false)
+        }
+    }
 }
 
 fn touchid_action_label(action: TouchIdActionArg) -> &'static str {
@@ -3324,13 +3463,43 @@ fn completion_install_snippet(shell: CompletionShellArg) -> Result<String, Strin
 }
 
 fn detect_completion_shell() -> Option<CompletionShellArg> {
-    let shell = std::env::var("SHELL").ok()?;
-    let name = Path::new(&shell)
+    if let Ok(value) = std::env::var("PREEN_COMPLETION_SHELL")
+        && let Some(parsed) = parse_completion_shell_name(value.trim())
+    {
+        return Some(parsed);
+    }
+    if let Ok(shell) = std::env::var("SHELL") {
+        let name = Path::new(&shell)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if let Some(parsed) = parse_completion_shell_name(&name) {
+            return Some(parsed);
+        }
+    }
+
+    let parent_pid = std::env::var("PPID").ok()?;
+    let output = ProcessCommand::new("ps")
+        .args(["-p", parent_pid.trim(), "-o", "comm="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let command = String::from_utf8_lossy(&output.stdout);
+    parse_completion_shell_name(command.trim())
+}
+
+fn parse_completion_shell_name(name: &str) -> Option<CompletionShellArg> {
+    let normalized = name.trim().to_ascii_lowercase();
+    let basename = Path::new(&normalized)
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
-        .to_ascii_lowercase();
-    match name.as_str() {
+        .trim_start_matches('-')
+        .to_string();
+    match basename.as_str() {
         "bash" => Some(CompletionShellArg::Bash),
         "zsh" => Some(CompletionShellArg::Zsh),
         "fish" => Some(CompletionShellArg::Fish),
@@ -3347,7 +3516,14 @@ fn shell_config_path(shell: CompletionShellArg) -> Result<PathBuf, String> {
         )
     })?;
     let path = match shell {
-        CompletionShellArg::Bash => home.join(".bashrc"),
+        CompletionShellArg::Bash => {
+            let profile = home.join(".bash_profile");
+            if profile.exists() {
+                profile
+            } else {
+                home.join(".bashrc")
+            }
+        }
         CompletionShellArg::Zsh => home.join(".zshrc"),
         CompletionShellArg::Fish => home.join(".config").join("fish").join("config.fish"),
     };
