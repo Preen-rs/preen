@@ -2670,6 +2670,43 @@ fn update_json_happy_path_contains_suggested_command() {
 }
 
 #[test]
+fn update_nightly_homebrew_reports_unsupported_source() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "homebrew");
+        }
+        let output = update_output_for_test(false, true).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert_eq!(output["kind"].as_str(), Some("system.update"));
+        assert_eq!(output["data"]["channel"].as_str(), Some("nightly"));
+        assert_eq!(
+            system_check_passed_from_json(&output["data"], "update_nightly_supported"),
+            Some(false)
+        );
+        let warnings = output["data"]["warnings"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(warnings.iter().any(|value| {
+            value
+                .as_str()
+                .unwrap_or_default()
+                .contains("nightly update is supported only for script installs")
+        }));
+        let command = output["data"]["suggested_command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(command.contains("install.sh"));
+        assert!(command.contains("--nightly"));
+    });
+}
+
+#[test]
 fn update_command_runs_without_error() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
@@ -2704,6 +2741,31 @@ fn remove_json_happy_path_dry_run() {
         assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
         assert!(output["data"]["detected_paths"].as_array().is_some());
         assert!(output["data"]["manual_steps"].as_array().is_some());
+    });
+}
+
+#[test]
+fn remove_unknown_source_includes_executable_manual_step() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "unknown");
+        }
+        let output = remove_output_for_test(true).unwrap();
+        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        let executable = output["data"]["executable"].as_str().unwrap_or_default();
+        let manual_steps = output["data"]["manual_steps"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(manual_steps.iter().any(|value| {
+            let step = value.as_str().unwrap_or_default();
+            step.starts_with("rm -f ") && step.contains(executable)
+        }));
     });
 }
 

@@ -3595,6 +3595,7 @@ fn run_update_output(force: bool, nightly: bool) -> UpdateOutput {
     let mut warnings = Vec::new();
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let install_source = detect_install_source();
+    let nightly_supported = !nightly || install_source == "script";
     let suggested_command = suggested_update_command(&install_source, nightly);
     let latest_version = if nightly {
         None
@@ -3627,6 +3628,27 @@ fn run_update_output(force: bool, nightly: bool) -> UpdateOutput {
         passed: !suggested_command.is_empty(),
         message: suggested_command.clone(),
     });
+    if nightly {
+        checks.push(SystemStatusCheckOutput {
+            id: "update_nightly_supported".to_string(),
+            label: "Nightly update supported for install source".to_string(),
+            severity: "critical".to_string(),
+            passed: nightly_supported,
+            message: if nightly_supported {
+                "nightly update supported".to_string()
+            } else {
+                format!(
+                    "nightly update is not supported for install source: {install_source}; use script install"
+                )
+            },
+        });
+        if !nightly_supported {
+            warnings.push(
+                "nightly update is supported only for script installs; reinstall with script and retry --nightly"
+                    .to_string(),
+            );
+        }
+    }
     checks.push(SystemStatusCheckOutput {
         id: "update_version_check".to_string(),
         label: "Version check".to_string(),
@@ -3740,11 +3762,12 @@ fn detect_install_source() -> String {
 fn suggested_update_command(install_source: &str, nightly: bool) -> String {
     match (install_source, nightly) {
         ("homebrew", false) => "brew upgrade preen".to_string(),
-        ("homebrew", true) => "brew upgrade --fetch-HEAD preen".to_string(),
+        ("homebrew", true) => {
+            "curl -fsSL https://preen.rs/install.sh | bash -s -- --nightly".to_string()
+        }
         ("cargo", false) => "cargo install preen-cli --locked --force".to_string(),
         ("cargo", true) => {
-            "cargo install --git https://github.com/Preen-rs/preen preen-cli --locked --force"
-                .to_string()
+            "curl -fsSL https://preen.rs/install.sh | bash -s -- --nightly".to_string()
         }
         ("script", false) => "curl -fsSL https://preen.rs/install.sh | bash".to_string(),
         ("script", true) => {
@@ -3817,9 +3840,14 @@ fn collect_remove_candidate(
 }
 
 fn run_remove_output(dry_run: bool) -> Result<RemoveOutput, String> {
-    let executable = std::env::current_exe()
+    let executable_path = std::env::current_exe().ok();
+    let executable_display = executable_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
+    let executable = executable_path
+        .as_ref()
         .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
+        .unwrap_or_else(|| "unknown".to_string());
 
     let mut detected_paths = Vec::new();
     let mut removed_paths = Vec::new();
@@ -3846,7 +3874,7 @@ fn run_remove_output(dry_run: bool) -> Result<RemoveOutput, String> {
     }
 
     let install_source = detect_install_source();
-    let manual_steps = remove_manual_steps(&install_source);
+    let manual_steps = remove_manual_steps(&install_source, executable_display.as_deref());
     if manual_steps.is_empty() {
         warnings.push("install source unknown; remove executable manually if needed".to_string());
     }
@@ -3951,12 +3979,16 @@ fn is_safe_remove_target(path: &Path) -> bool {
     true
 }
 
-fn remove_manual_steps(install_source: &str) -> Vec<String> {
+fn remove_manual_steps(install_source: &str, executable_path: Option<&str>) -> Vec<String> {
     match install_source {
         "homebrew" => vec!["brew uninstall --force preen".to_string()],
         "cargo" => vec!["cargo uninstall preen-cli".to_string()],
-        "script" => vec!["rm -f $(command -v preen)".to_string()],
-        _ => Vec::new(),
+        "script" => executable_path
+            .map(|path| vec![format!("rm -f '{path}'")])
+            .unwrap_or_else(|| vec!["rm -f $(command -v preen)".to_string()]),
+        _ => executable_path
+            .map(|path| vec![format!("rm -f '{path}'")])
+            .unwrap_or_default(),
     }
 }
 
