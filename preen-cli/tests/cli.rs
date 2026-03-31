@@ -1706,6 +1706,8 @@ fn system_command_text_contract_matrix_has_required_markers() {
     let _guard = ENV_LOCK.lock().unwrap();
 
     let clean = with_clean_path_override(|| clean_text_output_for_test(true, false, None).unwrap());
+    assert!(clean.contains("summary: kind=system_clean"));
+    assert!(clean.contains("mode: dry_run"));
     assert!(clean.contains("clean dry_run completed:"));
     assert!(clean.contains("strategy="));
     assert!(clean.contains("scanned="));
@@ -1714,6 +1716,8 @@ fn system_command_text_contract_matrix_has_required_markers() {
     assert!(clean.contains("audit_events="));
 
     let purge = with_purge_path_override(|| purge_text_output_for_test(true, false).unwrap());
+    assert!(purge.contains("summary: kind=system_purge"));
+    assert!(purge.contains("mode: dry_run"));
     assert!(purge.contains("Purge (dry-run)"));
     assert!(purge.contains("Scanned roots:"));
     assert!(purge.contains("Targets:"));
@@ -1722,6 +1726,8 @@ fn system_command_text_contract_matrix_has_required_markers() {
 
     let installer =
         with_installer_path_override(|| installer_text_output_for_test(true, false).unwrap());
+    assert!(installer.contains("summary: kind=system_installer"));
+    assert!(installer.contains("mode: dry_run"));
     assert!(installer.contains("Installer (dry-run)"));
     assert!(installer.contains("Scanned roots:"));
     assert!(installer.contains("Scanned files:"));

@@ -4521,6 +4521,17 @@ fn clean_text(out: &CleanCommandOutput) -> String {
     let mut text = String::new();
     let _ = writeln!(
         text,
+        "summary: kind=system_clean mode={} strategy={} scanned={} targets={} affected_items={} audit_events={}",
+        out.mode,
+        out.strategy,
+        out.scanned_items,
+        out.target_count,
+        out.affected_items,
+        out.audit_events
+    );
+    let _ = writeln!(text, "mode: {}", out.mode);
+    let _ = writeln!(
+        text,
         "clean {} completed: strategy={} scanned={} targets={} estimated_freed_bytes={} affected_items={} freed_bytes={} audit_events={}",
         out.mode,
         out.strategy,
@@ -4550,8 +4561,11 @@ fn clean_text(out: &CleanCommandOutput) -> String {
     if let Some(path) = &out.debug_log_path {
         let _ = writeln!(text, "debug_log: {path}");
     }
-    for warning in &out.warnings {
-        let _ = writeln!(text, "warning: {warning}");
+    if !out.warnings.is_empty() {
+        let _ = writeln!(text, "warnings: count={}", out.warnings.len());
+        for warning in &out.warnings {
+            let _ = writeln!(text, "warning: {warning}");
+        }
     }
     text
 }
@@ -4589,6 +4603,12 @@ fn optimize_whitelist_text(out: &OptimizeWhitelistOutput) -> String {
 
 fn purge_text(out: &PurgeCommandOutput) -> String {
     let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_purge mode={} scanned_dirs={} targets={} affected_items={} audit_events={}",
+        out.mode, out.scanned_dirs, out.target_count, out.affected_items, out.audit_events
+    );
+    let _ = writeln!(text, "mode: {}", out.mode);
     let mode = if out.mode == "dry_run" {
         "dry-run"
     } else {
@@ -4623,9 +4643,9 @@ fn purge_text(out: &PurgeCommandOutput) -> String {
         let _ = writeln!(text, "Debug log: {path}");
     }
     if !out.warnings.is_empty() {
-        let _ = writeln!(text, "Warnings:");
+        let _ = writeln!(text, "warnings: count={}", out.warnings.len());
         for warning in &out.warnings {
-            let _ = writeln!(text, "- {warning}");
+            let _ = writeln!(text, "warning: {warning}");
         }
     }
     let _ = writeln!(text, "Audit events: {}", out.audit_events);
@@ -4634,6 +4654,12 @@ fn purge_text(out: &PurgeCommandOutput) -> String {
 
 fn installer_text(out: &InstallerCommandOutput) -> String {
     let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_installer mode={} scanned_files={} targets={} affected_items={} audit_events={}",
+        out.mode, out.scanned_files, out.target_count, out.affected_items, out.audit_events
+    );
+    let _ = writeln!(text, "mode: {}", out.mode);
     let mode = if out.mode == "dry_run" {
         "dry-run"
     } else {
@@ -4664,9 +4690,9 @@ fn installer_text(out: &InstallerCommandOutput) -> String {
         let _ = writeln!(text, "Debug log: {path}");
     }
     if !out.warnings.is_empty() {
-        let _ = writeln!(text, "Warnings:");
+        let _ = writeln!(text, "warnings: count={}", out.warnings.len());
         for warning in &out.warnings {
-            let _ = writeln!(text, "- {warning}");
+            let _ = writeln!(text, "warning: {warning}");
         }
     }
     let _ = writeln!(text, "Audit events: {}", out.audit_events);
