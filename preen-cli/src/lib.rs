@@ -4572,12 +4572,15 @@ fn clean_text(out: &CleanCommandOutput) -> String {
 
 fn clean_whitelist_text(out: &CleanWhitelistOutput) -> String {
     let mut text = String::new();
-    let _ = writeln!(text, "clean whitelist");
+    let _ = writeln!(
+        text,
+        "summary: kind=system_clean_whitelist entries={} created={} defaults_written={}",
+        out.entries, out.created, out.defaults_written
+    );
     let _ = writeln!(text, "path: {}", out.path);
     let _ = writeln!(text, "entries: {}", out.entries);
-    if out.defaults_written {
-        let _ = writeln!(text, "defaults_written: true");
-    }
+    let _ = writeln!(text, "created: {}", out.created);
+    let _ = writeln!(text, "defaults_written: {}", out.defaults_written);
     let _ = writeln!(
         text,
         "hint: edit this file to add absolute paths or prefix patterns ending with *",
@@ -4587,13 +4590,16 @@ fn clean_whitelist_text(out: &CleanWhitelistOutput) -> String {
 
 fn optimize_whitelist_text(out: &OptimizeWhitelistOutput) -> String {
     let mut text = String::new();
-    let _ = writeln!(text, "optimize whitelist");
+    let _ = writeln!(
+        text,
+        "summary: kind=system_optimize_whitelist entries={} available_tasks={} created={} defaults_written={}",
+        out.entries, out.available_tasks, out.created, out.defaults_written
+    );
     let _ = writeln!(text, "path: {}", out.path);
     let _ = writeln!(text, "entries: {}", out.entries);
     let _ = writeln!(text, "available_tasks: {}", out.available_tasks);
-    if out.defaults_written {
-        let _ = writeln!(text, "defaults_written: true");
-    }
+    let _ = writeln!(text, "created: {}", out.created);
+    let _ = writeln!(text, "defaults_written: {}", out.defaults_written);
     let _ = writeln!(
         text,
         "hint: keep one optimize task id per line (comment lines start with #)"
@@ -9688,6 +9694,11 @@ pub fn clean_whitelist_output_for_test() -> Result<serde_json::Value, String> {
     })
 }
 
+pub fn clean_whitelist_text_output_for_test() -> Result<String, String> {
+    let output = clean_whitelist_output()?;
+    Ok(clean_whitelist_text(&output))
+}
+
 pub fn clean_text_output_for_test(
     dry_run: bool,
     confirm: bool,
@@ -9954,6 +9965,11 @@ pub fn optimize_whitelist_output_for_test() -> Result<serde_json::Value, String>
             e,
         )
     })
+}
+
+pub fn optimize_whitelist_text_output_for_test() -> Result<String, String> {
+    let output = optimize_whitelist_output()?;
+    Ok(optimize_whitelist_text(&output))
 }
 
 pub fn check_output_for_test(fix: bool) -> Result<serde_json::Value, String> {

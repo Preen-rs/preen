@@ -13,8 +13,8 @@ use preen_cli::{
     check_output_with_debug_for_test, check_registry_freshness_for_test,
     check_text_output_for_test, clean_output_for_test, clean_runtime_error_detail_code_for_test,
     clean_selection_summary_for_test, clean_text_output_for_test, clean_whitelist_output_for_test,
-    cli_label_for_test, clone_rule_pack_for_test, completion_output_for_test,
-    completion_text_output_for_test, default_signature_source_for_test,
+    clean_whitelist_text_output_for_test, cli_label_for_test, clone_rule_pack_for_test,
+    completion_output_for_test, completion_text_output_for_test, default_signature_source_for_test,
     enforce_clean_scope_for_test, enforce_installer_scope_for_test,
     enforce_uninstall_scope_for_test, error_json_for_test, format_bytes_for_test,
     hint_for_detail_code_for_test, hint_message_for_test, install_plugin_in_dir_for_test,
@@ -25,14 +25,14 @@ use preen_cli::{
     map_clone_error_detail_code_for_test, map_error_with_detail_code_for_test,
     optimize_output_for_test, optimize_output_with_debug_for_test,
     optimize_output_with_executor_for_test, optimize_runtime_error_detail_code_for_test,
-    optimize_text_output_for_test, optimize_whitelist_output_for_test, parse_install_spec,
-    parse_plugin_spec, plugin_info_json_for_test, plugin_install_json_for_test,
-    plugin_install_text_for_test, plugin_list_json_for_test, plugin_preflight_all_for_test,
-    plugin_preflight_all_json_for_test, plugin_preflight_json_for_test,
-    plugin_remove_json_for_test, plugin_test_all_for_test, plugin_test_all_json_for_test,
-    plugin_test_for_test, plugin_test_json_for_test, plugin_test_spec_json_for_test,
-    plugin_update_json_for_test, plugin_update_text_for_test, plugin_verify_for_test,
-    plugin_verify_json_for_test, plugin_verify_text_for_test,
+    optimize_text_output_for_test, optimize_whitelist_output_for_test,
+    optimize_whitelist_text_output_for_test, parse_install_spec, parse_plugin_spec,
+    plugin_info_json_for_test, plugin_install_json_for_test, plugin_install_text_for_test,
+    plugin_list_json_for_test, plugin_preflight_all_for_test, plugin_preflight_all_json_for_test,
+    plugin_preflight_json_for_test, plugin_remove_json_for_test, plugin_test_all_for_test,
+    plugin_test_all_json_for_test, plugin_test_for_test, plugin_test_json_for_test,
+    plugin_test_spec_json_for_test, plugin_update_json_for_test, plugin_update_text_for_test,
+    plugin_verify_for_test, plugin_verify_json_for_test, plugin_verify_text_for_test,
     preferred_lockfile_read_path_for_test, preflight_failure_row_for_test,
     primary_hint_for_drift_fields_for_test, progress_line_for_test, purge_output_for_test,
     purge_output_with_debug_for_test, purge_paths_json_for_test, purge_paths_text_for_test,
@@ -1484,6 +1484,19 @@ fn clean_whitelist_json_mode_creates_default_file() {
 }
 
 #[test]
+fn clean_whitelist_text_contract_has_required_markers() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let text = clean_whitelist_text_output_for_test().unwrap();
+        assert!(text.contains("summary: kind=system_clean_whitelist"));
+        assert!(text.contains("path: "));
+        assert!(text.contains("entries: "));
+        assert!(text.contains("created: "));
+        assert!(text.contains("defaults_written: "));
+    });
+}
+
+#[test]
 fn clean_debug_mode_writes_debug_log() {
     let _guard = ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -1609,6 +1622,20 @@ fn optimize_whitelist_json_happy_path() {
         );
         assert!(output["data"]["entries"].as_u64().unwrap_or(0) >= 1);
         assert!(output["data"]["available_tasks"].as_u64().unwrap_or(0) >= 1);
+    });
+}
+
+#[test]
+fn optimize_whitelist_text_contract_has_required_markers() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let text = optimize_whitelist_text_output_for_test().unwrap();
+        assert!(text.contains("summary: kind=system_optimize_whitelist"));
+        assert!(text.contains("path: "));
+        assert!(text.contains("entries: "));
+        assert!(text.contains("available_tasks: "));
+        assert!(text.contains("created: "));
+        assert!(text.contains("defaults_written: "));
     });
 }
 
