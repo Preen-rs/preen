@@ -1803,14 +1803,23 @@ fn system_paths_text_contract_matrix_has_required_markers() {
     let _guard = ENV_LOCK.lock().unwrap();
 
     let purge = with_purge_path_override(purge_paths_text_for_test);
+    assert!(purge.contains("summary: kind=system_paths command=purge"));
+    assert!(purge.contains("mode: paths"));
+    assert!(purge.contains("roots: count="));
     assert!(purge.contains("Purge scan roots:"));
     assert!(purge.contains("- "));
 
     let installer = with_installer_path_override(installer_paths_text_for_test);
+    assert!(installer.contains("summary: kind=system_paths command=installer"));
+    assert!(installer.contains("mode: paths"));
+    assert!(installer.contains("roots: count="));
     assert!(installer.contains("Installer scan roots:"));
     assert!(installer.contains("- "));
 
     let uninstall = with_uninstall_path_override(uninstall_paths_text_for_test);
+    assert!(uninstall.contains("summary: kind=system_paths command=uninstall"));
+    assert!(uninstall.contains("mode: paths"));
+    assert!(uninstall.contains("roots: count="));
     assert!(uninstall.contains("Uninstall scan roots:"));
     assert!(uninstall.contains("- "));
 }

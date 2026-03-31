@@ -1087,7 +1087,7 @@ fn run_purge_with_executor(
             println!("{}", purge_paths_json(roots)?);
             return Ok(());
         }
-        print!("{}", paths_text("Purge scan roots:", &roots));
+        print!("{}", paths_text("purge", "Purge scan roots:", &roots));
         return Ok(());
     }
 
@@ -1121,7 +1121,10 @@ fn run_installer_with_executor(
             println!("{}", installer_paths_json(roots)?);
             return Ok(());
         }
-        print!("{}", paths_text("Installer scan roots:", &roots));
+        print!(
+            "{}",
+            paths_text("installer", "Installer scan roots:", &roots)
+        );
         return Ok(());
     }
 
@@ -1313,7 +1316,10 @@ fn run_uninstall_with_executor(
             println!("{}", uninstall_paths_json(roots)?);
             return Ok(());
         }
-        print!("{}", paths_text("Uninstall scan roots:", &roots));
+        print!(
+            "{}",
+            paths_text("uninstall", "Uninstall scan roots:", &roots)
+        );
         return Ok(());
     }
 
@@ -4483,8 +4489,16 @@ fn uninstall_paths_json(roots: Vec<String>) -> Result<String, String> {
     to_json_envelope("system.uninstall.paths", UninstallPathsOutput { roots })
 }
 
-fn paths_text(header: &str, roots: &[String]) -> String {
+fn paths_text(command: &str, header: &str, roots: &[String]) -> String {
     let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_paths command={} roots={}",
+        command,
+        roots.len()
+    );
+    let _ = writeln!(text, "mode: paths");
+    let _ = writeln!(text, "roots: count={}", roots.len());
     let _ = writeln!(text, "{header}");
     for root in roots {
         let _ = writeln!(text, "- {root}");
@@ -9775,7 +9789,7 @@ pub fn purge_paths_json_for_test() -> Result<serde_json::Value, String> {
 
 pub fn purge_paths_text_for_test() -> String {
     let roots = normalize_purge_roots(resolve_purge_roots());
-    paths_text("Purge scan roots:", &roots)
+    paths_text("purge", "Purge scan roots:", &roots)
 }
 
 pub fn installer_output_for_test(
@@ -9833,7 +9847,7 @@ pub fn installer_paths_json_for_test() -> Result<serde_json::Value, String> {
 
 pub fn installer_paths_text_for_test() -> String {
     let roots = normalize_installer_roots(resolve_installer_roots());
-    paths_text("Installer scan roots:", &roots)
+    paths_text("installer", "Installer scan roots:", &roots)
 }
 
 pub fn uninstall_output_for_test(
@@ -9897,7 +9911,7 @@ pub fn uninstall_paths_json_for_test() -> Result<serde_json::Value, String> {
 
 pub fn uninstall_paths_text_for_test() -> String {
     let roots = normalize_uninstall_roots(resolve_uninstall_roots());
-    paths_text("Uninstall scan roots:", &roots)
+    paths_text("uninstall", "Uninstall scan roots:", &roots)
 }
 
 pub fn optimize_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_json::Value, String> {
