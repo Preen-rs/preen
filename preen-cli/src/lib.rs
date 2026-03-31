@@ -4675,6 +4675,17 @@ fn installer_text(out: &InstallerCommandOutput) -> String {
 
 fn uninstall_text(out: &UninstallCommandOutput) -> String {
     let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_uninstall mode={} target={} scanned_entries={} targets={} affected_items={} audit_events={}",
+        out.mode,
+        out.target,
+        out.scanned_entries,
+        out.target_count,
+        out.affected_items,
+        out.audit_events
+    );
+    let _ = writeln!(text, "mode: {}", out.mode);
     let mode = if out.mode == "dry_run" {
         "dry-run"
     } else {
@@ -4717,6 +4728,12 @@ fn uninstall_text(out: &UninstallCommandOutput) -> String {
 
 fn optimize_text(out: &OptimizeCommandOutput) -> String {
     let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "summary: kind=system_optimize mode={} os={} tasks={} affected_items={} post_check_run={} audit_events={}",
+        out.mode, out.os, out.task_count, out.affected_items, out.post_check_run, out.audit_events
+    );
+    let _ = writeln!(text, "mode: {}", out.mode);
     let mode = if out.mode == "dry_run" {
         "dry-run"
     } else {
@@ -4801,6 +4818,7 @@ fn check_text(out: &SystemCheckOutput) -> String {
 fn analyze_text(out: &AnalyzeOutput) -> String {
     let mut text = String::new();
     let _ = writeln!(text, "summary: kind=system_analyze");
+    let _ = writeln!(text, "mode: analyze");
     let _ = writeln!(text, "root: {}", out.root);
     let _ = writeln!(text, "max_depth: {}", out.max_depth);
     let _ = writeln!(text, "top_entries_limit: {}", out.top_entries_limit);

@@ -1732,6 +1732,8 @@ fn system_command_text_contract_matrix_has_required_markers() {
     let uninstall = with_uninstall_path_override(|| {
         uninstall_text_output_for_test(Some("DemoApp.app"), true, false).unwrap()
     });
+    assert!(uninstall.contains("summary: kind=system_uninstall"));
+    assert!(uninstall.contains("mode: dry_run"));
     assert!(uninstall.contains("Uninstall (dry-run)"));
     assert!(uninstall.contains("Target: DemoApp.app"));
     assert!(uninstall.contains("Scanned entries:"));
@@ -1740,6 +1742,8 @@ fn system_command_text_contract_matrix_has_required_markers() {
     assert!(uninstall.contains("Audit events:"));
 
     let optimize = optimize_text_output_for_test(true, false).unwrap();
+    assert!(optimize.contains("summary: kind=system_optimize"));
+    assert!(optimize.contains("mode: dry_run"));
     assert!(optimize.contains("Optimize (dry-run)"));
     assert!(optimize.contains("OS:"));
     assert!(optimize.contains("Tasks:"));
@@ -1966,6 +1970,7 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
     .unwrap();
     let analyze = analyze_text_output_for_test(Some(analyze_root.path())).unwrap();
     assert!(analyze.contains("summary: kind=system_analyze"));
+    assert!(analyze.contains("mode: analyze"));
     assert!(analyze.contains("root:"));
     assert!(analyze.contains("top_entries_limit:"));
     assert!(analyze.contains("total_files:"));
