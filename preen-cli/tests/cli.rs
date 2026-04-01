@@ -187,17 +187,17 @@ fn plugin_install_base_dir_from_env() -> PathBuf {
 }
 
 fn with_temp_user_env<T>(f: impl FnOnce() -> T) -> T {
-    let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path().join("home");
-    let xdg = tmp.path().join("xdg");
-    fs::create_dir_all(&home).unwrap();
-    fs::create_dir_all(&xdg).unwrap();
-
-    with_env_overrides(
-        &[
-            ("HOME", home.into_os_string()),
-            ("XDG_CONFIG_HOME", xdg.into_os_string()),
-        ],
+    with_temp_fixture_env(
+        |root| {
+            let home = root.join("home");
+            let xdg = root.join("xdg");
+            fs::create_dir_all(&home).unwrap();
+            fs::create_dir_all(&xdg).unwrap();
+            vec![
+                ("HOME", home.into_os_string()),
+                ("XDG_CONFIG_HOME", xdg.into_os_string()),
+            ]
+        },
         f,
     )
 }
@@ -230,45 +230,67 @@ fn with_env_overrides<T>(overrides: &[(&str, OsString)], f: impl FnOnce() -> T) 
     out
 }
 
-fn with_clean_path_override<T>(f: impl FnOnce() -> T) -> T {
+fn with_temp_fixture_env<T>(
+    setup: impl FnOnce(&Path) -> Vec<(&'static str, OsString)>,
+    f: impl FnOnce() -> T,
+) -> T {
     let temp = tempfile::tempdir().unwrap();
-    let cache_dir = temp.path().join("cache");
-    fs::create_dir_all(&cache_dir).unwrap();
-    fs::write(cache_dir.join("a.txt"), b"data").unwrap();
-    with_env_overrides(&[("PREEN_CLEAN_PATHS", cache_dir.into_os_string())], f)
+    let overrides = setup(temp.path());
+    with_env_overrides(&overrides, f)
+}
+
+fn with_clean_path_override<T>(f: impl FnOnce() -> T) -> T {
+    with_temp_fixture_env(
+        |root| {
+            let cache_dir = root.join("cache");
+            fs::create_dir_all(&cache_dir).unwrap();
+            fs::write(cache_dir.join("a.txt"), b"data").unwrap();
+            vec![("PREEN_CLEAN_PATHS", cache_dir.into_os_string())]
+        },
+        f,
+    )
 }
 
 fn with_purge_path_override<T>(f: impl FnOnce() -> T) -> T {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    let purge_target = workspace.join("node_modules");
-    fs::create_dir_all(&purge_target).unwrap();
-    fs::write(purge_target.join("placeholder.js"), b"const x = 1;").unwrap();
-    with_env_overrides(
-        &[
-            ("PREEN_PURGE_PATHS", workspace.into_os_string()),
-            ("PREEN_PURGE_MIN_AGE_DAYS", OsString::from("0")),
-        ],
+    with_temp_fixture_env(
+        |root| {
+            let workspace = root.join("workspace");
+            let purge_target = workspace.join("node_modules");
+            fs::create_dir_all(&purge_target).unwrap();
+            fs::write(purge_target.join("placeholder.js"), b"const x = 1;").unwrap();
+            vec![
+                ("PREEN_PURGE_PATHS", workspace.into_os_string()),
+                ("PREEN_PURGE_MIN_AGE_DAYS", OsString::from("0")),
+            ]
+        },
         f,
     )
 }
 
 fn with_installer_path_override<T>(f: impl FnOnce() -> T) -> T {
-    let temp = tempfile::tempdir().unwrap();
-    let downloads = temp.path().join("downloads");
-    fs::create_dir_all(&downloads).unwrap();
-    let installer = downloads.join("Setup.pkg");
-    fs::write(&installer, vec![0u8; 11 * 1024 * 1024]).unwrap();
-    with_env_overrides(&[("PREEN_INSTALLER_PATHS", downloads.into_os_string())], f)
+    with_temp_fixture_env(
+        |root| {
+            let downloads = root.join("downloads");
+            fs::create_dir_all(&downloads).unwrap();
+            let installer = downloads.join("Setup.pkg");
+            fs::write(&installer, vec![0u8; 11 * 1024 * 1024]).unwrap();
+            vec![("PREEN_INSTALLER_PATHS", downloads.into_os_string())]
+        },
+        f,
+    )
 }
 
 fn with_uninstall_path_override<T>(f: impl FnOnce() -> T) -> T {
-    let temp = tempfile::tempdir().unwrap();
-    let apps = temp.path().join("apps");
-    fs::create_dir_all(&apps).unwrap();
-    let app = apps.join("DemoApp.app");
-    fs::write(&app, b"demo").unwrap();
-    with_env_overrides(&[("PREEN_UNINSTALL_PATHS", apps.into_os_string())], f)
+    with_temp_fixture_env(
+        |root| {
+            let apps = root.join("apps");
+            fs::create_dir_all(&apps).unwrap();
+            let app = apps.join("DemoApp.app");
+            fs::write(&app, b"demo").unwrap();
+            vec![("PREEN_UNINSTALL_PATHS", apps.into_os_string())]
+        },
+        f,
+    )
 }
 
 fn clean_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
