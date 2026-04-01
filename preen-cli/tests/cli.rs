@@ -426,6 +426,23 @@ fn assert_paths_envelope(output: &Value, kind: &str) {
     assert!(roots.iter().all(|value| value.as_str().is_some()));
 }
 
+fn parse_json_value(json: &str) -> Value {
+    serde_json::from_str(json).unwrap()
+}
+
+fn assert_json_envelope_kind(output: &Value, kind: &str) {
+    assert_eq!(output["schema_version"].as_u64(), Some(1));
+    assert_eq!(output["kind"].as_str(), Some(kind));
+}
+
+fn assert_empty_aggregate_results(output: &Value) {
+    assert_eq!(output["data"]["total"].as_u64(), Some(0));
+    assert_eq!(output["data"]["passed"].as_u64(), Some(0));
+    assert_eq!(output["data"]["failed"].as_u64(), Some(0));
+    assert!(output["data"]["results"].as_array().unwrap().is_empty());
+    assert!(output["data"]["failures"].as_array().unwrap().is_empty());
+}
+
 fn assert_text_markers(name: &str, text: &str, markers: &[&str]) {
     for marker in markers {
         assert!(
@@ -817,9 +834,8 @@ fn list_plugins_with_options_for_test_filters_and_sorts() {
 #[test]
 fn plugin_verify_json_for_test_contains_fields() {
     let json = plugin_verify_json_for_test("test.pack", true, true, true).unwrap();
-    let parsed: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["schema_version"].as_u64().unwrap(), 1);
-    assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.verify");
+    let parsed = parse_json_value(&json);
+    assert_json_envelope_kind(&parsed, "plugin.verify");
     assert_eq!(parsed["data"]["pack_id"].as_str().unwrap(), "test.pack");
     assert!(parsed["data"]["overall_passed"].as_bool().unwrap());
     assert!(parsed["data"]["version_matches_lock"].as_bool().unwrap());
@@ -846,9 +862,8 @@ fn plugin_verify_text_for_test_contains_summary_and_checks() {
 #[test]
 fn plugin_test_json_for_test_contains_fields() {
     let json = plugin_test_json_for_test("test.pack").unwrap();
-    let parsed: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["schema_version"].as_u64().unwrap(), 1);
-    assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.test");
+    let parsed = parse_json_value(&json);
+    assert_json_envelope_kind(&parsed, "plugin.test");
     assert_eq!(parsed["data"]["pack_id"].as_str().unwrap(), "test.pack");
     assert!(parsed["data"]["overall_passed"].as_bool().unwrap());
     assert!(parsed["data"]["version_matches_lock"].as_bool().unwrap());
@@ -862,23 +877,17 @@ fn plugin_test_json_for_test_contains_fields() {
 #[test]
 fn plugin_test_all_json_for_test_contains_fields() {
     let json = plugin_test_all_json_for_test().unwrap();
-    let parsed: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["schema_version"].as_u64().unwrap(), 1);
-    assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.test_all");
+    let parsed = parse_json_value(&json);
+    assert_json_envelope_kind(&parsed, "plugin.test_all");
     assert!(parsed["data"]["overall_passed"].as_bool().unwrap());
-    assert_eq!(parsed["data"]["total"].as_u64().unwrap(), 0);
-    assert_eq!(parsed["data"]["passed"].as_u64().unwrap(), 0);
-    assert_eq!(parsed["data"]["failed"].as_u64().unwrap(), 0);
-    assert!(parsed["data"]["results"].as_array().unwrap().is_empty());
-    assert!(parsed["data"]["failures"].as_array().unwrap().is_empty());
+    assert_empty_aggregate_results(&parsed);
 }
 
 #[test]
 fn plugin_test_spec_json_for_test_contains_fields() {
     let json = plugin_test_spec_json_for_test("preen-rs.homebrew@1.2.0", "test.pack").unwrap();
-    let parsed: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["schema_version"].as_u64().unwrap(), 1);
-    assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.test_spec");
+    let parsed = parse_json_value(&json);
+    assert_json_envelope_kind(&parsed, "plugin.test_spec");
     assert_eq!(
         parsed["data"]["spec"].as_str().unwrap(),
         "preen-rs.homebrew@1.2.0"
@@ -893,9 +902,8 @@ fn plugin_test_spec_json_for_test_contains_fields() {
 #[test]
 fn plugin_preflight_json_for_test_contains_fields() {
     let json = plugin_preflight_json_for_test("preen-rs.homebrew@1.2.0", "test.pack").unwrap();
-    let parsed: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["schema_version"].as_u64().unwrap(), 1);
-    assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.preflight");
+    let parsed = parse_json_value(&json);
+    assert_json_envelope_kind(&parsed, "plugin.preflight");
     assert_eq!(
         parsed["data"]["spec"].as_str().unwrap(),
         "preen-rs.homebrew@1.2.0"
@@ -910,15 +918,10 @@ fn plugin_preflight_json_for_test_contains_fields() {
 #[test]
 fn plugin_preflight_all_json_for_test_contains_fields() {
     let json = plugin_preflight_all_json_for_test().unwrap();
-    let parsed: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["schema_version"].as_u64().unwrap(), 1);
-    assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.preflight_all");
+    let parsed = parse_json_value(&json);
+    assert_json_envelope_kind(&parsed, "plugin.preflight_all");
     assert!(parsed["data"]["overall_passed"].as_bool().unwrap());
-    assert_eq!(parsed["data"]["total"].as_u64().unwrap(), 0);
-    assert_eq!(parsed["data"]["passed"].as_u64().unwrap(), 0);
-    assert_eq!(parsed["data"]["failed"].as_u64().unwrap(), 0);
-    assert!(parsed["data"]["results"].as_array().unwrap().is_empty());
-    assert!(parsed["data"]["failures"].as_array().unwrap().is_empty());
+    assert_empty_aggregate_results(&parsed);
 }
 
 #[test]
