@@ -293,69 +293,13 @@ fn with_uninstall_path_override<T>(f: impl FnOnce() -> T) -> T {
     )
 }
 
-fn clean_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
     let _guard = ENV_LOCK.lock().unwrap();
-    with_clean_path_override(|| {
-        let cli = Cli::try_parse_from(["preen", "clean", "--confirm", "--json"]).unwrap();
-        let executor = ForcedCleanErrorExecutor { error };
-        let err = run_typed_with_verifier_and_clean_executor_for_test(
-            cli.clone(),
-            &AlwaysOkVerifier,
-            &executor,
-        )
-        .unwrap_err();
-        serde_json::from_str(&cli.format_error(&err)).unwrap()
-    })
+    f()
 }
 
-fn purge_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
-    let _guard = ENV_LOCK.lock().unwrap();
-    with_purge_path_override(|| {
-        let cli = Cli::try_parse_from(["preen", "purge", "--confirm", "--json"]).unwrap();
-        let executor = ForcedCleanErrorExecutor { error };
-        let err = run_typed_with_verifier_and_clean_executor_for_test(
-            cli.clone(),
-            &AlwaysOkVerifier,
-            &executor,
-        )
-        .unwrap_err();
-        serde_json::from_str(&cli.format_error(&err)).unwrap()
-    })
-}
-
-fn installer_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
-    let _guard = ENV_LOCK.lock().unwrap();
-    with_installer_path_override(|| {
-        let cli = Cli::try_parse_from(["preen", "installer", "--confirm", "--json"]).unwrap();
-        let executor = ForcedCleanErrorExecutor { error };
-        let err = run_typed_with_verifier_and_clean_executor_for_test(
-            cli.clone(),
-            &AlwaysOkVerifier,
-            &executor,
-        )
-        .unwrap_err();
-        serde_json::from_str(&cli.format_error(&err)).unwrap()
-    })
-}
-
-fn uninstall_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
-    let _guard = ENV_LOCK.lock().unwrap();
-    with_uninstall_path_override(|| {
-        let cli = Cli::try_parse_from(["preen", "uninstall", "DemoApp.app", "--confirm", "--json"])
-            .unwrap();
-        let executor = ForcedCleanErrorExecutor { error };
-        let err = run_typed_with_verifier_and_clean_executor_for_test(
-            cli.clone(),
-            &AlwaysOkVerifier,
-            &executor,
-        )
-        .unwrap_err();
-        serde_json::from_str(&cli.format_error(&err)).unwrap()
-    })
-}
-
-fn optimize_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
-    let cli = Cli::try_parse_from(["preen", "optimize", "--confirm", "--json"]).unwrap();
+fn forced_executor_error_json_for_args(args: &[&str], error: ActionExecutionError) -> Value {
+    let cli = Cli::try_parse_from(args).unwrap();
     let executor = ForcedCleanErrorExecutor { error };
     let err = run_typed_with_verifier_and_clean_executor_for_test(
         cli.clone(),
@@ -364,6 +308,50 @@ fn optimize_error_json_for_forced_executor(error: ActionExecutionError) -> Value
     )
     .unwrap_err();
     serde_json::from_str(&cli.format_error(&err)).unwrap()
+}
+
+fn clean_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+    with_env_lock(|| {
+        with_clean_path_override(|| {
+            forced_executor_error_json_for_args(&["preen", "clean", "--confirm", "--json"], error)
+        })
+    })
+}
+
+fn purge_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+    with_env_lock(|| {
+        with_purge_path_override(|| {
+            forced_executor_error_json_for_args(&["preen", "purge", "--confirm", "--json"], error)
+        })
+    })
+}
+
+fn installer_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+    with_env_lock(|| {
+        with_installer_path_override(|| {
+            forced_executor_error_json_for_args(
+                &["preen", "installer", "--confirm", "--json"],
+                error,
+            )
+        })
+    })
+}
+
+fn uninstall_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+    with_env_lock(|| {
+        with_uninstall_path_override(|| {
+            forced_executor_error_json_for_args(
+                &["preen", "uninstall", "DemoApp.app", "--confirm", "--json"],
+                error,
+            )
+        })
+    })
+}
+
+fn optimize_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
+    with_env_lock(|| {
+        forced_executor_error_json_for_args(&["preen", "optimize", "--confirm", "--json"], error)
+    })
 }
 
 fn check_passed_from_json(data: &Value, check_id: &str) -> Option<bool> {
