@@ -443,6 +443,17 @@ fn assert_empty_aggregate_results(output: &Value) {
     assert!(output["data"]["failures"].as_array().unwrap().is_empty());
 }
 
+fn assert_plugin_report_common_fields(output: &Value, pack_id: &str) {
+    assert_eq!(output["data"]["pack_id"].as_str(), Some(pack_id));
+    assert!(output["data"]["checks"].as_array().is_some());
+    assert!(output["data"]["suggested_actions"].as_array().is_some());
+    assert!(output["data"]["duration_ms"].as_u64().is_some());
+}
+
+fn assert_plugin_drifts_empty(output: &Value) {
+    assert!(output["data"]["drifts"].as_array().unwrap().is_empty());
+}
+
 fn assert_text_markers(name: &str, text: &str, markers: &[&str]) {
     for marker in markers {
         assert!(
@@ -836,16 +847,13 @@ fn plugin_verify_json_for_test_contains_fields() {
     let json = plugin_verify_json_for_test("test.pack", true, true, true).unwrap();
     let parsed = parse_json_value(&json);
     assert_json_envelope_kind(&parsed, "plugin.verify");
-    assert_eq!(parsed["data"]["pack_id"].as_str().unwrap(), "test.pack");
+    assert_plugin_report_common_fields(&parsed, "test.pack");
     assert!(parsed["data"]["overall_passed"].as_bool().unwrap());
     assert!(parsed["data"]["version_matches_lock"].as_bool().unwrap());
     assert!(parsed["data"]["manifest_hash_verified"].as_bool().unwrap());
     assert!(parsed["data"]["signature_hash_verified"].as_bool().unwrap());
     assert!(parsed["data"]["resolved_rev_verified"].as_bool().unwrap());
-    assert!(parsed["data"]["checks"].as_array().is_some());
-    assert!(parsed["data"]["suggested_actions"].as_array().is_some());
-    assert!(parsed["data"]["duration_ms"].as_u64().is_some());
-    assert!(parsed["data"]["drifts"].as_array().unwrap().is_empty());
+    assert_plugin_drifts_empty(&parsed);
 }
 
 #[test]
@@ -864,14 +872,11 @@ fn plugin_test_json_for_test_contains_fields() {
     let json = plugin_test_json_for_test("test.pack").unwrap();
     let parsed = parse_json_value(&json);
     assert_json_envelope_kind(&parsed, "plugin.test");
-    assert_eq!(parsed["data"]["pack_id"].as_str().unwrap(), "test.pack");
+    assert_plugin_report_common_fields(&parsed, "test.pack");
     assert!(parsed["data"]["overall_passed"].as_bool().unwrap());
     assert!(parsed["data"]["version_matches_lock"].as_bool().unwrap());
     assert!(parsed["data"]["signature_verified"].as_bool().unwrap());
-    assert!(parsed["data"]["checks"].as_array().is_some());
-    assert!(parsed["data"]["suggested_actions"].as_array().is_some());
-    assert!(parsed["data"]["duration_ms"].as_u64().is_some());
-    assert!(parsed["data"]["drifts"].as_array().unwrap().is_empty());
+    assert_plugin_drifts_empty(&parsed);
 }
 
 #[test]
@@ -892,11 +897,8 @@ fn plugin_test_spec_json_for_test_contains_fields() {
         parsed["data"]["spec"].as_str().unwrap(),
         "preen-rs.homebrew@1.2.0"
     );
-    assert_eq!(parsed["data"]["pack_id"].as_str().unwrap(), "test.pack");
+    assert_plugin_report_common_fields(&parsed, "test.pack");
     assert!(parsed["data"]["overall_passed"].as_bool().unwrap());
-    assert!(parsed["data"]["checks"].as_array().is_some());
-    assert!(parsed["data"]["suggested_actions"].as_array().is_some());
-    assert!(parsed["data"]["duration_ms"].as_u64().is_some());
 }
 
 #[test]
@@ -908,11 +910,8 @@ fn plugin_preflight_json_for_test_contains_fields() {
         parsed["data"]["spec"].as_str().unwrap(),
         "preen-rs.homebrew@1.2.0"
     );
-    assert_eq!(parsed["data"]["pack_id"].as_str().unwrap(), "test.pack");
+    assert_plugin_report_common_fields(&parsed, "test.pack");
     assert!(parsed["data"]["signature_verified"].as_bool().unwrap());
-    assert!(parsed["data"]["checks"].as_array().is_some());
-    assert!(parsed["data"]["suggested_actions"].as_array().is_some());
-    assert!(parsed["data"]["duration_ms"].as_u64().is_some());
 }
 
 #[test]
