@@ -355,6 +355,13 @@ fn with_update_release_env<T>(f: impl FnOnce() -> T) -> T {
     )
 }
 
+fn with_update_install_source_env<T>(source: &str, f: impl FnOnce() -> T) -> T {
+    with_env_overrides(
+        &[("PREEN_UPDATE_INSTALL_SOURCE", OsString::from(source))],
+        f,
+    )
+}
+
 fn with_remove_targets_env<T>(f: impl FnOnce() -> T) -> T {
     with_temp_fixture_env(
         |root| {
@@ -372,6 +379,39 @@ fn with_remove_targets_env<T>(f: impl FnOnce() -> T) -> T {
         },
         f,
     )
+}
+
+fn with_remove_paths_env<T>(
+    seed_files: bool,
+    install_source: Option<&str>,
+    f: impl FnOnce(&Path, &Path) -> T,
+) -> T {
+    let state_root = tempfile::tempdir().unwrap();
+    let cache_root = tempfile::tempdir().unwrap();
+    let state_path = state_root.path().join("state");
+    let cache_path = cache_root.path().join("cache");
+    fs::create_dir_all(&state_path).unwrap();
+    fs::create_dir_all(&cache_path).unwrap();
+    if seed_files {
+        fs::write(state_path.join("plugins.lock"), "dummy").unwrap();
+        fs::write(cache_path.join("cache.tmp"), "dummy").unwrap();
+    }
+
+    let mut overrides = vec![
+        (
+            "PREEN_REMOVE_STATE_DIR",
+            state_path.clone().into_os_string(),
+        ),
+        (
+            "PREEN_REMOVE_CACHE_DIR",
+            cache_path.clone().into_os_string(),
+        ),
+    ];
+    if let Some(source) = install_source {
+        overrides.push(("PREEN_UPDATE_INSTALL_SOURCE", OsString::from(source)));
+    }
+
+    with_env_overrides(&overrides, || f(&state_path, &cache_path))
 }
 
 fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
@@ -2937,17 +2977,7 @@ fn completion_autodetect_uses_override_when_shell_missing() {
 fn update_json_happy_path_contains_suggested_command() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_UPDATE_LATEST_VERSION", "9.9.9");
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
-        }
-        let output = update_output_for_test(false, false).unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_UPDATE_LATEST_VERSION");
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let output = with_update_release_env(|| update_output_for_test(false, false).unwrap());
         assert_eq!(output["kind"].as_str(), Some("system.update"));
         assert_eq!(output["data"]["channel"].as_str(), Some("stable"));
         assert_eq!(output["data"]["install_source"].as_str(), Some("cargo"));
@@ -2962,15 +2992,9 @@ fn update_json_happy_path_contains_suggested_command() {
 fn update_nightly_homebrew_reports_unsupported_source() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "homebrew");
-        }
-        let output = update_output_for_test(false, true).unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let output = with_update_install_source_env("homebrew", || {
+            update_output_for_test(false, true).unwrap()
+        });
         assert_eq!(output["kind"].as_str(), Some("system.update"));
         assert_eq!(output["data"]["channel"].as_str(), Some("nightly"));
         assert_eq!(
@@ -3009,16 +3033,9 @@ fn update_command_runs_without_error() {
 fn update_nightly_rejects_non_script_install_source() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "homebrew");
-        }
         let cli = Cli::try_parse_from(["preen", "update", "--nightly", "--json"]).unwrap();
-        let err = run_typed(cli.clone()).unwrap_err();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let err =
+            with_update_install_source_env("homebrew", || run_typed(cli.clone()).unwrap_err());
         assert_eq!(err.kind, CliErrorKind::Validation);
         assert_eq!(
             err.detail_code.as_deref(),
@@ -3036,23 +3053,9 @@ fn update_nightly_rejects_non_script_install_source() {
 fn remove_json_happy_path_dry_run() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
-        let state_dir = tempfile::tempdir().unwrap();
-        let cache_dir = tempfile::tempdir().unwrap();
-        fs::write(state_dir.path().join("plugins.lock"), "dummy").unwrap();
-        fs::write(cache_dir.path().join("cache.tmp"), "dummy").unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_dir.path().as_os_str());
-            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
-        }
-        let output = remove_output_for_test(true, false).unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
-            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let output = with_remove_paths_env(true, Some("cargo"), |_, _| {
+            remove_output_for_test(true, false).unwrap()
+        });
         assert_eq!(output["kind"].as_str(), Some("system.remove"));
         assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
         assert!(output["data"]["detected_paths"].as_array().is_some());
@@ -3065,15 +3068,9 @@ fn remove_json_happy_path_dry_run() {
 fn remove_unknown_source_includes_executable_manual_step() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "unknown");
-        }
-        let output = remove_output_for_test(true, false).unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let output = with_update_install_source_env("unknown", || {
+            remove_output_for_test(true, false).unwrap()
+        });
         let executable = output["data"]["executable"].as_str().unwrap_or_default();
         let manual_steps = output["data"]["manual_steps"]
             .as_array()
@@ -3098,31 +3095,13 @@ fn remove_unknown_source_includes_executable_manual_step() {
 fn remove_apply_deletes_temp_paths() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
-        let state_root = tempfile::tempdir().unwrap();
-        let cache_root = tempfile::tempdir().unwrap();
-        let state_path = state_root.path().join("state");
-        let cache_path = cache_root.path().join("cache");
-        fs::create_dir_all(&state_path).unwrap();
-        fs::create_dir_all(&cache_path).unwrap();
-        fs::write(state_path.join("plugins.lock"), "dummy").unwrap();
-        fs::write(cache_path.join("cache.tmp"), "dummy").unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_path.as_os_str());
-            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_path.as_os_str());
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
-        }
-        let output = remove_output_for_test(false, true).unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
-            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
-        assert_eq!(output["data"]["mode"].as_str(), Some("apply"));
-        assert!(!state_path.exists());
-        assert!(!cache_path.exists());
-        assert!(output["data"]["removed_paths"].as_array().is_some());
+        with_remove_paths_env(true, Some("cargo"), |state_path, cache_path| {
+            let output = remove_output_for_test(false, true).unwrap();
+            assert_eq!(output["data"]["mode"].as_str(), Some("apply"));
+            assert!(!state_path.exists());
+            assert!(!cache_path.exists());
+            assert!(output["data"]["removed_paths"].as_array().is_some());
+        });
     });
 }
 
@@ -3130,34 +3109,20 @@ fn remove_apply_deletes_temp_paths() {
 fn remove_apply_requires_confirm() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
-        let state_root = tempfile::tempdir().unwrap();
-        let cache_root = tempfile::tempdir().unwrap();
-        let state_path = state_root.path().join("state");
-        let cache_path = cache_root.path().join("cache");
-        fs::create_dir_all(&state_path).unwrap();
-        fs::create_dir_all(&cache_path).unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_path.as_os_str());
-            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_path.as_os_str());
-        }
-        let cli = Cli::try_parse_from(["preen", "remove", "--json"]).unwrap();
-        let err = run_typed(cli.clone()).unwrap_err();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
-            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
-        }
-        assert_eq!(err.kind, CliErrorKind::Validation);
-        assert_eq!(
-            err.detail_code.as_deref(),
-            Some("remove_confirmation_required")
-        );
-        let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
-        assert_eq!(
-            parsed["data"]["detail_code"].as_str(),
-            Some("remove_confirmation_required")
-        );
+        with_remove_paths_env(false, None, |_, _| {
+            let cli = Cli::try_parse_from(["preen", "remove", "--json"]).unwrap();
+            let err = run_typed(cli.clone()).unwrap_err();
+            assert_eq!(err.kind, CliErrorKind::Validation);
+            assert_eq!(
+                err.detail_code.as_deref(),
+                Some("remove_confirmation_required")
+            );
+            let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+            assert_eq!(
+                parsed["data"]["detail_code"].as_str(),
+                Some("remove_confirmation_required")
+            );
+        });
     });
 }
 
@@ -3165,25 +3130,11 @@ fn remove_apply_requires_confirm() {
 fn remove_command_runs_without_error() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
-        let state_root = tempfile::tempdir().unwrap();
-        let cache_root = tempfile::tempdir().unwrap();
-        let state_path = state_root.path().join("state");
-        let cache_path = cache_root.path().join("cache");
-        fs::create_dir_all(&state_path).unwrap();
-        fs::create_dir_all(&cache_path).unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_path.as_os_str());
-            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_path.as_os_str());
-        }
-        let cli = Cli::try_parse_from(["preen", "remove", "--dry-run", "--json"]).unwrap();
-        let result = run_typed(cli);
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
-            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
-        }
-        assert!(result.is_ok());
+        with_remove_paths_env(false, None, |_, _| {
+            let cli = Cli::try_parse_from(["preen", "remove", "--dry-run", "--json"]).unwrap();
+            let result = run_typed(cli);
+            assert!(result.is_ok());
+        });
     });
 }
 
