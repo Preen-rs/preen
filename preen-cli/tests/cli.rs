@@ -334,6 +334,46 @@ fn with_uninstall_path_override<T>(f: impl FnOnce() -> T) -> T {
     )
 }
 
+fn with_analyze_root_fixture<T>(f: impl FnOnce(&Path) -> T) -> T {
+    let analyze_root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(analyze_root.path().join("nested")).unwrap();
+    fs::write(
+        analyze_root.path().join("nested").join("sample.bin"),
+        b"sample",
+    )
+    .unwrap();
+    f(analyze_root.path())
+}
+
+fn with_update_release_env<T>(f: impl FnOnce() -> T) -> T {
+    with_env_overrides(
+        &[
+            ("PREEN_UPDATE_LATEST_VERSION", OsString::from("9.9.9")),
+            ("PREEN_UPDATE_INSTALL_SOURCE", OsString::from("cargo")),
+        ],
+        f,
+    )
+}
+
+fn with_remove_targets_env<T>(f: impl FnOnce() -> T) -> T {
+    with_temp_fixture_env(
+        |root| {
+            let state_dir = root.join("state");
+            let cache_dir = root.join("cache");
+            fs::create_dir_all(&state_dir).unwrap();
+            fs::create_dir_all(&cache_dir).unwrap();
+            fs::write(state_dir.join("plugins.lock"), "dummy").unwrap();
+            fs::write(cache_dir.join("cache.tmp"), "dummy").unwrap();
+            vec![
+                ("PREEN_REMOVE_STATE_DIR", state_dir.into_os_string()),
+                ("PREEN_REMOVE_CACHE_DIR", cache_dir.into_os_string()),
+                ("PREEN_UPDATE_INSTALL_SOURCE", OsString::from("cargo")),
+            ]
+        },
+        f,
+    )
+}
+
 fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
     let _guard = ENV_LOCK.lock().unwrap();
     f()
@@ -1893,14 +1933,9 @@ fn system_support_commands_json_contract_matrix_has_required_fields() {
         );
     });
 
-    let analyze_root = tempfile::tempdir().unwrap();
-    fs::create_dir_all(analyze_root.path().join("nested")).unwrap();
-    fs::write(
-        analyze_root.path().join("nested").join("sample.bin"),
-        b"sample",
-    )
-    .unwrap();
-    let analyze = analyze_output_for_test(Some(analyze_root.path())).unwrap();
+    let analyze = with_analyze_root_fixture(|analyze_root| {
+        analyze_output_for_test(Some(analyze_root)).unwrap()
+    });
     assert_system_envelope(
         &analyze,
         "system.analyze",
@@ -1977,17 +2012,7 @@ fn system_support_commands_json_contract_matrix_has_required_fields() {
             ],
         );
 
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_UPDATE_LATEST_VERSION", "9.9.9");
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
-        }
-        let update = update_output_for_test(false, false).unwrap();
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_UPDATE_LATEST_VERSION");
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let update = with_update_release_env(|| update_output_for_test(false, false).unwrap());
         assert_system_envelope(
             &update,
             "system.update",
@@ -2006,23 +2031,7 @@ fn system_support_commands_json_contract_matrix_has_required_fields() {
             ],
         );
 
-        let state_dir = tempfile::tempdir().unwrap();
-        let cache_dir = tempfile::tempdir().unwrap();
-        fs::write(state_dir.path().join("plugins.lock"), "dummy").unwrap();
-        fs::write(cache_dir.path().join("cache.tmp"), "dummy").unwrap();
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_dir.path().as_os_str());
-            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
-        }
-        let remove = remove_output_for_test(true, false).unwrap();
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
-            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let remove = with_remove_targets_env(|| remove_output_for_test(true, false).unwrap());
         assert_system_envelope(
             &remove,
             "system.remove",
@@ -2055,14 +2064,9 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
         );
     });
 
-    let analyze_root = tempfile::tempdir().unwrap();
-    fs::create_dir_all(analyze_root.path().join("nested")).unwrap();
-    fs::write(
-        analyze_root.path().join("nested").join("sample.bin"),
-        b"sample",
-    )
-    .unwrap();
-    let analyze = analyze_text_output_for_test(Some(analyze_root.path())).unwrap();
+    let analyze = with_analyze_root_fixture(|analyze_root| {
+        analyze_text_output_for_test(Some(analyze_root)).unwrap()
+    });
     assert_text_markers_with_summary_mode(
         "analyze",
         &analyze,
@@ -2112,17 +2116,7 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
             &["shell: zsh", "mode=dry_run", "config_path:"],
         );
 
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_UPDATE_LATEST_VERSION", "9.9.9");
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
-        }
-        let update = update_text_output_for_test(false, false);
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_UPDATE_LATEST_VERSION");
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let update = with_update_release_env(|| update_text_output_for_test(false, false));
         assert_text_markers_with_summary_mode(
             "update",
             &update,
@@ -2135,23 +2129,7 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
             ],
         );
 
-        let state_dir = tempfile::tempdir().unwrap();
-        let cache_dir = tempfile::tempdir().unwrap();
-        fs::write(state_dir.path().join("plugins.lock"), "dummy").unwrap();
-        fs::write(cache_dir.path().join("cache.tmp"), "dummy").unwrap();
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_dir.path().as_os_str());
-            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
-        }
-        let remove = remove_text_output_for_test(true, false).unwrap();
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
-            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let remove = with_remove_targets_env(|| remove_text_output_for_test(true, false).unwrap());
         assert_text_markers_with_summary_mode(
             "remove",
             &remove,
@@ -2256,14 +2234,9 @@ fn system_text_schema_snapshot_matrix_is_stable() {
             &["checks: label=Checks"],
         );
 
-        let analyze_root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(analyze_root.path().join("nested")).unwrap();
-        fs::write(
-            analyze_root.path().join("nested").join("sample.bin"),
-            b"sample",
-        )
-        .unwrap();
-        let analyze = analyze_text_output_for_test(Some(analyze_root.path())).unwrap();
+        let analyze = with_analyze_root_fixture(|analyze_root| {
+            analyze_text_output_for_test(Some(analyze_root)).unwrap()
+        });
         assert_text_markers_with_summary_mode(
             "analyze",
             &analyze,
@@ -2307,17 +2280,7 @@ fn system_text_schema_snapshot_matrix_is_stable() {
             &["shell: zsh"],
         );
 
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_UPDATE_LATEST_VERSION", "9.9.9");
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
-        }
-        let update = update_text_output_for_test(false, false);
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_UPDATE_LATEST_VERSION");
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let update = with_update_release_env(|| update_text_output_for_test(false, false));
         assert_text_markers_with_summary_mode(
             "update",
             &update,
@@ -2326,23 +2289,7 @@ fn system_text_schema_snapshot_matrix_is_stable() {
             &["checks: label=Checks"],
         );
 
-        let state_dir = tempfile::tempdir().unwrap();
-        let cache_dir = tempfile::tempdir().unwrap();
-        fs::write(state_dir.path().join("plugins.lock"), "dummy").unwrap();
-        fs::write(cache_dir.path().join("cache.tmp"), "dummy").unwrap();
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_dir.path().as_os_str());
-            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
-            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
-        }
-        let remove = remove_text_output_for_test(true, false).unwrap();
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
-            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
-            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
-        }
+        let remove = with_remove_targets_env(|| remove_text_output_for_test(true, false).unwrap());
         assert_text_markers_with_summary_mode(
             "remove",
             &remove,
