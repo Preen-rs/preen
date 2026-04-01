@@ -463,6 +463,26 @@ fn assert_text_markers(name: &str, text: &str, markers: &[&str]) {
     }
 }
 
+fn assert_text_markers_with_summary_mode(
+    name: &str,
+    text: &str,
+    kind: &str,
+    mode: &str,
+    markers: &[&str],
+) {
+    let summary_marker = format!("summary: kind={kind}");
+    let mode_marker = format!("mode: {mode}");
+    assert!(
+        text.contains(&summary_marker),
+        "{name} missing marker `{summary_marker}`. output:\n{text}"
+    );
+    assert!(
+        text.contains(&mode_marker),
+        "{name} missing marker `{mode_marker}`. output:\n{text}"
+    );
+    assert_text_markers(name, text, markers);
+}
+
 fn check_passed_from_verify_text(text: &str, check_id: &str) -> Option<bool> {
     let prefix = format!("check: id={check_id} ");
     for line in text.lines() {
@@ -1726,12 +1746,12 @@ fn system_command_text_contract_matrix_has_required_markers() {
     let _guard = ENV_LOCK.lock().unwrap();
 
     let clean = with_clean_path_override(|| clean_text_output_for_test(true, false, None).unwrap());
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "clean",
         &clean,
+        "system_clean",
+        "dry_run",
         &[
-            "summary: kind=system_clean",
-            "mode: dry_run",
             "clean dry_run completed:",
             "strategy=",
             "scanned=",
@@ -1742,12 +1762,12 @@ fn system_command_text_contract_matrix_has_required_markers() {
     );
 
     let purge = with_purge_path_override(|| purge_text_output_for_test(true, false).unwrap());
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "purge",
         &purge,
+        "system_purge",
+        "dry_run",
         &[
-            "summary: kind=system_purge",
-            "mode: dry_run",
             "Purge (dry-run)",
             "Scanned roots:",
             "Targets:",
@@ -1758,12 +1778,12 @@ fn system_command_text_contract_matrix_has_required_markers() {
 
     let installer =
         with_installer_path_override(|| installer_text_output_for_test(true, false).unwrap());
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "installer",
         &installer,
+        "system_installer",
+        "dry_run",
         &[
-            "summary: kind=system_installer",
-            "mode: dry_run",
             "Installer (dry-run)",
             "Scanned roots:",
             "Scanned files:",
@@ -1776,12 +1796,12 @@ fn system_command_text_contract_matrix_has_required_markers() {
     let uninstall = with_uninstall_path_override(|| {
         uninstall_text_output_for_test(Some("DemoApp.app"), true, false).unwrap()
     });
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "uninstall",
         &uninstall,
+        "system_uninstall",
+        "dry_run",
         &[
-            "summary: kind=system_uninstall",
-            "mode: dry_run",
             "Uninstall (dry-run)",
             "Target: DemoApp.app",
             "Scanned entries:",
@@ -1792,12 +1812,12 @@ fn system_command_text_contract_matrix_has_required_markers() {
     );
 
     let optimize = optimize_text_output_for_test(true, false).unwrap();
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "optimize",
         &optimize,
+        "system_optimize",
+        "dry_run",
         &[
-            "summary: kind=system_optimize",
-            "mode: dry_run",
             "Optimize (dry-run)",
             "OS:",
             "Tasks:",
@@ -1826,42 +1846,30 @@ fn system_paths_text_contract_matrix_has_required_markers() {
     let _guard = ENV_LOCK.lock().unwrap();
 
     let purge = with_purge_path_override(purge_paths_text_for_test);
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "purge_paths",
         &purge,
-        &[
-            "summary: kind=system_paths command=purge",
-            "mode: paths",
-            "roots: count=",
-            "Purge scan roots:",
-            "- ",
-        ],
+        "system_paths command=purge",
+        "paths",
+        &["roots: count=", "Purge scan roots:", "- "],
     );
 
     let installer = with_installer_path_override(installer_paths_text_for_test);
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "installer_paths",
         &installer,
-        &[
-            "summary: kind=system_paths command=installer",
-            "mode: paths",
-            "roots: count=",
-            "Installer scan roots:",
-            "- ",
-        ],
+        "system_paths command=installer",
+        "paths",
+        &["roots: count=", "Installer scan roots:", "- "],
     );
 
     let uninstall = with_uninstall_path_override(uninstall_paths_text_for_test);
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "uninstall_paths",
         &uninstall,
-        &[
-            "summary: kind=system_paths command=uninstall",
-            "mode: paths",
-            "roots: count=",
-            "Uninstall scan roots:",
-            "- ",
-        ],
+        "system_paths command=uninstall",
+        "paths",
+        &["roots: count=", "Uninstall scan roots:", "- "],
     );
 }
 
@@ -2038,15 +2046,12 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
 
     with_temp_user_env(|| {
         let check = check_text_output_for_test(false);
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "check",
             &check,
-            &[
-                "summary: kind=system_check",
-                "mode: check",
-                "checks: label=Checks",
-                "fixes_applied:",
-            ],
+            "system_check",
+            "check",
+            &["checks: label=Checks", "fixes_applied:"],
         );
     });
 
@@ -2058,12 +2063,12 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
     )
     .unwrap();
     let analyze = analyze_text_output_for_test(Some(analyze_root.path())).unwrap();
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "analyze",
         &analyze,
+        "system_analyze",
+        "analyze",
         &[
-            "summary: kind=system_analyze",
-            "mode: analyze",
             "root:",
             "top_entries_limit:",
             "total_files:",
@@ -2073,28 +2078,21 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
 
     with_temp_user_env(|| {
         let status = status_text_output_for_test().unwrap();
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "status",
             &status,
-            &[
-                "summary: kind=system_status",
-                "mode: status",
-                "checks: label=Checks",
-                "suggested_actions: count=",
-            ],
+            "system_status",
+            "status",
+            &["checks: label=Checks", "suggested_actions: count="],
         );
 
         let touchid = touchid_text_output_for_test(Some("status"), true).unwrap();
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "touchid",
             &touchid,
-            &[
-                "summary: kind=system_touchid",
-                "mode: dry_run",
-                "action: status",
-                "action=status",
-                "mode=dry_run",
-            ],
+            "system_touchid",
+            "dry_run",
+            &["action: status", "action=status", "mode=dry_run"],
         );
 
         // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
@@ -2106,16 +2104,12 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
         unsafe {
             std::env::remove_var("SHELL");
         }
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "completion",
             &completion,
-            &[
-                "summary: kind=system_completion",
-                "mode: dry_run",
-                "shell: zsh",
-                "mode=dry_run",
-                "config_path:",
-            ],
+            "system_completion",
+            "dry_run",
+            &["shell: zsh", "mode=dry_run", "config_path:"],
         );
 
         // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
@@ -2129,12 +2123,12 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
             std::env::remove_var("PREEN_UPDATE_LATEST_VERSION");
             std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
         }
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "update",
             &update,
+            "system_update",
+            "plan",
             &[
-                "summary: kind=system_update",
-                "mode: plan",
                 "channel=stable",
                 "suggested_command:",
                 "checks: label=Checks",
@@ -2158,12 +2152,12 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
             std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
             std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
         }
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "remove",
             &remove,
+            "system_remove",
+            "dry_run",
             &[
-                "summary: kind=system_remove",
-                "mode: dry_run",
                 "executable:",
                 "detected_path:",
                 "checks: label=Checks",
@@ -2178,96 +2172,88 @@ fn system_text_schema_snapshot_matrix_is_stable() {
     let _guard = ENV_LOCK.lock().unwrap();
 
     let clean = with_clean_path_override(|| clean_text_output_for_test(true, false, None).unwrap());
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "clean",
         &clean,
-        &[
-            "summary: kind=system_clean",
-            "mode: dry_run",
-            "risk: high_targets=",
-        ],
+        "system_clean",
+        "dry_run",
+        &["risk: high_targets="],
     );
 
     let purge = with_purge_path_override(|| purge_text_output_for_test(true, false).unwrap());
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "purge",
         &purge,
-        &[
-            "summary: kind=system_purge",
-            "mode: dry_run",
-            "Purge (dry-run)",
-        ],
+        "system_purge",
+        "dry_run",
+        &["Purge (dry-run)"],
     );
 
     let installer =
         with_installer_path_override(|| installer_text_output_for_test(true, false).unwrap());
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "installer",
         &installer,
-        &[
-            "summary: kind=system_installer",
-            "mode: dry_run",
-            "Installer (dry-run)",
-        ],
+        "system_installer",
+        "dry_run",
+        &["Installer (dry-run)"],
     );
 
     let uninstall = with_uninstall_path_override(|| {
         uninstall_text_output_for_test(Some("DemoApp.app"), true, false).unwrap()
     });
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "uninstall",
         &uninstall,
-        &[
-            "summary: kind=system_uninstall",
-            "mode: dry_run",
-            "Target: DemoApp.app",
-        ],
+        "system_uninstall",
+        "dry_run",
+        &["Target: DemoApp.app"],
     );
 
     let optimize = optimize_text_output_for_test(true, false).unwrap();
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "optimize",
         &optimize,
-        &["summary: kind=system_optimize", "mode: dry_run", "Tasks:"],
+        "system_optimize",
+        "dry_run",
+        &["Tasks:"],
     );
 
     let purge_paths = with_purge_path_override(purge_paths_text_for_test);
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "purge_paths",
         &purge_paths,
-        &["summary: kind=system_paths command=purge", "mode: paths"],
+        "system_paths command=purge",
+        "paths",
+        &[],
     );
 
     let installer_paths = with_installer_path_override(installer_paths_text_for_test);
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "installer_paths",
         &installer_paths,
-        &[
-            "summary: kind=system_paths command=installer",
-            "mode: paths",
-        ],
+        "system_paths command=installer",
+        "paths",
+        &[],
     );
 
     let uninstall_paths = with_uninstall_path_override(uninstall_paths_text_for_test);
-    assert_text_markers(
+    assert_text_markers_with_summary_mode(
         "uninstall_paths",
         &uninstall_paths,
-        &[
-            "summary: kind=system_paths command=uninstall",
-            "mode: paths",
-        ],
+        "system_paths command=uninstall",
+        "paths",
+        &[],
     );
 
     with_temp_user_env(|| {
         let check = check_text_output_for_test(false);
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "check",
             &check,
-            &[
-                "summary: kind=system_check",
-                "mode: check",
-                "checks: label=Checks",
-            ],
+            "system_check",
+            "check",
+            &["checks: label=Checks"],
         );
 
         let analyze_root = tempfile::tempdir().unwrap();
@@ -2278,36 +2264,30 @@ fn system_text_schema_snapshot_matrix_is_stable() {
         )
         .unwrap();
         let analyze = analyze_text_output_for_test(Some(analyze_root.path())).unwrap();
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "analyze",
             &analyze,
-            &[
-                "summary: kind=system_analyze",
-                "mode: analyze",
-                "entries: label=Top entries",
-            ],
+            "system_analyze",
+            "analyze",
+            &["entries: label=Top entries"],
         );
 
         let status = status_text_output_for_test().unwrap();
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "status",
             &status,
-            &[
-                "summary: kind=system_status",
-                "mode: status",
-                "checks: label=Checks",
-            ],
+            "system_status",
+            "status",
+            &["checks: label=Checks"],
         );
 
         let touchid = touchid_text_output_for_test(Some("status"), true).unwrap();
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "touchid",
             &touchid,
-            &[
-                "summary: kind=system_touchid",
-                "mode: dry_run",
-                "action: status",
-            ],
+            "system_touchid",
+            "dry_run",
+            &["action: status"],
         );
 
         // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
@@ -2319,14 +2299,12 @@ fn system_text_schema_snapshot_matrix_is_stable() {
         unsafe {
             std::env::remove_var("SHELL");
         }
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "completion",
             &completion,
-            &[
-                "summary: kind=system_completion",
-                "mode: dry_run",
-                "shell: zsh",
-            ],
+            "system_completion",
+            "dry_run",
+            &["shell: zsh"],
         );
 
         // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
@@ -2340,14 +2318,12 @@ fn system_text_schema_snapshot_matrix_is_stable() {
             std::env::remove_var("PREEN_UPDATE_LATEST_VERSION");
             std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
         }
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "update",
             &update,
-            &[
-                "summary: kind=system_update",
-                "mode: plan",
-                "checks: label=Checks",
-            ],
+            "system_update",
+            "plan",
+            &["checks: label=Checks"],
         );
 
         let state_dir = tempfile::tempdir().unwrap();
@@ -2367,14 +2343,12 @@ fn system_text_schema_snapshot_matrix_is_stable() {
             std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
             std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
         }
-        assert_text_markers(
+        assert_text_markers_with_summary_mode(
             "remove",
             &remove,
-            &[
-                "summary: kind=system_remove",
-                "mode: dry_run",
-                "checks: label=Checks",
-            ],
+            "system_remove",
+            "dry_run",
+            &["checks: label=Checks"],
         );
 
         let clean_whitelist = clean_whitelist_text_output_for_test().unwrap();
