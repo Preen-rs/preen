@@ -482,6 +482,168 @@ fn with_remove_paths_env<T>(
     with_env_overrides(&overrides, || f(&state_path, &cache_path))
 }
 
+const REGISTRY_SIGN_IDENTITY: &str =
+    "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main";
+const REGISTRY_SIGN_ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+fn file_source_url(path: &Path) -> String {
+    format!("file://{}", path.display())
+}
+
+struct RegistryIndexEntrySpec<'a> {
+    pack_id: &'a str,
+    name: &'a str,
+    description: &'a str,
+    repo_url: &'a str,
+    latest_version: &'a str,
+    rev: &'a str,
+}
+
+fn write_registry_index_single_entry(
+    index: &Path,
+    generated_at: &str,
+    entry: &RegistryIndexEntrySpec<'_>,
+) {
+    fs::write(
+        index,
+        format!(
+            r#"
+schema_version = 1
+generated_at = "{generated_at}"
+
+[[entries]]
+pack_id = "{pack_id}"
+name = "{name}"
+description = "{description}"
+repo_url = "{repo_url}"
+latest_version = "{latest_version}"
+  [[entries.versions]]
+  version = "{latest_version}"
+  rev = "{rev}"
+"#,
+            pack_id = entry.pack_id,
+            name = entry.name,
+            description = entry.description,
+            repo_url = entry.repo_url,
+            latest_version = entry.latest_version,
+            rev = entry.rev,
+        ),
+    )
+    .unwrap();
+}
+
+fn write_registry_signature(sig: &Path) {
+    fs::write(sig, "sig").unwrap();
+}
+
+fn write_homebrew_registry_index(index: &Path, generated_at: &str) {
+    write_registry_index_single_entry(
+        index,
+        generated_at,
+        &RegistryIndexEntrySpec {
+            pack_id: "preen-rs.homebrew",
+            name: "Homebrew",
+            description: "Cleanup pack",
+            repo_url: "https://github.com/Preen-rs/preen-rulepack-homebrew",
+            latest_version: "1.2.0",
+            rev: "abc123",
+        },
+    );
+}
+
+fn run_registry_update_cli_with_verifier<V: SignatureVerifier>(
+    index: &Path,
+    sig: &Path,
+    verifier: &V,
+) -> Result<(), CliError> {
+    let cli = make_registry_update_cli(index, sig);
+    run_typed_with_verifier_for_test(cli, verifier)
+}
+
+fn make_registry_update_cli(index: &Path, sig: &Path) -> Cli {
+    make_registry_update_cli_with_strict_mode(index, sig, false)
+}
+
+fn make_registry_update_cli_with_strict_mode(index: &Path, sig: &Path, strict: bool) -> Cli {
+    let source = file_source_url(index);
+    let signature_source = file_source_url(sig);
+    let mut args = vec![
+        "preen".to_string(),
+        "plugin".to_string(),
+        "registry-update".to_string(),
+    ];
+    if strict {
+        args.push("--strict".to_string());
+    }
+    args.extend([
+        "--source".to_string(),
+        source,
+        "--signature-source".to_string(),
+        signature_source,
+        "--identity".to_string(),
+        REGISTRY_SIGN_IDENTITY.to_string(),
+        "--issuer".to_string(),
+        REGISTRY_SIGN_ISSUER.to_string(),
+    ]);
+    Cli::try_parse_from(args).unwrap()
+}
+
+struct RegistryRepoFixture {
+    _tmp: tempfile::TempDir,
+    repo: PathBuf,
+    rev: String,
+    index: PathBuf,
+    sig: PathBuf,
+    cache: PathBuf,
+    lockfile: PathBuf,
+    install_dir: PathBuf,
+}
+
+impl RegistryRepoFixture {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let index = tmp.path().join("registry-index.toml");
+        let sig = tmp.path().join("registry-index.toml.sig");
+        let cache = tmp.path().join("cache-index.toml");
+        let lockfile = tmp.path().join("preen-plugins.lock");
+        let install_dir = tmp.path().join("installed-plugins");
+        Self {
+            _tmp: tmp,
+            repo,
+            rev,
+            index,
+            sig,
+            cache,
+            lockfile,
+            install_dir,
+        }
+    }
+
+    fn write_test_pack_index(&self) {
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let repo_url = file_source_url(&self.repo);
+        write_registry_index_single_entry(
+            &self.index,
+            &now,
+            &RegistryIndexEntrySpec {
+                pack_id: "test.pack",
+                name: "Test Pack",
+                description: "Cleanup pack",
+                repo_url: &repo_url,
+                latest_version: "0.1.0",
+                rev: &self.rev,
+            },
+        );
+        write_registry_signature(&self.sig);
+    }
+
+    fn run_registry_update<V: SignatureVerifier>(&self, verifier: &V) -> Result<(), CliError> {
+        run_registry_update_cli_with_verifier(&self.index, &self.sig, verifier)
+    }
+}
+
 fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
     let _guard = ENV_LOCK.lock().unwrap();
     f()
@@ -5354,44 +5516,11 @@ fn run_typed_registry_update_local_source_success_with_injected_verifier() {
     let cache = tmp.path().join("cache-index.toml");
 
     let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "preen-rs.homebrew"
-name = "Homebrew"
-description = "Cleanup pack"
-repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
-latest_version = "1.2.0"
-  [[entries.versions]]
-  version = "1.2.0"
-  rev = "abc123"
-"#
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
+    write_homebrew_registry_index(&index, &now);
+    write_registry_signature(&sig);
 
     apply_registry_freshness_env(&cache, "warn", None);
-
-    let cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
+    let cli = make_registry_update_cli(&index, &sig);
     run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier).unwrap();
 
     let written = fs::read_to_string(&cache).unwrap();
@@ -5401,54 +5530,10 @@ latest_version = "1.2.0"
 #[test]
 fn run_typed_registry_update_then_preflight_registry_spec_success() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-
-    let index = tmp.path().join("registry-index.toml");
-    let sig = tmp.path().join("registry-index.toml.sig");
-    let cache = tmp.path().join("cache-index.toml");
-    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "test.pack"
-name = "Test Pack"
-description = "Cleanup pack"
-repo_url = "file://{}"
-latest_version = "0.1.0"
-  [[entries.versions]]
-  version = "0.1.0"
-  rev = "{rev}"
-"#,
-            repo.display(),
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
-
-    apply_registry_freshness_env(&cache, "warn", None);
-
-    let update_cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
-    run_typed_with_verifier_for_test(update_cli, &AlwaysOkVerifier).unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.write_test_pack_index();
+    apply_registry_freshness_env(&fixture.cache, "warn", None);
+    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
 
     let preflight_cli =
         Cli::try_parse_from(["preen", "plugin", "preflight", "test.pack@0.1.0"]).unwrap();
@@ -5459,78 +5544,38 @@ latest_version = "0.1.0"
 #[test]
 fn registry_update_then_install_and_verify_registry_spec_success() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-
-    let index = tmp.path().join("registry-index.toml");
-    let sig = tmp.path().join("registry-index.toml.sig");
-    let cache = tmp.path().join("cache-index.toml");
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let install_dir = tmp.path().join("installed-plugins");
-    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "test.pack"
-name = "Test Pack"
-description = "Cleanup pack"
-repo_url = "file://{}"
-latest_version = "0.1.0"
-  [[entries.versions]]
-  version = "0.1.0"
-  rev = "{rev}"
-"#,
-            repo.display(),
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
-
-    apply_registry_freshness_env(&cache, "warn", None);
-
-    let update_cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
-    run_typed_with_verifier_for_test(update_cli, &AlwaysOkVerifier).unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.write_test_pack_index();
+    apply_registry_freshness_env(&fixture.cache, "warn", None);
+    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
 
     let locked = install_plugin_in_dir_for_test(
         "test.pack@0.1.0",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         &AlwaysOkVerifier,
     )
     .unwrap();
 
     assert_eq!(locked.pack_id, "test.pack");
     assert_eq!(locked.version, "0.1.0");
-    assert!(install_dir.join("test.pack").join("manifest.toml").exists());
+    assert!(
+        fixture
+            .install_dir
+            .join("test.pack")
+            .join("manifest.toml")
+            .exists()
+    );
 
-    let lock = load_lockfile_at(&lockfile).unwrap();
+    let lock = load_lockfile_at(&fixture.lockfile).unwrap();
     assert_eq!(lock.plugins.len(), 1);
     assert_eq!(lock.plugins[0].pack_id, "test.pack");
     assert_eq!(lock.plugins[0].version, "0.1.0");
 
     let verify_text = plugin_verify_for_test(
         "test.pack",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         false,
         "en-US",
         &AlwaysOkVerifier,
@@ -5565,8 +5610,8 @@ latest_version = "0.1.0"
 
     let verify_json = plugin_verify_for_test(
         "test.pack",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         true,
         "en-US",
         &AlwaysOkVerifier,
@@ -5583,74 +5628,28 @@ latest_version = "0.1.0"
 #[test]
 fn registry_update_install_then_verify_fails_on_manifest_tamper() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-
-    let index = tmp.path().join("registry-index.toml");
-    let sig = tmp.path().join("registry-index.toml.sig");
-    let cache = tmp.path().join("cache-index.toml");
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let install_dir = tmp.path().join("installed-plugins");
-    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "test.pack"
-name = "Test Pack"
-description = "Cleanup pack"
-repo_url = "file://{}"
-latest_version = "0.1.0"
-  [[entries.versions]]
-  version = "0.1.0"
-  rev = "{rev}"
-"#,
-            repo.display(),
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
-
-    apply_registry_freshness_env(&cache, "warn", None);
-
-    let update_cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
-    run_typed_with_verifier_for_test(update_cli, &AlwaysOkVerifier).unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.write_test_pack_index();
+    apply_registry_freshness_env(&fixture.cache, "warn", None);
+    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
 
     install_plugin_in_dir_for_test(
         "test.pack@0.1.0",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         &AlwaysOkVerifier,
     )
     .unwrap();
 
-    let manifest_path = install_dir.join("test.pack").join("manifest.toml");
+    let manifest_path = fixture.install_dir.join("test.pack").join("manifest.toml");
     let mut manifest = fs::read_to_string(&manifest_path).unwrap();
     manifest.push_str("\n# tampered\n");
     fs::write(&manifest_path, manifest).unwrap();
 
     let err = plugin_verify_for_test(
         "test.pack",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         false,
         "en-US",
         &AlwaysOkVerifier,
@@ -5664,69 +5663,23 @@ latest_version = "0.1.0"
 #[test]
 fn registry_update_install_then_verify_fails_on_signature_or_trust() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-
-    let index = tmp.path().join("registry-index.toml");
-    let sig = tmp.path().join("registry-index.toml.sig");
-    let cache = tmp.path().join("cache-index.toml");
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let install_dir = tmp.path().join("installed-plugins");
-    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "test.pack"
-name = "Test Pack"
-description = "Cleanup pack"
-repo_url = "file://{}"
-latest_version = "0.1.0"
-  [[entries.versions]]
-  version = "0.1.0"
-  rev = "{rev}"
-"#,
-            repo.display(),
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
-
-    apply_registry_freshness_env(&cache, "warn", None);
-
-    let update_cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
-    run_typed_with_verifier_for_test(update_cli, &AlwaysOkVerifier).unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.write_test_pack_index();
+    apply_registry_freshness_env(&fixture.cache, "warn", None);
+    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
 
     install_plugin_in_dir_for_test(
         "test.pack@0.1.0",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         &AlwaysOkVerifier,
     )
     .unwrap();
 
     let err = plugin_verify_for_test(
         "test.pack",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         true,
         "en-US",
         &AlwaysFailVerifier,
@@ -5740,74 +5693,28 @@ latest_version = "0.1.0"
 #[test]
 fn registry_update_install_then_test_detects_manifest_tamper() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-
-    let index = tmp.path().join("registry-index.toml");
-    let sig = tmp.path().join("registry-index.toml.sig");
-    let cache = tmp.path().join("cache-index.toml");
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let install_dir = tmp.path().join("installed-plugins");
-    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "test.pack"
-name = "Test Pack"
-description = "Cleanup pack"
-repo_url = "file://{}"
-latest_version = "0.1.0"
-  [[entries.versions]]
-  version = "0.1.0"
-  rev = "{rev}"
-"#,
-            repo.display(),
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
-
-    apply_registry_freshness_env(&cache, "warn", None);
-
-    let update_cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
-    run_typed_with_verifier_for_test(update_cli, &AlwaysOkVerifier).unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.write_test_pack_index();
+    apply_registry_freshness_env(&fixture.cache, "warn", None);
+    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
 
     install_plugin_in_dir_for_test(
         "test.pack@0.1.0",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         &AlwaysOkVerifier,
     )
     .unwrap();
 
-    let manifest_path = install_dir.join("test.pack").join("manifest.toml");
+    let manifest_path = fixture.install_dir.join("test.pack").join("manifest.toml");
     let mut manifest = fs::read_to_string(&manifest_path).unwrap();
     manifest.push_str("\n# tampered\n");
     fs::write(&manifest_path, manifest).unwrap();
 
     let text = plugin_test_for_test(
         "test.pack",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         false,
         "en-US",
         &AlwaysOkVerifier,
@@ -5818,8 +5725,8 @@ latest_version = "0.1.0"
 
     let json = plugin_test_for_test(
         "test.pack",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         true,
         "en-US",
         &AlwaysOkVerifier,
@@ -5843,74 +5750,28 @@ latest_version = "0.1.0"
 #[test]
 fn registry_update_install_then_test_detects_signature_tamper() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-
-    let index = tmp.path().join("registry-index.toml");
-    let sig = tmp.path().join("registry-index.toml.sig");
-    let cache = tmp.path().join("cache-index.toml");
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let install_dir = tmp.path().join("installed-plugins");
-    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "test.pack"
-name = "Test Pack"
-description = "Cleanup pack"
-repo_url = "file://{}"
-latest_version = "0.1.0"
-  [[entries.versions]]
-  version = "0.1.0"
-  rev = "{rev}"
-"#,
-            repo.display(),
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
-
-    apply_registry_freshness_env(&cache, "warn", None);
-
-    let update_cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
-    run_typed_with_verifier_for_test(update_cli, &AlwaysOkVerifier).unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.write_test_pack_index();
+    apply_registry_freshness_env(&fixture.cache, "warn", None);
+    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
 
     install_plugin_in_dir_for_test(
         "test.pack@0.1.0",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         &AlwaysOkVerifier,
     )
     .unwrap();
 
-    let signature_path = install_dir.join("test.pack").join("manifest.sig");
+    let signature_path = fixture.install_dir.join("test.pack").join("manifest.sig");
     let mut signature = fs::read_to_string(&signature_path).unwrap();
     signature.push_str("\n# tampered\n");
     fs::write(&signature_path, signature).unwrap();
 
     let json = plugin_test_for_test(
         "test.pack",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         true,
         "en-US",
         &AlwaysOkVerifier,
@@ -5933,73 +5794,27 @@ latest_version = "0.1.0"
 #[test]
 fn registry_update_install_then_test_detects_resolved_rev_drift() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-
-    let index = tmp.path().join("registry-index.toml");
-    let sig = tmp.path().join("registry-index.toml.sig");
-    let cache = tmp.path().join("cache-index.toml");
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let install_dir = tmp.path().join("installed-plugins");
-    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "test.pack"
-name = "Test Pack"
-description = "Cleanup pack"
-repo_url = "file://{}"
-latest_version = "0.1.0"
-  [[entries.versions]]
-  version = "0.1.0"
-  rev = "{rev}"
-"#,
-            repo.display(),
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
-
-    apply_registry_freshness_env(&cache, "warn", None);
-
-    let update_cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
-    run_typed_with_verifier_for_test(update_cli, &AlwaysOkVerifier).unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.write_test_pack_index();
+    apply_registry_freshness_env(&fixture.cache, "warn", None);
+    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
 
     install_plugin_in_dir_for_test(
         "test.pack@0.1.0",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         &AlwaysOkVerifier,
     )
     .unwrap();
 
-    let mut lock = load_lockfile_at(&lockfile).unwrap();
+    let mut lock = load_lockfile_at(&fixture.lockfile).unwrap();
     lock.plugins[0].resolved_rev = Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string());
-    save_lockfile_at(&lockfile, &lock).unwrap();
+    save_lockfile_at(&fixture.lockfile, &lock).unwrap();
 
     let text = plugin_test_for_test(
         "test.pack",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         false,
         "en-US",
         &AlwaysOkVerifier,
@@ -6013,73 +5828,27 @@ latest_version = "0.1.0"
 #[test]
 fn registry_update_install_then_test_detects_version_drift() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-
-    let index = tmp.path().join("registry-index.toml");
-    let sig = tmp.path().join("registry-index.toml.sig");
-    let cache = tmp.path().join("cache-index.toml");
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let install_dir = tmp.path().join("installed-plugins");
-    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "test.pack"
-name = "Test Pack"
-description = "Cleanup pack"
-repo_url = "file://{}"
-latest_version = "0.1.0"
-  [[entries.versions]]
-  version = "0.1.0"
-  rev = "{rev}"
-"#,
-            repo.display(),
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
-
-    apply_registry_freshness_env(&cache, "warn", None);
-
-    let update_cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
-    run_typed_with_verifier_for_test(update_cli, &AlwaysOkVerifier).unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.write_test_pack_index();
+    apply_registry_freshness_env(&fixture.cache, "warn", None);
+    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
 
     install_plugin_in_dir_for_test(
         "test.pack@0.1.0",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         &AlwaysOkVerifier,
     )
     .unwrap();
 
-    let mut lock = load_lockfile_at(&lockfile).unwrap();
+    let mut lock = load_lockfile_at(&fixture.lockfile).unwrap();
     lock.plugins[0].version = "0.1.1".to_string();
-    save_lockfile_at(&lockfile, &lock).unwrap();
+    save_lockfile_at(&fixture.lockfile, &lock).unwrap();
 
     let json = plugin_test_for_test(
         "test.pack",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         true,
         "en-US",
         &AlwaysOkVerifier,
@@ -6107,69 +5876,23 @@ latest_version = "0.1.0"
 #[test]
 fn registry_update_install_then_test_detects_signature_or_trust_drift() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-
-    let index = tmp.path().join("registry-index.toml");
-    let sig = tmp.path().join("registry-index.toml.sig");
-    let cache = tmp.path().join("cache-index.toml");
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let install_dir = tmp.path().join("installed-plugins");
-    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "test.pack"
-name = "Test Pack"
-description = "Cleanup pack"
-repo_url = "file://{}"
-latest_version = "0.1.0"
-  [[entries.versions]]
-  version = "0.1.0"
-  rev = "{rev}"
-"#,
-            repo.display(),
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
-
-    apply_registry_freshness_env(&cache, "warn", None);
-
-    let update_cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
-    run_typed_with_verifier_for_test(update_cli, &AlwaysOkVerifier).unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.write_test_pack_index();
+    apply_registry_freshness_env(&fixture.cache, "warn", None);
+    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
 
     install_plugin_in_dir_for_test(
         "test.pack@0.1.0",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         &AlwaysOkVerifier,
     )
     .unwrap();
 
     let json = plugin_test_for_test(
         "test.pack",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         true,
         "en-US",
         &AlwaysFailVerifier,
@@ -6202,73 +5925,27 @@ latest_version = "0.1.0"
 #[test]
 fn registry_update_install_then_test_all_includes_failure_row_detail_code() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-
-    let index = tmp.path().join("registry-index.toml");
-    let sig = tmp.path().join("registry-index.toml.sig");
-    let cache = tmp.path().join("cache-index.toml");
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let install_dir = tmp.path().join("installed-plugins");
-    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "test.pack"
-name = "Test Pack"
-description = "Cleanup pack"
-repo_url = "file://{}"
-latest_version = "0.1.0"
-  [[entries.versions]]
-  version = "0.1.0"
-  rev = "{rev}"
-"#,
-            repo.display(),
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
-
-    apply_registry_freshness_env(&cache, "warn", None);
-
-    let update_cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
-    run_typed_with_verifier_for_test(update_cli, &AlwaysOkVerifier).unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.write_test_pack_index();
+    apply_registry_freshness_env(&fixture.cache, "warn", None);
+    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
 
     install_plugin_in_dir_for_test(
         "test.pack@0.1.0",
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         &AlwaysOkVerifier,
     )
     .unwrap();
 
-    let manifest_path = install_dir.join("test.pack").join("manifest.toml");
+    let manifest_path = fixture.install_dir.join("test.pack").join("manifest.toml");
     let mut manifest = fs::read_to_string(&manifest_path).unwrap();
     manifest.push_str("\n# tampered\n");
     fs::write(&manifest_path, manifest).unwrap();
 
     let json = plugin_test_all_for_test(
-        Some(&lockfile),
-        &install_dir,
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
         true,
         false,
         &AlwaysOkVerifier,
@@ -6298,44 +5975,12 @@ fn run_typed_registry_update_local_source_verification_failure() {
     let cache = tmp.path().join("cache-index.toml");
 
     let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "preen-rs.homebrew"
-name = "Homebrew"
-description = "Cleanup pack"
-repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
-latest_version = "1.2.0"
-  [[entries.versions]]
-  version = "1.2.0"
-  rev = "abc123"
-"#
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
+    write_homebrew_registry_index(&index, &now);
+    write_registry_signature(&sig);
 
     apply_registry_freshness_env(&cache, "warn", None);
 
-    let cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
+    let cli = make_registry_update_cli(&index, &sig);
     let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysFailVerifier).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Verification);
     assert_eq!(
@@ -6360,44 +6005,12 @@ fn run_typed_registry_update_local_source_missing_cert_failure_has_detail_code()
     let cache = tmp.path().join("cache-index.toml");
 
     let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "preen-rs.homebrew"
-name = "Homebrew"
-description = "Cleanup pack"
-repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
-latest_version = "1.2.0"
-  [[entries.versions]]
-  version = "1.2.0"
-  rev = "abc123"
-"#
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
+    write_homebrew_registry_index(&index, &now);
+    write_registry_signature(&sig);
 
     apply_registry_freshness_env(&cache, "warn", None);
 
-    let cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
+    let cli = make_registry_update_cli(&index, &sig);
     let err = run_typed_with_verifier_for_test(cli, &MissingCertVerifier).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Verification);
     assert_eq!(
@@ -6416,44 +6029,12 @@ fn run_typed_registry_update_local_source_identity_mismatch_has_detail_code() {
     let cache = tmp.path().join("cache-index.toml");
 
     let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{now}"
-
-[[entries]]
-pack_id = "preen-rs.homebrew"
-name = "Homebrew"
-description = "Cleanup pack"
-repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
-latest_version = "1.2.0"
-  [[entries.versions]]
-  version = "1.2.0"
-  rev = "abc123"
-"#
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
+    write_homebrew_registry_index(&index, &now);
+    write_registry_signature(&sig);
 
     apply_registry_freshness_env(&cache, "warn", None);
 
-    let cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
+    let cli = make_registry_update_cli(&index, &sig);
     let err = run_typed_with_verifier_for_test(cli, &UntrustedIdentityVerifier).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Verification);
     assert_eq!(
@@ -6474,44 +6055,12 @@ fn run_typed_registry_update_stale_error_mode_blocks_write() {
     let old = (OffsetDateTime::now_utc() - TimeDuration::days(100))
         .format(&Rfc3339)
         .unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{old}"
-
-[[entries]]
-pack_id = "preen-rs.homebrew"
-name = "Homebrew"
-description = "Cleanup pack"
-repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
-latest_version = "1.2.0"
-  [[entries.versions]]
-  version = "1.2.0"
-  rev = "abc123"
-"#
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
+    write_homebrew_registry_index(&index, &old);
+    write_registry_signature(&sig);
 
     apply_registry_freshness_env(&cache, "error", Some("30"));
 
-    let cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
+    let cli = make_registry_update_cli(&index, &sig);
     let err = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Validation);
     assert_eq!(
@@ -6533,45 +6082,12 @@ fn run_typed_registry_update_strict_overrides_warn_mode() {
     let old = (OffsetDateTime::now_utc() - TimeDuration::days(100))
         .format(&Rfc3339)
         .unwrap();
-    fs::write(
-        &index,
-        format!(
-            r#"
-schema_version = 1
-generated_at = "{old}"
-
-[[entries]]
-pack_id = "preen-rs.homebrew"
-name = "Homebrew"
-description = "Cleanup pack"
-repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
-latest_version = "1.2.0"
-  [[entries.versions]]
-  version = "1.2.0"
-  rev = "abc123"
-"#
-        ),
-    )
-    .unwrap();
-    fs::write(&sig, "sig").unwrap();
+    write_homebrew_registry_index(&index, &old);
+    write_registry_signature(&sig);
 
     apply_registry_freshness_env(&cache, "warn", Some("30"));
 
-    let cli = Cli::try_parse_from([
-        "preen",
-        "plugin",
-        "registry-update",
-        "--strict",
-        "--source",
-        &format!("file://{}", index.display()),
-        "--signature-source",
-        &format!("file://{}", sig.display()),
-        "--identity",
-        "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
-        "--issuer",
-        "https://token.actions.githubusercontent.com",
-    ])
-    .unwrap();
+    let cli = make_registry_update_cli_with_strict_mode(&index, &sig, true);
     let err = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Validation);
     assert_eq!(
