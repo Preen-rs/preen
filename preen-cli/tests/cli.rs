@@ -376,6 +376,10 @@ fn with_status_metrics_env<T>(overrides: &[(&str, &str)], f: impl FnOnce() -> T)
     with_env_overrides(&env_overrides, f)
 }
 
+fn with_debug_log_env<T>(key: &str, path: &Path, f: impl FnOnce() -> T) -> T {
+    with_env_overrides(&[(key, path.as_os_str().to_os_string())], f)
+}
+
 fn with_analyze_root_fixture<T>(f: impl FnOnce(&Path) -> T) -> T {
     let analyze_root = tempfile::tempdir().unwrap();
     fs::create_dir_all(analyze_root.path().join("nested")).unwrap();
@@ -1652,20 +1656,20 @@ fn clean_debug_mode_writes_debug_log() {
     let debug_log = temp.path().join("clean-debug.log");
     fs::create_dir_all(&cache_dir).unwrap();
     fs::write(cache_dir.join("a.txt"), b"data").unwrap();
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_CLEAN_PATHS", cache_dir.as_os_str());
-        std::env::set_var("PREEN_CLEAN_DEBUG_LOG_PATH", debug_log.as_os_str());
-    }
-
-    let cli = Cli::try_parse_from(["preen", "clean", "--dry-run", "--debug", "--json"]).unwrap();
-    let result = run_typed(cli);
-
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_CLEAN_PATHS");
-        std::env::remove_var("PREEN_CLEAN_DEBUG_LOG_PATH");
-    }
+    let result = with_env_overrides(
+        &[
+            ("PREEN_CLEAN_PATHS", cache_dir.as_os_str().to_os_string()),
+            (
+                "PREEN_CLEAN_DEBUG_LOG_PATH",
+                debug_log.as_os_str().to_os_string(),
+            ),
+        ],
+        || {
+            let cli =
+                Cli::try_parse_from(["preen", "clean", "--dry-run", "--debug", "--json"]).unwrap();
+            run_typed(cli)
+        },
+    );
     assert!(result.is_ok());
     assert!(debug_log.exists());
     let content = fs::read_to_string(debug_log).unwrap();
@@ -1734,13 +1738,9 @@ fn optimize_debug_mode_writes_debug_log() {
     let _guard = ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let debug_log = temp.path().join("optimize-debug.log");
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_OPTIMIZE_DEBUG_LOG_PATH", debug_log.as_os_str());
-    }
-
-    let output =
-        optimize_output_with_debug_for_test(true, false, true, &AlwaysSuccessExecutor).unwrap();
+    let output = with_debug_log_env("PREEN_OPTIMIZE_DEBUG_LOG_PATH", &debug_log, || {
+        optimize_output_with_debug_for_test(true, false, true, &AlwaysSuccessExecutor).unwrap()
+    });
     assert_eq!(output["kind"].as_str(), Some("system.optimize"));
     assert_eq!(
         output["data"]["debug_log_path"].as_str(),
@@ -1749,11 +1749,6 @@ fn optimize_debug_mode_writes_debug_log() {
     let log = fs::read_to_string(debug_log).unwrap();
     assert!(log.contains("mode=dry_run"));
     assert!(log.contains("selected_tasks="));
-
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_OPTIMIZE_DEBUG_LOG_PATH");
-    }
 }
 
 #[test]
@@ -2493,12 +2488,9 @@ fn check_debug_mode_writes_debug_log() {
     let _guard = ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let debug_log = temp.path().join("check-debug.log");
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_CHECK_DEBUG_LOG_PATH", debug_log.as_os_str());
-    }
-
-    let output = check_output_with_debug_for_test(false, true).unwrap();
+    let output = with_debug_log_env("PREEN_CHECK_DEBUG_LOG_PATH", &debug_log, || {
+        check_output_with_debug_for_test(false, true).unwrap()
+    });
     assert_eq!(output["kind"].as_str(), Some("system.check"));
     assert_eq!(
         output["data"]["debug_log_path"].as_str(),
@@ -2507,11 +2499,6 @@ fn check_debug_mode_writes_debug_log() {
     let log = fs::read_to_string(debug_log).unwrap();
     assert!(log.contains("mode=check"));
     assert!(log.contains("overall_passed="));
-
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_CHECK_DEBUG_LOG_PATH");
-    }
 }
 
 #[test]
@@ -2582,15 +2569,9 @@ fn analyze_debug_mode_writes_debug_log_and_reports_path() {
     fs::write(root.join("dir-a").join("nested.bin"), vec![0_u8; 64]).unwrap();
     let debug_path = root.join("analyze-debug-test.log");
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_ANALYZE_DEBUG_LOG_PATH", &debug_path);
-    }
-    let output = analyze_output_with_debug_for_test(Some(root), Some(2), true).unwrap();
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_ANALYZE_DEBUG_LOG_PATH");
-    }
+    let output = with_debug_log_env("PREEN_ANALYZE_DEBUG_LOG_PATH", &debug_path, || {
+        analyze_output_with_debug_for_test(Some(root), Some(2), true).unwrap()
+    });
 
     assert_eq!(
         output["data"]["debug_log_path"].as_str(),
@@ -3247,13 +3228,19 @@ fn uninstall_debug_mode_writes_debug_log() {
     let debug_log = temp.path().join("uninstall-debug.log");
     fs::create_dir_all(&app_dir).unwrap();
     fs::write(app_dir.join("Info.plist"), b"demo").unwrap();
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_UNINSTALL_PATHS", temp.path().as_os_str());
-        std::env::set_var("PREEN_UNINSTALL_DEBUG_LOG_PATH", debug_log.as_os_str());
-    }
-
-    let output = uninstall_output_with_debug_for_test(Some("DemoApp"), true, false, true).unwrap();
+    let output = with_env_overrides(
+        &[
+            (
+                "PREEN_UNINSTALL_PATHS",
+                temp.path().as_os_str().to_os_string(),
+            ),
+            (
+                "PREEN_UNINSTALL_DEBUG_LOG_PATH",
+                debug_log.as_os_str().to_os_string(),
+            ),
+        ],
+        || uninstall_output_with_debug_for_test(Some("DemoApp"), true, false, true).unwrap(),
+    );
     assert_eq!(
         output["data"]["debug_log_path"].as_str(),
         Some(debug_log.to_string_lossy().as_ref())
@@ -3261,12 +3248,6 @@ fn uninstall_debug_mode_writes_debug_log() {
     let log = fs::read_to_string(debug_log).unwrap();
     assert!(log.contains("target=DemoApp"));
     assert!(log.contains("scan_depth=3"));
-
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_UNINSTALL_PATHS");
-        std::env::remove_var("PREEN_UNINSTALL_DEBUG_LOG_PATH");
-    }
 }
 
 #[test]
@@ -3354,27 +3335,23 @@ fn purge_debug_mode_writes_debug_log() {
     let debug_log = temp.path().join("purge-debug.log");
     fs::create_dir_all(&artifact).unwrap();
     fs::write(artifact.join("x.bin"), b"1234").unwrap();
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_PURGE_PATHS", temp.path().as_os_str());
-        std::env::set_var("PREEN_PURGE_MIN_AGE_DAYS", "0");
-        std::env::set_var("PREEN_PURGE_DEBUG_LOG_PATH", debug_log.as_os_str());
-    }
-
-    let output = purge_output_with_debug_for_test(true, false, true).unwrap();
+    let output = with_env_overrides(
+        &[
+            ("PREEN_PURGE_PATHS", temp.path().as_os_str().to_os_string()),
+            ("PREEN_PURGE_MIN_AGE_DAYS", OsString::from("0")),
+            (
+                "PREEN_PURGE_DEBUG_LOG_PATH",
+                debug_log.as_os_str().to_os_string(),
+            ),
+        ],
+        || purge_output_with_debug_for_test(true, false, true).unwrap(),
+    );
     assert_eq!(output["kind"].as_str(), Some("system.purge"));
     assert_eq!(
         output["data"]["debug_log_path"].as_str(),
         Some(debug_log.to_string_lossy().as_ref())
     );
     assert!(debug_log.exists());
-
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_PURGE_PATHS");
-        std::env::remove_var("PREEN_PURGE_MIN_AGE_DAYS");
-        std::env::remove_var("PREEN_PURGE_DEBUG_LOG_PATH");
-    }
 }
 
 #[test]
@@ -3502,13 +3479,19 @@ fn installer_debug_writes_log_when_enabled() {
     let installer = temp.path().join("archive.pkg");
     let debug_log = temp.path().join("installer-debug.log");
     fs::write(&installer, vec![0u8; 11 * 1024 * 1024]).unwrap();
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_INSTALLER_PATHS", temp.path().as_os_str());
-        std::env::set_var("PREEN_INSTALLER_DEBUG_LOG_PATH", debug_log.as_os_str());
-    }
-
-    let output = installer_output_with_debug_for_test(true, false, true).unwrap();
+    let output = with_env_overrides(
+        &[
+            (
+                "PREEN_INSTALLER_PATHS",
+                temp.path().as_os_str().to_os_string(),
+            ),
+            (
+                "PREEN_INSTALLER_DEBUG_LOG_PATH",
+                debug_log.as_os_str().to_os_string(),
+            ),
+        ],
+        || installer_output_with_debug_for_test(true, false, true).unwrap(),
+    );
     assert_eq!(
         output["data"]["debug_log_path"].as_str(),
         Some(debug_log.to_string_lossy().as_ref())
@@ -3516,12 +3499,6 @@ fn installer_debug_writes_log_when_enabled() {
     let log = fs::read_to_string(debug_log).unwrap();
     assert!(log.contains("scan_depth=2"));
     assert!(log.contains("target_count=1"));
-
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_INSTALLER_PATHS");
-        std::env::remove_var("PREEN_INSTALLER_DEBUG_LOG_PATH");
-    }
 }
 
 #[test]
