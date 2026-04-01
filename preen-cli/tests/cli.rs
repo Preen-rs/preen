@@ -162,14 +162,55 @@ impl ActionExecutorPort for AlwaysSuccessExecutor {
     }
 }
 
-fn run_git(args: &[&str]) {
-    let out = Command::new("git").args(args).output().unwrap();
+fn run_git_in(repo: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
-        "git {:?} failed: {}",
+        "git -C {} {:?} failed: {}",
+        repo.display(),
         args,
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn run_git_in_no_sign(repo: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-c")
+        .arg("commit.gpgsign=false")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git -c commit.gpgsign=false -C {} {:?} failed: {}",
+        repo.display(),
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn git_stdout_in(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git -C {} {:?} failed: {}",
+        repo.display(),
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 fn plugin_install_base_dir_from_env() -> PathBuf {
@@ -476,57 +517,25 @@ params = {}
     fs::write(base.join("manifest.cert"), "cert").unwrap();
     fs::write(base.join("rules/rule-1.toml"), rule).unwrap();
 
-    let base_s = base.to_str().unwrap().to_string();
-    run_git(&["init", &base_s]);
-    run_git(&["-C", &base_s, "config", "user.email", "test@example.com"]);
-    run_git(&["-C", &base_s, "config", "user.name", "Test User"]);
-    run_git(&["-C", &base_s, "add", "."]);
-    run_git(&[
-        "-c",
-        "commit.gpgsign=false",
-        "-C",
-        &base_s,
-        "commit",
-        "-m",
-        "init",
-    ]);
-    let out = Command::new("git")
-        .args(["-C", &base_s, "rev-parse", "HEAD"])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    run_git_in(base, &["init"]);
+    run_git_in(base, &["config", "user.email", "test@example.com"]);
+    run_git_in(base, &["config", "user.name", "Test User"]);
+    run_git_in(base, &["add", "."]);
+    run_git_in_no_sign(base, &["commit", "-m", "init"]);
+    git_stdout_in(base, &["rev-parse", "HEAD"])
 }
 
 fn init_preflight_git_repo_with_old_tag(base: &Path) -> String {
     let first_commit = init_preflight_git_repo(base);
-    let base_s = base.to_str().unwrap().to_string();
-    run_git(&["-C", &base_s, "tag", "v0.0.1", &first_commit]);
+    run_git_in(base, &["tag", "v0.0.1", &first_commit]);
     fs::write(base.join("README.md"), "next").unwrap();
-    run_git(&["-C", &base_s, "add", "README.md"]);
-    run_git(&[
-        "-c",
-        "commit.gpgsign=false",
-        "-C",
-        &base_s,
-        "commit",
-        "-m",
-        "second",
-    ]);
+    run_git_in(base, &["add", "README.md"]);
+    run_git_in_no_sign(base, &["commit", "-m", "second"]);
     "v0.0.1".to_string()
 }
 
 fn git_rev_parse(repo: &Path, rev: &str) -> String {
-    let out = Command::new("git")
-        .args(["-C", repo.to_str().unwrap(), "rev-parse", rev])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git rev-parse failed for {rev}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    git_stdout_in(repo, &["rev-parse", rev])
 }
 
 #[test]
