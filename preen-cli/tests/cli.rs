@@ -193,25 +193,40 @@ fn with_temp_user_env<T>(f: impl FnOnce() -> T) -> T {
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&xdg).unwrap();
 
-    let old_home: Option<OsString> = std::env::var_os("HOME");
-    let old_xdg: Option<OsString> = std::env::var_os("XDG_CONFIG_HOME");
+    with_env_overrides(
+        &[
+            ("HOME", home.into_os_string()),
+            ("XDG_CONFIG_HOME", xdg.into_os_string()),
+        ],
+        f,
+    )
+}
+
+fn with_env_overrides<T>(overrides: &[(&str, OsString)], f: impl FnOnce() -> T) -> T {
+    let previous: Vec<(&str, Option<OsString>)> = overrides
+        .iter()
+        .map(|(key, _)| (*key, std::env::var_os(key)))
+        .collect();
+
     // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
-        std::env::set_var("HOME", &home);
-        std::env::set_var("XDG_CONFIG_HOME", &xdg);
+        for (key, value) in overrides {
+            std::env::set_var(key, value);
+        }
     }
+
     let out = f();
+
     // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
-        match old_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        match old_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        for (key, old_value) in previous {
+            match old_value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
     }
+
     out
 }
 
@@ -220,20 +235,7 @@ fn with_clean_path_override<T>(f: impl FnOnce() -> T) -> T {
     let cache_dir = temp.path().join("cache");
     fs::create_dir_all(&cache_dir).unwrap();
     fs::write(cache_dir.join("a.txt"), b"data").unwrap();
-    let old = std::env::var_os("PREEN_CLEAN_PATHS");
-    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_CLEAN_PATHS", cache_dir.as_os_str());
-    }
-    let out = f();
-    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        match old {
-            Some(v) => std::env::set_var("PREEN_CLEAN_PATHS", v),
-            None => std::env::remove_var("PREEN_CLEAN_PATHS"),
-        }
-    }
-    out
+    with_env_overrides(&[("PREEN_CLEAN_PATHS", cache_dir.into_os_string())], f)
 }
 
 fn with_purge_path_override<T>(f: impl FnOnce() -> T) -> T {
@@ -242,26 +244,13 @@ fn with_purge_path_override<T>(f: impl FnOnce() -> T) -> T {
     let purge_target = workspace.join("node_modules");
     fs::create_dir_all(&purge_target).unwrap();
     fs::write(purge_target.join("placeholder.js"), b"const x = 1;").unwrap();
-    let old = std::env::var_os("PREEN_PURGE_PATHS");
-    let old_min_age = std::env::var_os("PREEN_PURGE_MIN_AGE_DAYS");
-    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_PURGE_PATHS", workspace.as_os_str());
-        std::env::set_var("PREEN_PURGE_MIN_AGE_DAYS", "0");
-    }
-    let out = f();
-    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        match old {
-            Some(v) => std::env::set_var("PREEN_PURGE_PATHS", v),
-            None => std::env::remove_var("PREEN_PURGE_PATHS"),
-        }
-        match old_min_age {
-            Some(v) => std::env::set_var("PREEN_PURGE_MIN_AGE_DAYS", v),
-            None => std::env::remove_var("PREEN_PURGE_MIN_AGE_DAYS"),
-        }
-    }
-    out
+    with_env_overrides(
+        &[
+            ("PREEN_PURGE_PATHS", workspace.into_os_string()),
+            ("PREEN_PURGE_MIN_AGE_DAYS", OsString::from("0")),
+        ],
+        f,
+    )
 }
 
 fn with_installer_path_override<T>(f: impl FnOnce() -> T) -> T {
@@ -270,20 +259,7 @@ fn with_installer_path_override<T>(f: impl FnOnce() -> T) -> T {
     fs::create_dir_all(&downloads).unwrap();
     let installer = downloads.join("Setup.pkg");
     fs::write(&installer, vec![0u8; 11 * 1024 * 1024]).unwrap();
-    let old = std::env::var_os("PREEN_INSTALLER_PATHS");
-    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_INSTALLER_PATHS", downloads.as_os_str());
-    }
-    let out = f();
-    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        match old {
-            Some(v) => std::env::set_var("PREEN_INSTALLER_PATHS", v),
-            None => std::env::remove_var("PREEN_INSTALLER_PATHS"),
-        }
-    }
-    out
+    with_env_overrides(&[("PREEN_INSTALLER_PATHS", downloads.into_os_string())], f)
 }
 
 fn with_uninstall_path_override<T>(f: impl FnOnce() -> T) -> T {
@@ -292,20 +268,7 @@ fn with_uninstall_path_override<T>(f: impl FnOnce() -> T) -> T {
     fs::create_dir_all(&apps).unwrap();
     let app = apps.join("DemoApp.app");
     fs::write(&app, b"demo").unwrap();
-    let old = std::env::var_os("PREEN_UNINSTALL_PATHS");
-    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_UNINSTALL_PATHS", apps.as_os_str());
-    }
-    let out = f();
-    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        match old {
-            Some(v) => std::env::set_var("PREEN_UNINSTALL_PATHS", v),
-            None => std::env::remove_var("PREEN_UNINSTALL_PATHS"),
-        }
-    }
-    out
+    with_env_overrides(&[("PREEN_UNINSTALL_PATHS", apps.into_os_string())], f)
 }
 
 fn clean_error_json_for_forced_executor(error: ActionExecutionError) -> Value {
