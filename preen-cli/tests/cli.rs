@@ -243,7 +243,7 @@ fn with_temp_user_env<T>(f: impl FnOnce() -> T) -> T {
     )
 }
 
-fn with_env_overrides<T>(overrides: &[(&str, OsString)], f: impl FnOnce() -> T) -> T {
+fn with_env_state_overrides<T>(overrides: &[(&str, Option<OsString>)], f: impl FnOnce() -> T) -> T {
     let previous: Vec<(&str, Option<OsString>)> = overrides
         .iter()
         .map(|(key, _)| (*key, std::env::var_os(key)))
@@ -252,7 +252,10 @@ fn with_env_overrides<T>(overrides: &[(&str, OsString)], f: impl FnOnce() -> T) 
     // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
     unsafe {
         for (key, value) in overrides {
-            std::env::set_var(key, value);
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
     }
 
@@ -269,6 +272,14 @@ fn with_env_overrides<T>(overrides: &[(&str, OsString)], f: impl FnOnce() -> T) 
     }
 
     out
+}
+
+fn with_env_overrides<T>(overrides: &[(&str, OsString)], f: impl FnOnce() -> T) -> T {
+    let state_overrides: Vec<(&str, Option<OsString>)> = overrides
+        .iter()
+        .map(|(key, value)| (*key, Some(value.clone())))
+        .collect();
+    with_env_state_overrides(&state_overrides, f)
 }
 
 fn with_temp_fixture_env<T>(
@@ -330,6 +341,29 @@ fn with_uninstall_path_override<T>(f: impl FnOnce() -> T) -> T {
             fs::write(&app, b"demo").unwrap();
             vec![("PREEN_UNINSTALL_PATHS", apps.into_os_string())]
         },
+        f,
+    )
+}
+
+fn with_shell_env<T>(shell: Option<&str>, f: impl FnOnce() -> T) -> T {
+    with_env_state_overrides(&[("SHELL", shell.map(OsString::from))], f)
+}
+
+fn with_completion_env<T>(
+    home: &Path,
+    shell: Option<&str>,
+    completion_shell: Option<&str>,
+    f: impl FnOnce() -> T,
+) -> T {
+    with_env_state_overrides(
+        &[
+            ("HOME", Some(home.as_os_str().to_os_string())),
+            ("SHELL", shell.map(OsString::from)),
+            (
+                "PREEN_COMPLETION_SHELL",
+                completion_shell.map(OsString::from),
+            ),
+        ],
         f,
     )
 }
@@ -2030,15 +2064,9 @@ fn system_support_commands_json_contract_matrix_has_required_fields() {
             ],
         );
 
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("SHELL", "/bin/zsh");
-        }
-        let completion = completion_output_for_test(None, true).unwrap();
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
+        let completion = with_shell_env(Some("/bin/zsh"), || {
+            completion_output_for_test(None, true).unwrap()
+        });
         assert_system_envelope(
             &completion,
             "system.completion",
@@ -2139,15 +2167,9 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
             &["action: status", "action=status", "mode=dry_run"],
         );
 
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("SHELL", "/bin/zsh");
-        }
-        let completion = completion_text_output_for_test(None, true).unwrap();
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
+        let completion = with_shell_env(Some("/bin/zsh"), || {
+            completion_text_output_for_test(None, true).unwrap()
+        });
         assert_text_markers_with_summary_mode(
             "completion",
             &completion,
@@ -2303,15 +2325,9 @@ fn system_text_schema_snapshot_matrix_is_stable() {
             &["action: status"],
         );
 
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("SHELL", "/bin/zsh");
-        }
-        let completion = completion_text_output_for_test(None, true).unwrap();
-        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
+        let completion = with_shell_env(Some("/bin/zsh"), || {
+            completion_text_output_for_test(None, true).unwrap()
+        });
         assert_text_markers_with_summary_mode(
             "completion",
             &completion,
@@ -2907,16 +2923,9 @@ fn completion_dry_run_autodetect_writes_no_file() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
         let home = tempfile::tempdir().unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("HOME", home.path().as_os_str());
-            std::env::set_var("SHELL", "/bin/zsh");
-        }
-        let output = completion_output_for_test(None, true).unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
+        let output = with_completion_env(home.path(), Some("/bin/zsh"), None, || {
+            completion_output_for_test(None, true).unwrap()
+        });
         assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
         assert_eq!(output["data"]["installed"].as_bool(), Some(false));
         assert_eq!(output["data"]["changed"].as_bool(), Some(false));
@@ -2931,16 +2940,9 @@ fn completion_bash_prefers_bash_profile_when_present() {
         let home = tempfile::tempdir().unwrap();
         let bash_profile = home.path().join(".bash_profile");
         fs::write(&bash_profile, "# existing\n").unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("HOME", home.path().as_os_str());
-            std::env::set_var("PREEN_COMPLETION_SHELL", "bash");
-        }
-        let output = completion_output_for_test(None, false).unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_COMPLETION_SHELL");
-        }
+        let output = with_completion_env(home.path(), None, Some("bash"), || {
+            completion_output_for_test(None, false).unwrap()
+        });
         assert_eq!(
             output["data"]["config_path"].as_str(),
             Some(bash_profile.to_string_lossy().as_ref())
@@ -2957,17 +2959,9 @@ fn completion_autodetect_uses_override_when_shell_missing() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
         let home = tempfile::tempdir().unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("HOME", home.path().as_os_str());
-            std::env::remove_var("SHELL");
-            std::env::set_var("PREEN_COMPLETION_SHELL", "fish");
-        }
-        let output = completion_output_for_test(None, true).unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_COMPLETION_SHELL");
-        }
+        let output = with_completion_env(home.path(), None, Some("fish"), || {
+            completion_output_for_test(None, true).unwrap()
+        });
         assert_eq!(output["data"]["shell"].as_str(), Some("fish"));
         assert_eq!(output["data"]["mode"].as_str(), Some("dry_run"));
     });
