@@ -368,6 +368,14 @@ fn with_completion_env<T>(
     )
 }
 
+fn with_status_metrics_env<T>(overrides: &[(&str, &str)], f: impl FnOnce() -> T) -> T {
+    let env_overrides: Vec<(&str, OsString)> = overrides
+        .iter()
+        .map(|(key, value)| (*key, OsString::from(*value)))
+        .collect();
+    with_env_overrides(&env_overrides, f)
+}
+
 fn with_analyze_root_fixture<T>(f: impl FnOnce(&Path) -> T) -> T {
     let analyze_root = tempfile::tempdir().unwrap();
     fs::create_dir_all(analyze_root.path().join("nested")).unwrap();
@@ -595,6 +603,19 @@ fn assert_text_markers_with_summary_mode(
         "{name} missing marker `{mode_marker}`. output:\n{text}"
     );
     assert_text_markers(name, text, markers);
+}
+
+fn action_list_contains(actions: &[Value], command: &str) -> bool {
+    actions.iter().any(|value| value.as_str() == Some(command))
+}
+
+fn assert_actions_include(actions: &[Value], commands: &[&str]) {
+    for command in commands {
+        assert!(
+            action_list_contains(actions, command),
+            "missing action `{command}` in {actions:?}"
+        );
+    }
 }
 
 fn check_passed_from_verify_text(text: &str, check_id: &str) -> Option<bool> {
@@ -2395,9 +2416,10 @@ fn optimize_apply_runs_post_check_and_reports_remaining_issues() {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let contains = |command: &str| actions.iter().any(|value| value.as_str() == Some(command));
-        assert!(contains("preen check --fix"));
-        assert!(contains("preen plugin registry-update"));
+        assert_actions_include(
+            &actions,
+            &["preen check --fix", "preen plugin registry-update"],
+        );
         let warnings = output["data"]["warnings"]
             .as_array()
             .cloned()
@@ -2459,9 +2481,10 @@ fn check_json_happy_path_without_fix() {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let contains = |command: &str| actions.iter().any(|value| value.as_str() == Some(command));
-        assert!(contains("preen check --fix"));
-        assert!(contains("preen plugin registry-update"));
+        assert_actions_include(
+            &actions,
+            &["preen check --fix", "preen plugin registry-update"],
+        );
     });
 }
 
@@ -2511,9 +2534,10 @@ fn check_fix_json_creates_state_and_plugin_dirs() {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let contains = |command: &str| actions.iter().any(|value| value.as_str() == Some(command));
-        assert!(contains("preen plugin registry-update"));
-        assert!(contains("preen optimize --dry-run"));
+        assert_actions_include(
+            &actions,
+            &["preen plugin registry-update", "preen optimize --dry-run"],
+        );
     });
 }
 
@@ -2716,33 +2740,21 @@ fn status_json_health_score_is_bounded() {
 fn status_json_uses_env_overrides_for_extended_metrics() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_STATUS_LOAD_1M_MILLI", "1200");
-            std::env::set_var("PREEN_STATUS_LOAD_5M_MILLI", "900");
-            std::env::set_var("PREEN_STATUS_LOAD_15M_MILLI", "700");
-            std::env::set_var("PREEN_STATUS_MEMORY_TOTAL_BYTES", "1000");
-            std::env::set_var("PREEN_STATUS_MEMORY_USED_BYTES", "250");
-            std::env::set_var("PREEN_STATUS_DISK_TOTAL_BYTES", "2000");
-            std::env::set_var("PREEN_STATUS_DISK_AVAILABLE_BYTES", "1500");
-            std::env::set_var("PREEN_STATUS_PROCESS_COUNT", "42");
-            std::env::set_var("PREEN_STATUS_NET_RX_BYTES", "1234");
-            std::env::set_var("PREEN_STATUS_NET_TX_BYTES", "5678");
-        }
-        let output = status_output_for_test().unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_STATUS_LOAD_1M_MILLI");
-            std::env::remove_var("PREEN_STATUS_LOAD_5M_MILLI");
-            std::env::remove_var("PREEN_STATUS_LOAD_15M_MILLI");
-            std::env::remove_var("PREEN_STATUS_MEMORY_TOTAL_BYTES");
-            std::env::remove_var("PREEN_STATUS_MEMORY_USED_BYTES");
-            std::env::remove_var("PREEN_STATUS_DISK_TOTAL_BYTES");
-            std::env::remove_var("PREEN_STATUS_DISK_AVAILABLE_BYTES");
-            std::env::remove_var("PREEN_STATUS_PROCESS_COUNT");
-            std::env::remove_var("PREEN_STATUS_NET_RX_BYTES");
-            std::env::remove_var("PREEN_STATUS_NET_TX_BYTES");
-        }
+        let output = with_status_metrics_env(
+            &[
+                ("PREEN_STATUS_LOAD_1M_MILLI", "1200"),
+                ("PREEN_STATUS_LOAD_5M_MILLI", "900"),
+                ("PREEN_STATUS_LOAD_15M_MILLI", "700"),
+                ("PREEN_STATUS_MEMORY_TOTAL_BYTES", "1000"),
+                ("PREEN_STATUS_MEMORY_USED_BYTES", "250"),
+                ("PREEN_STATUS_DISK_TOTAL_BYTES", "2000"),
+                ("PREEN_STATUS_DISK_AVAILABLE_BYTES", "1500"),
+                ("PREEN_STATUS_PROCESS_COUNT", "42"),
+                ("PREEN_STATUS_NET_RX_BYTES", "1234"),
+                ("PREEN_STATUS_NET_TX_BYTES", "5678"),
+            ],
+            || status_output_for_test().unwrap(),
+        );
 
         let metrics = &output["data"]["metrics"];
         assert_eq!(metrics["load_avg_1m_milli"].as_u64(), Some(1200));
@@ -2759,15 +2771,9 @@ fn status_json_uses_env_overrides_for_extended_metrics() {
 #[test]
 fn status_force_json_env_can_disable_auto_json() {
     let _guard = ENV_LOCK.lock().unwrap();
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_STATUS_FORCE_JSON", "0");
-    }
-    assert!(!status_should_emit_json_for_test(false));
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_STATUS_FORCE_JSON");
-    }
+    with_env_overrides(&[("PREEN_STATUS_FORCE_JSON", OsString::from("0"))], || {
+        assert!(!status_should_emit_json_for_test(false));
+    });
 }
 
 #[test]
@@ -2790,39 +2796,33 @@ fn status_suggested_actions_include_registry_update_when_registry_missing() {
 fn status_suggested_actions_include_cleanup_and_optimize_for_pressure() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::set_var("PREEN_STATUS_MEMORY_TOTAL_BYTES", "100");
-            std::env::set_var("PREEN_STATUS_MEMORY_USED_BYTES", "95");
-            std::env::set_var("PREEN_STATUS_DISK_TOTAL_BYTES", "100");
-            std::env::set_var("PREEN_STATUS_DISK_AVAILABLE_BYTES", "5");
-            std::env::set_var("PREEN_STATUS_LOAD_1M_MILLI", "10000");
-            std::env::set_var("PREEN_STATUS_PROCESS_COUNT", "42");
-            std::env::set_var("PREEN_STATUS_NET_RX_BYTES", "1234");
-            std::env::set_var("PREEN_STATUS_NET_TX_BYTES", "5678");
-        }
-        let output = status_output_for_test().unwrap();
-        // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-        unsafe {
-            std::env::remove_var("PREEN_STATUS_MEMORY_TOTAL_BYTES");
-            std::env::remove_var("PREEN_STATUS_MEMORY_USED_BYTES");
-            std::env::remove_var("PREEN_STATUS_DISK_TOTAL_BYTES");
-            std::env::remove_var("PREEN_STATUS_DISK_AVAILABLE_BYTES");
-            std::env::remove_var("PREEN_STATUS_LOAD_1M_MILLI");
-            std::env::remove_var("PREEN_STATUS_PROCESS_COUNT");
-            std::env::remove_var("PREEN_STATUS_NET_RX_BYTES");
-            std::env::remove_var("PREEN_STATUS_NET_TX_BYTES");
-        }
+        let output = with_status_metrics_env(
+            &[
+                ("PREEN_STATUS_MEMORY_TOTAL_BYTES", "100"),
+                ("PREEN_STATUS_MEMORY_USED_BYTES", "95"),
+                ("PREEN_STATUS_DISK_TOTAL_BYTES", "100"),
+                ("PREEN_STATUS_DISK_AVAILABLE_BYTES", "5"),
+                ("PREEN_STATUS_LOAD_1M_MILLI", "10000"),
+                ("PREEN_STATUS_PROCESS_COUNT", "42"),
+                ("PREEN_STATUS_NET_RX_BYTES", "1234"),
+                ("PREEN_STATUS_NET_TX_BYTES", "5678"),
+            ],
+            || status_output_for_test().unwrap(),
+        );
 
         let actions = output["data"]["suggested_actions"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let contains = |command: &str| actions.iter().any(|value| value.as_str() == Some(command));
-        assert!(contains("preen analyze --json"));
-        assert!(contains("preen clean --dry-run"));
-        assert!(contains("preen purge --dry-run"));
-        assert!(contains("preen optimize --dry-run"));
+        assert_actions_include(
+            &actions,
+            &[
+                "preen analyze --json",
+                "preen clean --dry-run",
+                "preen purge --dry-run",
+                "preen optimize --dry-run",
+            ],
+        );
     });
 }
 
