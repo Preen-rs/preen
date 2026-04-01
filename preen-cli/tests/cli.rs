@@ -2091,6 +2091,243 @@ fn system_support_commands_text_contract_matrix_has_required_markers() {
 }
 
 #[test]
+fn system_text_schema_snapshot_matrix_is_stable() {
+    fn assert_markers(name: &str, text: &str, markers: &[&str]) {
+        for marker in markers {
+            assert!(
+                text.contains(marker),
+                "{name} missing marker `{marker}`. output:\n{text}"
+            );
+        }
+    }
+
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let clean = with_clean_path_override(|| clean_text_output_for_test(true, false, None).unwrap());
+    assert_markers(
+        "clean",
+        &clean,
+        &[
+            "summary: kind=system_clean",
+            "mode: dry_run",
+            "risk: high_targets=",
+        ],
+    );
+
+    let purge = with_purge_path_override(|| purge_text_output_for_test(true, false).unwrap());
+    assert_markers(
+        "purge",
+        &purge,
+        &[
+            "summary: kind=system_purge",
+            "mode: dry_run",
+            "Purge (dry-run)",
+        ],
+    );
+
+    let installer =
+        with_installer_path_override(|| installer_text_output_for_test(true, false).unwrap());
+    assert_markers(
+        "installer",
+        &installer,
+        &[
+            "summary: kind=system_installer",
+            "mode: dry_run",
+            "Installer (dry-run)",
+        ],
+    );
+
+    let uninstall = with_uninstall_path_override(|| {
+        uninstall_text_output_for_test(Some("DemoApp.app"), true, false).unwrap()
+    });
+    assert_markers(
+        "uninstall",
+        &uninstall,
+        &[
+            "summary: kind=system_uninstall",
+            "mode: dry_run",
+            "Target: DemoApp.app",
+        ],
+    );
+
+    let optimize = optimize_text_output_for_test(true, false).unwrap();
+    assert_markers(
+        "optimize",
+        &optimize,
+        &["summary: kind=system_optimize", "mode: dry_run", "Tasks:"],
+    );
+
+    let purge_paths = with_purge_path_override(purge_paths_text_for_test);
+    assert_markers(
+        "purge_paths",
+        &purge_paths,
+        &["summary: kind=system_paths command=purge", "mode: paths"],
+    );
+
+    let installer_paths = with_installer_path_override(installer_paths_text_for_test);
+    assert_markers(
+        "installer_paths",
+        &installer_paths,
+        &[
+            "summary: kind=system_paths command=installer",
+            "mode: paths",
+        ],
+    );
+
+    let uninstall_paths = with_uninstall_path_override(uninstall_paths_text_for_test);
+    assert_markers(
+        "uninstall_paths",
+        &uninstall_paths,
+        &[
+            "summary: kind=system_paths command=uninstall",
+            "mode: paths",
+        ],
+    );
+
+    with_temp_user_env(|| {
+        let check = check_text_output_for_test(false);
+        assert_markers(
+            "check",
+            &check,
+            &[
+                "summary: kind=system_check",
+                "mode: check",
+                "checks: label=Checks",
+            ],
+        );
+
+        let analyze_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(analyze_root.path().join("nested")).unwrap();
+        fs::write(
+            analyze_root.path().join("nested").join("sample.bin"),
+            b"sample",
+        )
+        .unwrap();
+        let analyze = analyze_text_output_for_test(Some(analyze_root.path())).unwrap();
+        assert_markers(
+            "analyze",
+            &analyze,
+            &[
+                "summary: kind=system_analyze",
+                "mode: analyze",
+                "entries: label=Top entries",
+            ],
+        );
+
+        let status = status_text_output_for_test().unwrap();
+        assert_markers(
+            "status",
+            &status,
+            &[
+                "summary: kind=system_status",
+                "mode: status",
+                "checks: label=Checks",
+            ],
+        );
+
+        let touchid = touchid_text_output_for_test(Some("status"), true).unwrap();
+        assert_markers(
+            "touchid",
+            &touchid,
+            &[
+                "summary: kind=system_touchid",
+                "mode: dry_run",
+                "action: status",
+            ],
+        );
+
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("SHELL", "/bin/zsh");
+        }
+        let completion = completion_text_output_for_test(None, true).unwrap();
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("SHELL");
+        }
+        assert_markers(
+            "completion",
+            &completion,
+            &[
+                "summary: kind=system_completion",
+                "mode: dry_run",
+                "shell: zsh",
+            ],
+        );
+
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_UPDATE_LATEST_VERSION", "9.9.9");
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
+        }
+        let update = update_text_output_for_test(false, false);
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_UPDATE_LATEST_VERSION");
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert_markers(
+            "update",
+            &update,
+            &[
+                "summary: kind=system_update",
+                "mode: plan",
+                "checks: label=Checks",
+            ],
+        );
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        fs::write(state_dir.path().join("plugins.lock"), "dummy").unwrap();
+        fs::write(cache_dir.path().join("cache.tmp"), "dummy").unwrap();
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::set_var("PREEN_REMOVE_STATE_DIR", state_dir.path().as_os_str());
+            std::env::set_var("PREEN_REMOVE_CACHE_DIR", cache_dir.path().as_os_str());
+            std::env::set_var("PREEN_UPDATE_INSTALL_SOURCE", "cargo");
+        }
+        let remove = remove_text_output_for_test(true, false).unwrap();
+        // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+        unsafe {
+            std::env::remove_var("PREEN_REMOVE_STATE_DIR");
+            std::env::remove_var("PREEN_REMOVE_CACHE_DIR");
+            std::env::remove_var("PREEN_UPDATE_INSTALL_SOURCE");
+        }
+        assert_markers(
+            "remove",
+            &remove,
+            &[
+                "summary: kind=system_remove",
+                "mode: dry_run",
+                "checks: label=Checks",
+            ],
+        );
+
+        let clean_whitelist = clean_whitelist_text_output_for_test().unwrap();
+        assert_markers(
+            "clean_whitelist",
+            &clean_whitelist,
+            &[
+                "summary: kind=system_clean_whitelist",
+                "entries: ",
+                "defaults_written: ",
+            ],
+        );
+
+        let optimize_whitelist = optimize_whitelist_text_output_for_test().unwrap();
+        assert_markers(
+            "optimize_whitelist",
+            &optimize_whitelist,
+            &[
+                "summary: kind=system_optimize_whitelist",
+                "available_tasks: ",
+                "defaults_written: ",
+            ],
+        );
+    });
+}
+
+#[test]
 fn optimize_apply_runs_post_check_and_reports_remaining_issues() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
