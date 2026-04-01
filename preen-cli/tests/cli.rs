@@ -380,6 +380,28 @@ fn with_debug_log_env<T>(key: &str, path: &Path, f: impl FnOnce() -> T) -> T {
     with_env_overrides(&[(key, path.as_os_str().to_os_string())], f)
 }
 
+fn clear_registry_trust_env() {
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::remove_var("PREEN_REGISTRY_SOURCE");
+        std::env::remove_var("PREEN_REGISTRY_SIGNATURE_SOURCE");
+        std::env::remove_var("PREEN_REGISTRY_IDENTITY");
+        std::env::remove_var("PREEN_REGISTRY_ISSUER");
+    }
+}
+
+fn apply_registry_freshness_env(cache: &Path, stale_mode: &str, max_age_days: Option<&str>) {
+    // SAFETY: test caller holds ENV_LOCK to avoid concurrent env mutation.
+    unsafe {
+        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
+        std::env::set_var("PREEN_REGISTRY_STALE_MODE", stale_mode);
+        match max_age_days {
+            Some(days) => std::env::set_var("PREEN_REGISTRY_MAX_AGE_DAYS", days),
+            None => std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS"),
+        }
+    }
+}
+
 fn with_analyze_root_fixture<T>(f: impl FnOnce(&Path) -> T) -> T {
     let analyze_root = tempfile::tempdir().unwrap();
     fs::create_dir_all(analyze_root.path().join("nested")).unwrap();
@@ -5164,13 +5186,7 @@ fn run_typed_returns_validation_when_plugin_test_missing_target() {
 #[test]
 fn run_typed_registry_update_rejects_invalid_identity() {
     let _guard = ENV_LOCK.lock().unwrap();
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_REGISTRY_SOURCE");
-        std::env::remove_var("PREEN_REGISTRY_SIGNATURE_SOURCE");
-        std::env::remove_var("PREEN_REGISTRY_IDENTITY");
-        std::env::remove_var("PREEN_REGISTRY_ISSUER");
-    }
+    clear_registry_trust_env();
     let cli = Cli::try_parse_from([
         "preen",
         "plugin",
@@ -5195,13 +5211,7 @@ fn run_typed_registry_update_rejects_invalid_identity() {
 #[test]
 fn run_typed_registry_update_rejects_invalid_issuer() {
     let _guard = ENV_LOCK.lock().unwrap();
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_REGISTRY_SOURCE");
-        std::env::remove_var("PREEN_REGISTRY_SIGNATURE_SOURCE");
-        std::env::remove_var("PREEN_REGISTRY_IDENTITY");
-        std::env::remove_var("PREEN_REGISTRY_ISSUER");
-    }
+    clear_registry_trust_env();
     let cli = Cli::try_parse_from([
         "preen",
         "plugin",
@@ -5223,13 +5233,7 @@ fn run_typed_registry_update_rejects_invalid_issuer() {
 #[test]
 fn run_typed_registry_update_missing_source_has_detail_code_and_hint() {
     let _guard = ENV_LOCK.lock().unwrap();
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::remove_var("PREEN_REGISTRY_SOURCE");
-        std::env::remove_var("PREEN_REGISTRY_SIGNATURE_SOURCE");
-        std::env::remove_var("PREEN_REGISTRY_IDENTITY");
-        std::env::remove_var("PREEN_REGISTRY_ISSUER");
-    }
+    clear_registry_trust_env();
     let cli = Cli::try_parse_from(["preen", "plugin", "registry-update"]).unwrap();
     let err = run_typed(cli.clone()).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Validation);
@@ -5372,12 +5376,7 @@ latest_version = "1.2.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let cli = Cli::try_parse_from([
         "preen",
@@ -5433,12 +5432,7 @@ latest_version = "0.1.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let update_cli = Cli::try_parse_from([
         "preen",
@@ -5498,12 +5492,7 @@ latest_version = "0.1.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let update_cli = Cli::try_parse_from([
         "preen",
@@ -5627,12 +5616,7 @@ latest_version = "0.1.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let update_cli = Cli::try_parse_from([
         "preen",
@@ -5713,12 +5697,7 @@ latest_version = "0.1.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let update_cli = Cli::try_parse_from([
         "preen",
@@ -5794,12 +5773,7 @@ latest_version = "0.1.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let update_cli = Cli::try_parse_from([
         "preen",
@@ -5902,12 +5876,7 @@ latest_version = "0.1.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let update_cli = Cli::try_parse_from([
         "preen",
@@ -5997,12 +5966,7 @@ latest_version = "0.1.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let update_cli = Cli::try_parse_from([
         "preen",
@@ -6082,12 +6046,7 @@ latest_version = "0.1.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let update_cli = Cli::try_parse_from([
         "preen",
@@ -6181,12 +6140,7 @@ latest_version = "0.1.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let update_cli = Cli::try_parse_from([
         "preen",
@@ -6281,12 +6235,7 @@ latest_version = "0.1.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let update_cli = Cli::try_parse_from([
         "preen",
@@ -6371,12 +6320,7 @@ latest_version = "1.2.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let cli = Cli::try_parse_from([
         "preen",
@@ -6438,12 +6382,7 @@ latest_version = "1.2.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let cli = Cli::try_parse_from([
         "preen",
@@ -6499,12 +6438,7 @@ latest_version = "1.2.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::remove_var("PREEN_REGISTRY_MAX_AGE_DAYS");
-    }
+    apply_registry_freshness_env(&cache, "warn", None);
 
     let cli = Cli::try_parse_from([
         "preen",
@@ -6562,12 +6496,7 @@ latest_version = "1.2.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "error");
-        std::env::set_var("PREEN_REGISTRY_MAX_AGE_DAYS", "30");
-    }
+    apply_registry_freshness_env(&cache, "error", Some("30"));
 
     let cli = Cli::try_parse_from([
         "preen",
@@ -6626,12 +6555,7 @@ latest_version = "1.2.0"
     .unwrap();
     fs::write(&sig, "sig").unwrap();
 
-    // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
-    unsafe {
-        std::env::set_var("PREEN_REGISTRY_INDEX", cache.to_str().unwrap());
-        std::env::set_var("PREEN_REGISTRY_STALE_MODE", "warn");
-        std::env::set_var("PREEN_REGISTRY_MAX_AGE_DAYS", "30");
-    }
+    apply_registry_freshness_env(&cache, "warn", Some("30"));
 
     let cli = Cli::try_parse_from([
         "preen",
