@@ -4465,6 +4465,18 @@ fn json_error_output_is_suppressed_when_report_already_emitted_for_verify() {
 }
 
 #[test]
+fn json_error_output_is_suppressed_when_report_already_emitted_for_verify_os_target_failure() {
+    let json_cli =
+        Cli::try_parse_from(["preen", "plugin", "verify", "test.pack", "--json"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Validation,
+        detail_code: Some("verify_os_target_failed".to_string()),
+        message: "rule pack not compatible with this OS".to_string(),
+    };
+    assert!(!should_emit_formatted_error(&json_cli, &err));
+}
+
+#[test]
 fn json_error_output_is_suppressed_when_report_already_emitted_for_test_all() {
     let json_cli = Cli::try_parse_from(["preen", "plugin", "test", "--all", "--json"]).unwrap();
     let err = CliError {
@@ -4473,6 +4485,32 @@ fn json_error_output_is_suppressed_when_report_already_emitted_for_test_all() {
         message: "1 plugin test checks failed".to_string(),
     };
     assert!(!should_emit_formatted_error(&json_cli, &err));
+}
+
+#[test]
+fn format_error_json_for_test_all_failed_includes_aggregate_hint_metadata() {
+    let json_cli = Cli::try_parse_from(["preen", "plugin", "test", "--all", "--json"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Verification,
+        detail_code: Some("test_all_failed".to_string()),
+        message: "1 plugin test checks failed".to_string(),
+    };
+    let parsed: Value = serde_json::from_str(&json_cli.format_error(&err)).unwrap();
+    assert_eq!(parsed["kind"].as_str(), Some("error"));
+    assert_eq!(parsed["data"]["error_kind"].as_str(), Some("verification"));
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("test_all_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_code"].as_str(),
+        Some("aggregate_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_action"].as_str(),
+        Some("inspect_per_plugin_failure_rows")
+    );
+    assert!(parsed["data"]["hint_message"].as_str().is_some());
 }
 
 #[test]
@@ -5957,6 +5995,41 @@ fn registry_update_install_then_verify_fails_on_action_api_with_stable_hint() {
 }
 
 #[test]
+fn registry_update_install_then_verify_fails_on_os_target_with_stable_hint() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
+
+    let manifest_path = fixture.install_dir.join("test.pack").join("manifest.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let replacement = if std::env::consts::OS == "macos" {
+        "os_targets = [\"Linux\"]"
+    } else {
+        "os_targets = [\"Macos\"]"
+    };
+    let mutated = manifest.replacen("os_targets = [\"Linux\", \"Macos\"]", replacement, 1);
+    assert_ne!(manifest, mutated);
+    fs::write(&manifest_path, mutated).unwrap();
+
+    let raw = plugin_verify_for_test(
+        "test.pack",
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        true,
+        "en-US",
+        &AlwaysOkVerifier,
+    )
+    .unwrap_err();
+    assert_verify_error_has_detail_and_hint(
+        raw,
+        CliErrorKind::Validation,
+        "verify_os_target_failed",
+        "os_target_failed",
+    );
+}
+
+#[test]
 fn registry_update_install_then_test_detects_manifest_tamper() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
@@ -6776,6 +6849,9 @@ fn plugin_test_all_text_failure_first_and_verbose_modes() {
         .unwrap();
         assert!(text.contains("summary: kind=test_all"));
         assert!(text.contains("failure: pack_id=missing.pack"));
+        assert!(text.contains("detail_code=none"));
+        assert!(text.contains("hint_code=unknown_failure"));
+        assert!(text.contains("hint_action=collect_logs_and_retry"));
         assert!(text.contains("passed_results_hidden: 1"));
         assert!(!text.contains("summary: kind=test pack_id=test.pack overall_passed=true"));
 
