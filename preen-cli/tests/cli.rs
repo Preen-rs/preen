@@ -839,6 +839,43 @@ fn check_passed_from_verify_text(text: &str, check_id: &str) -> Option<bool> {
     None
 }
 
+fn assert_verify_error_has_detail_and_hint(
+    raw_error: String,
+    expected_kind: CliErrorKind,
+    expected_detail_code: &str,
+    expected_hint_code: &str,
+) {
+    let expected_kind_str = match expected_kind {
+        CliErrorKind::Validation => "validation",
+        CliErrorKind::NotFound => "not_found",
+        CliErrorKind::Trust => "trust",
+        CliErrorKind::Verification => "verification",
+        CliErrorKind::Io => "io",
+        CliErrorKind::Network => "network",
+        CliErrorKind::Unsupported => "unsupported",
+        CliErrorKind::Internal => "internal",
+    };
+    let err = CliError::from(raw_error);
+    assert_eq!(err.kind, expected_kind);
+    assert_eq!(err.detail_code.as_deref(), Some(expected_detail_code));
+
+    let cli = Cli::try_parse_from(["preen", "plugin", "verify", "test.pack", "--json"]).unwrap();
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(parsed["kind"].as_str(), Some("error"));
+    assert_eq!(
+        parsed["data"]["error_kind"].as_str(),
+        Some(expected_kind_str)
+    );
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some(expected_detail_code)
+    );
+    assert_eq!(
+        parsed["data"]["hint_code"].as_str(),
+        Some(expected_hint_code)
+    );
+}
+
 fn system_check_passed_from_json(data: &Value, check_id: &str) -> Option<bool> {
     let checks = data.get("checks")?.as_array()?;
     checks.iter().find_map(|item| {
@@ -5801,6 +5838,121 @@ fn registry_update_install_then_verify_missing_manifest_maps_verify_pack_load_fa
     assert_eq!(
         parsed["data"]["hint_code"].as_str(),
         Some("pack_load_failed")
+    );
+}
+
+#[test]
+fn registry_update_install_then_verify_fails_on_version_drift_with_stable_hint() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
+
+    let mut lock = load_lockfile_at(&fixture.lockfile).unwrap();
+    lock.plugins[0].version = "0.1.1".to_string();
+    save_lockfile_at(&fixture.lockfile, &lock).unwrap();
+
+    let raw = plugin_verify_for_test(
+        "test.pack",
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        true,
+        "en-US",
+        &AlwaysOkVerifier,
+    )
+    .unwrap_err();
+    assert_verify_error_has_detail_and_hint(
+        raw,
+        CliErrorKind::Verification,
+        "verify_version_drift",
+        "version_drift",
+    );
+}
+
+#[test]
+fn registry_update_install_then_verify_fails_on_resolved_rev_drift_with_stable_hint() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
+
+    let mut lock = load_lockfile_at(&fixture.lockfile).unwrap();
+    lock.plugins[0].resolved_rev = Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string());
+    save_lockfile_at(&fixture.lockfile, &lock).unwrap();
+
+    let raw = plugin_verify_for_test(
+        "test.pack",
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        true,
+        "en-US",
+        &AlwaysOkVerifier,
+    )
+    .unwrap_err();
+    assert_verify_error_has_detail_and_hint(
+        raw,
+        CliErrorKind::Verification,
+        "verify_resolved_rev_drift",
+        "resolved_rev_drift",
+    );
+}
+
+#[test]
+fn registry_update_install_then_verify_fails_on_signature_hash_drift_with_stable_hint() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
+
+    let signature_path = fixture.install_dir.join("test.pack").join("manifest.sig");
+    let mut signature = fs::read_to_string(&signature_path).unwrap();
+    signature.push_str("\n# tampered\n");
+    fs::write(&signature_path, signature).unwrap();
+
+    let raw = plugin_verify_for_test(
+        "test.pack",
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        true,
+        "en-US",
+        &AlwaysOkVerifier,
+    )
+    .unwrap_err();
+    assert_verify_error_has_detail_and_hint(
+        raw,
+        CliErrorKind::Verification,
+        "verify_signature_hash_drift",
+        "signature_hash_drift",
+    );
+}
+
+#[test]
+fn registry_update_install_then_verify_fails_on_action_api_with_stable_hint() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
+
+    let manifest_path = fixture.install_dir.join("test.pack").join("manifest.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let mutated = manifest.replacen("action_api = 1", "action_api = 2", 1);
+    assert_ne!(manifest, mutated);
+    fs::write(&manifest_path, mutated).unwrap();
+
+    let raw = plugin_verify_for_test(
+        "test.pack",
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        true,
+        "en-US",
+        &AlwaysOkVerifier,
+    )
+    .unwrap_err();
+    assert_verify_error_has_detail_and_hint(
+        raw,
+        CliErrorKind::Validation,
+        "verify_action_api_unsupported",
+        "action_api_unsupported",
     );
 }
 
