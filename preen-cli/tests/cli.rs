@@ -642,6 +642,24 @@ impl RegistryRepoFixture {
     fn run_registry_update<V: SignatureVerifier>(&self, verifier: &V) -> Result<(), CliError> {
         run_registry_update_cli_with_verifier(&self.index, &self.sig, verifier)
     }
+
+    fn prepare_registry<V: SignatureVerifier>(&self, verifier: &V) -> Result<(), CliError> {
+        self.write_test_pack_index();
+        apply_registry_freshness_env(&self.cache, "warn", None);
+        self.run_registry_update(verifier)
+    }
+
+    fn install_test_pack<V: SignatureVerifier>(
+        &self,
+        verifier: &V,
+    ) -> Result<LockedPlugin, String> {
+        install_plugin_in_dir_for_test(
+            "test.pack@0.1.0",
+            Some(&self.lockfile),
+            &self.install_dir,
+            verifier,
+        )
+    }
 }
 
 fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
@@ -5531,9 +5549,7 @@ fn run_typed_registry_update_local_source_success_with_injected_verifier() {
 fn run_typed_registry_update_then_preflight_registry_spec_success() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
-    fixture.write_test_pack_index();
-    apply_registry_freshness_env(&fixture.cache, "warn", None);
-    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
 
     let preflight_cli =
         Cli::try_parse_from(["preen", "plugin", "preflight", "test.pack@0.1.0"]).unwrap();
@@ -5545,17 +5561,9 @@ fn run_typed_registry_update_then_preflight_registry_spec_success() {
 fn registry_update_then_install_and_verify_registry_spec_success() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
-    fixture.write_test_pack_index();
-    apply_registry_freshness_env(&fixture.cache, "warn", None);
-    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
 
-    let locked = install_plugin_in_dir_for_test(
-        "test.pack@0.1.0",
-        Some(&fixture.lockfile),
-        &fixture.install_dir,
-        &AlwaysOkVerifier,
-    )
-    .unwrap();
+    let locked = fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
 
     assert_eq!(locked.pack_id, "test.pack");
     assert_eq!(locked.version, "0.1.0");
@@ -5629,17 +5637,9 @@ fn registry_update_then_install_and_verify_registry_spec_success() {
 fn registry_update_install_then_verify_fails_on_manifest_tamper() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
-    fixture.write_test_pack_index();
-    apply_registry_freshness_env(&fixture.cache, "warn", None);
-    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
 
-    install_plugin_in_dir_for_test(
-        "test.pack@0.1.0",
-        Some(&fixture.lockfile),
-        &fixture.install_dir,
-        &AlwaysOkVerifier,
-    )
-    .unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
 
     let manifest_path = fixture.install_dir.join("test.pack").join("manifest.toml");
     let mut manifest = fs::read_to_string(&manifest_path).unwrap();
@@ -5664,17 +5664,9 @@ fn registry_update_install_then_verify_fails_on_manifest_tamper() {
 fn registry_update_install_then_verify_fails_on_signature_or_trust() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
-    fixture.write_test_pack_index();
-    apply_registry_freshness_env(&fixture.cache, "warn", None);
-    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
 
-    install_plugin_in_dir_for_test(
-        "test.pack@0.1.0",
-        Some(&fixture.lockfile),
-        &fixture.install_dir,
-        &AlwaysOkVerifier,
-    )
-    .unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
 
     let err = plugin_verify_for_test(
         "test.pack",
@@ -5694,17 +5686,9 @@ fn registry_update_install_then_verify_fails_on_signature_or_trust() {
 fn registry_update_install_then_test_detects_manifest_tamper() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
-    fixture.write_test_pack_index();
-    apply_registry_freshness_env(&fixture.cache, "warn", None);
-    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
 
-    install_plugin_in_dir_for_test(
-        "test.pack@0.1.0",
-        Some(&fixture.lockfile),
-        &fixture.install_dir,
-        &AlwaysOkVerifier,
-    )
-    .unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
 
     let manifest_path = fixture.install_dir.join("test.pack").join("manifest.toml");
     let mut manifest = fs::read_to_string(&manifest_path).unwrap();
@@ -5751,17 +5735,9 @@ fn registry_update_install_then_test_detects_manifest_tamper() {
 fn registry_update_install_then_test_detects_signature_tamper() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
-    fixture.write_test_pack_index();
-    apply_registry_freshness_env(&fixture.cache, "warn", None);
-    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
 
-    install_plugin_in_dir_for_test(
-        "test.pack@0.1.0",
-        Some(&fixture.lockfile),
-        &fixture.install_dir,
-        &AlwaysOkVerifier,
-    )
-    .unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
 
     let signature_path = fixture.install_dir.join("test.pack").join("manifest.sig");
     let mut signature = fs::read_to_string(&signature_path).unwrap();
@@ -5795,17 +5771,9 @@ fn registry_update_install_then_test_detects_signature_tamper() {
 fn registry_update_install_then_test_detects_resolved_rev_drift() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
-    fixture.write_test_pack_index();
-    apply_registry_freshness_env(&fixture.cache, "warn", None);
-    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
 
-    install_plugin_in_dir_for_test(
-        "test.pack@0.1.0",
-        Some(&fixture.lockfile),
-        &fixture.install_dir,
-        &AlwaysOkVerifier,
-    )
-    .unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
 
     let mut lock = load_lockfile_at(&fixture.lockfile).unwrap();
     lock.plugins[0].resolved_rev = Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string());
@@ -5829,17 +5797,9 @@ fn registry_update_install_then_test_detects_resolved_rev_drift() {
 fn registry_update_install_then_test_detects_version_drift() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
-    fixture.write_test_pack_index();
-    apply_registry_freshness_env(&fixture.cache, "warn", None);
-    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
 
-    install_plugin_in_dir_for_test(
-        "test.pack@0.1.0",
-        Some(&fixture.lockfile),
-        &fixture.install_dir,
-        &AlwaysOkVerifier,
-    )
-    .unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
 
     let mut lock = load_lockfile_at(&fixture.lockfile).unwrap();
     lock.plugins[0].version = "0.1.1".to_string();
@@ -5877,17 +5837,9 @@ fn registry_update_install_then_test_detects_version_drift() {
 fn registry_update_install_then_test_detects_signature_or_trust_drift() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
-    fixture.write_test_pack_index();
-    apply_registry_freshness_env(&fixture.cache, "warn", None);
-    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
 
-    install_plugin_in_dir_for_test(
-        "test.pack@0.1.0",
-        Some(&fixture.lockfile),
-        &fixture.install_dir,
-        &AlwaysOkVerifier,
-    )
-    .unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
 
     let json = plugin_test_for_test(
         "test.pack",
@@ -5926,17 +5878,9 @@ fn registry_update_install_then_test_detects_signature_or_trust_drift() {
 fn registry_update_install_then_test_all_includes_failure_row_detail_code() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
-    fixture.write_test_pack_index();
-    apply_registry_freshness_env(&fixture.cache, "warn", None);
-    fixture.run_registry_update(&AlwaysOkVerifier).unwrap();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
 
-    install_plugin_in_dir_for_test(
-        "test.pack@0.1.0",
-        Some(&fixture.lockfile),
-        &fixture.install_dir,
-        &AlwaysOkVerifier,
-    )
-    .unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
 
     let manifest_path = fixture.install_dir.join("test.pack").join("manifest.toml");
     let mut manifest = fs::read_to_string(&manifest_path).unwrap();
