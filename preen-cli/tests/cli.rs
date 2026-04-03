@@ -5941,6 +5941,102 @@ fn run_typed_registry_update_local_source_verification_failure() {
 }
 
 #[test]
+fn run_typed_registry_update_local_source_index_parse_failure_has_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let index = tmp.path().join("registry-index.toml");
+    let sig = tmp.path().join("registry-index.toml.sig");
+    let cache = tmp.path().join("cache-index.toml");
+
+    fs::write(&index, "this is not valid toml").unwrap();
+    write_registry_signature(&sig);
+    apply_registry_freshness_env(&cache, "warn", None);
+
+    let cli = Cli::try_parse_from([
+        "preen",
+        "plugin",
+        "registry-update",
+        "--source",
+        &file_source_url(&index),
+        "--signature-source",
+        &file_source_url(&sig),
+        "--identity",
+        REGISTRY_SIGN_IDENTITY,
+        "--issuer",
+        REGISTRY_SIGN_ISSUER,
+        "--json",
+    ])
+    .unwrap();
+    let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysOkVerifier).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_index_parse_failed")
+    );
+    assert!(!cache.exists());
+
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(parsed["kind"].as_str(), Some("error"));
+    assert_eq!(parsed["data"]["error_kind"].as_str(), Some("validation"));
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("registry_index_parse_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_code"].as_str(),
+        Some("pack_load_failed")
+    );
+}
+
+#[test]
+fn run_typed_registry_update_local_source_signature_read_failure_has_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let index = tmp.path().join("registry-index.toml");
+    let missing_sig = tmp.path().join("missing-registry-index.toml.sig");
+    let cache = tmp.path().join("cache-index.toml");
+
+    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+    write_homebrew_registry_index(&index, &now);
+    apply_registry_freshness_env(&cache, "warn", None);
+
+    let cli = Cli::try_parse_from([
+        "preen",
+        "plugin",
+        "registry-update",
+        "--source",
+        &file_source_url(&index),
+        "--signature-source",
+        &file_source_url(&missing_sig),
+        "--identity",
+        REGISTRY_SIGN_IDENTITY,
+        "--issuer",
+        REGISTRY_SIGN_ISSUER,
+        "--json",
+    ])
+    .unwrap();
+    let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysOkVerifier).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Io);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_signature_read_failed")
+    );
+    assert!(!cache.exists());
+
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(parsed["kind"].as_str(), Some("error"));
+    assert_eq!(parsed["data"]["error_kind"].as_str(), Some("io"));
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("registry_signature_read_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_code"].as_str(),
+        Some("registry_or_source_resolve_failed")
+    );
+}
+
+#[test]
 fn run_typed_registry_update_local_source_missing_cert_failure_has_detail_code() {
     let _guard = ENV_LOCK.lock().unwrap();
     let tmp = tempfile::tempdir().unwrap();
@@ -6059,9 +6155,24 @@ fn run_typed_preflight_local_git_verification_failure() {
     let repo = tmp.path().join("plugin-repo");
     let rev = init_preflight_git_repo(&repo);
     let spec = format!("file://{}@{}", repo.display(), rev);
-    let cli = Cli::try_parse_from(["preen", "plugin", "preflight", &spec]).unwrap();
-    let err = run_typed_with_verifier_for_test(cli, &AlwaysFailVerifier).unwrap_err();
+    let cli = Cli::try_parse_from(["preen", "plugin", "preflight", &spec, "--json"]).unwrap();
+    let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysFailVerifier).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::Verification);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("preflight_signature_or_trust_failed")
+    );
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(parsed["kind"].as_str(), Some("error"));
+    assert_eq!(parsed["data"]["error_kind"].as_str(), Some("verification"));
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("preflight_signature_or_trust_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_code"].as_str(),
+        Some("trust_or_signature_failed")
+    );
 }
 
 #[test]
@@ -6406,6 +6517,32 @@ fn run_typed_test_local_git_spec_success_with_injected_verifier() {
     let cli = Cli::try_parse_from(["preen", "plugin", "test", &spec]).unwrap();
     let result = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier);
     assert!(result.is_ok());
+}
+
+#[test]
+fn run_typed_test_local_git_spec_verification_failure_has_detail_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("plugin-repo");
+    let rev = init_preflight_git_repo(&repo);
+    let spec = format!("file://{}@{}", repo.display(), rev);
+    let cli = Cli::try_parse_from(["preen", "plugin", "test", &spec, "--json"]).unwrap();
+    let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysFailVerifier).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Verification);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("preflight_signature_or_trust_failed")
+    );
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(parsed["kind"].as_str(), Some("error"));
+    assert_eq!(parsed["data"]["error_kind"].as_str(), Some("verification"));
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("preflight_signature_or_trust_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_code"].as_str(),
+        Some("trust_or_signature_failed")
+    );
 }
 
 #[test]
