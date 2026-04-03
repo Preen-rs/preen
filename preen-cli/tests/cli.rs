@@ -5353,6 +5353,92 @@ fn update_plugin_not_found_returns_not_found_error() {
 }
 
 #[test]
+fn run_typed_install_invalid_lockfile_maps_install_lockfile_load_failed() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{rev}", repo.to_string_lossy());
+        let lockfile = tmp.path().join("plugins.lock");
+        fs::write(&lockfile, "not valid toml").unwrap();
+
+        let cli = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "install",
+            &spec,
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+            "--json",
+        ])
+        .unwrap();
+        let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysOkVerifier).unwrap_err();
+        assert_eq!(err.kind, CliErrorKind::Validation);
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("install_lockfile_load_failed")
+        );
+
+        let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+        assert_eq!(parsed["kind"].as_str(), Some("error"));
+        assert_eq!(parsed["data"]["error_kind"].as_str(), Some("validation"));
+        assert_eq!(
+            parsed["data"]["detail_code"].as_str(),
+            Some("install_lockfile_load_failed")
+        );
+        assert_eq!(
+            parsed["data"]["hint_code"].as_str(),
+            Some("lockfile_io_failed")
+        );
+    });
+}
+
+#[test]
+fn run_typed_install_lockfile_directory_parent_maps_install_lockfile_save_failed() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{rev}", repo.to_string_lossy());
+
+        let blocked_parent = tmp.path().join("blocked-parent");
+        fs::write(&blocked_parent, "not a directory").unwrap();
+        let lockfile = blocked_parent.join("plugins.lock");
+
+        let cli = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "install",
+            &spec,
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+            "--json",
+        ])
+        .unwrap();
+        let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysOkVerifier).unwrap_err();
+        assert_eq!(err.kind, CliErrorKind::Io);
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("install_lockfile_save_failed")
+        );
+
+        let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+        assert_eq!(parsed["kind"].as_str(), Some("error"));
+        assert_eq!(parsed["data"]["error_kind"].as_str(), Some("io"));
+        assert_eq!(
+            parsed["data"]["detail_code"].as_str(),
+            Some("install_lockfile_save_failed")
+        );
+        assert_eq!(
+            parsed["data"]["hint_code"].as_str(),
+            Some("lockfile_io_failed")
+        );
+    });
+}
+
+#[test]
 fn run_typed_returns_validation_when_plugin_test_missing_target() {
     let cli = Cli::try_parse_from(["preen", "plugin", "test"]).unwrap();
     let err = run_typed(cli).unwrap_err();
@@ -5683,6 +5769,42 @@ fn registry_update_install_then_verify_fails_on_signature_or_trust() {
 }
 
 #[test]
+fn registry_update_install_then_verify_missing_manifest_maps_verify_pack_load_failed() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
+
+    fs::remove_file(fixture.install_dir.join("test.pack").join("manifest.toml")).unwrap();
+
+    let raw = plugin_verify_for_test(
+        "test.pack",
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        true,
+        "en-US",
+        &AlwaysOkVerifier,
+    )
+    .unwrap_err();
+    let err = CliError::from(raw);
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(err.detail_code.as_deref(), Some("verify_pack_load_failed"));
+
+    let cli = Cli::try_parse_from(["preen", "plugin", "verify", "test.pack", "--json"]).unwrap();
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(parsed["kind"].as_str(), Some("error"));
+    assert_eq!(parsed["data"]["error_kind"].as_str(), Some("validation"));
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("verify_pack_load_failed")
+    );
+    assert_eq!(
+        parsed["data"]["hint_code"].as_str(),
+        Some("pack_load_failed")
+    );
+}
+
+#[test]
 fn registry_update_install_then_test_detects_manifest_tamper() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
@@ -5907,6 +6029,50 @@ fn registry_update_install_then_test_all_includes_failure_row_detail_code() {
     assert_eq!(
         failures[0]["detail_code"].as_str(),
         Some("test_manifest_hash_drift")
+    );
+}
+
+#[test]
+fn registry_update_install_then_test_all_action_api_drift_has_specific_failure_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
+
+    let manifest_path = fixture.install_dir.join("test.pack").join("manifest.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let mutated = manifest.replacen("action_api = 1", "action_api = 2", 1);
+    assert_ne!(manifest, mutated);
+    fs::write(&manifest_path, mutated).unwrap();
+
+    let text = plugin_test_all_for_test(
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        false,
+        false,
+        &AlwaysOkVerifier,
+    )
+    .unwrap();
+    assert!(text.contains("hint_code=action_api_unsupported"));
+
+    let json = plugin_test_all_for_test(
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        true,
+        false,
+        &AlwaysOkVerifier,
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["kind"].as_str(), Some("plugin.test_all"));
+    assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
+    let failures = parsed["data"]["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0]["pack_id"].as_str(), Some("test.pack"));
+    assert_eq!(failures[0]["error_kind"].as_str(), Some("verification"));
+    assert_eq!(
+        failures[0]["detail_code"].as_str(),
+        Some("test_action_api_unsupported")
     );
 }
 
