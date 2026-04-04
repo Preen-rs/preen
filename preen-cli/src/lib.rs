@@ -6916,11 +6916,9 @@ fn preflight_single(
         &loaded.manifest.pack_id,
     );
     verify_rule_pack_with_verifier(&loaded, &trust, verifier).map_err(|e| {
-        err_code(
-            CliErrorKind::Verification,
-            "preflight_signature_or_trust_failed",
-            e,
-        )
+        let (kind_raw, _, plain_message) = parse_error_metadata(&e);
+        let kind = CliErrorKind::from_str(&kind_raw).unwrap_or(CliErrorKind::Verification);
+        err_code(kind, "preflight_signature_or_trust_failed", plain_message)
     })?;
     Ok(PluginPreflightOutput {
         spec: spec.to_string(),
@@ -7278,6 +7276,11 @@ fn verify_plugin(
         print_plugin_verify_output(&report, &language);
     }
     if !report.overall_passed {
+        let failure_kind = if report.signature_verified && !report.trust_verified {
+            CliErrorKind::Trust
+        } else {
+            CliErrorKind::Verification
+        };
         let detail_code = report
             .detail_code
             .clone()
@@ -7286,7 +7289,7 @@ fn verify_plugin(
             })
             .unwrap_or_else(|| "verify_failed".to_string());
         return Err(err_code(
-            CliErrorKind::Verification,
+            failure_kind,
             &detail_code,
             format!("plugin verify failed for {}", report.pack_id),
         ));
@@ -7538,7 +7541,11 @@ fn plugin_test_failure_from_report(report: &PluginTestOutput) -> PluginTestFailu
         .unwrap_or_else(|| "plugin test report failed".to_string());
     PluginTestFailureOutput {
         pack_id: report.pack_id.clone(),
-        error_kind: CliErrorKind::Verification.as_str().to_string(),
+        error_kind: if report.signature_verified && !report.trust_verified {
+            CliErrorKind::Trust.as_str().to_string()
+        } else {
+            CliErrorKind::Verification.as_str().to_string()
+        },
         detail_code,
         message,
     }
@@ -7874,6 +7881,18 @@ fn parse_error_metadata(message: &str) -> (String, Option<String>, String) {
     )
 }
 
+fn verify_check_statuses_from_error(message: Option<&str>) -> (bool, bool) {
+    let Some(message) = message else {
+        return (true, true);
+    };
+    let (kind_raw, _, _) = parse_error_metadata(message);
+    match CliErrorKind::from_str(&kind_raw) {
+        Some(CliErrorKind::Trust) => (true, false),
+        Some(CliErrorKind::Verification) => (false, true),
+        _ => (false, false),
+    }
+}
+
 fn plugin_test_suggested_actions(
     pack_id: &str,
     overall_passed: bool,
@@ -7934,11 +7953,9 @@ fn plugin_checks_in_dir(
     })?;
     let trust = load_trust_policy()?;
     verify_rule_pack_with_verifier(&loaded, &trust, verifier).map_err(|e| {
-        err_code(
-            CliErrorKind::Verification,
-            "verify_signature_or_trust_failed",
-            e,
-        )
+        let (kind_raw, _, plain_message) = parse_error_metadata(&e);
+        let kind = CliErrorKind::from_str(&kind_raw).unwrap_or(CliErrorKind::Verification);
+        err_code(kind, "verify_signature_or_trust_failed", plain_message)
     })?;
     if loaded.manifest.version != plugin.version {
         return Err(err_code(
@@ -8097,13 +8114,14 @@ fn plugin_test_report_in_dir(
     }
 
     let verify_err = verify_rule_pack_with_verifier(&loaded, &trust, verifier).err();
-    let signature_verified = verify_err.is_none();
-    let trust_verified = verify_err.is_none();
+    let (signature_verified, trust_verified) =
+        verify_check_statuses_from_error(verify_err.as_deref());
     if let Some(message) = verify_err {
+        let (_, _, plain_message) = parse_error_metadata(&message);
         drifts.push(PluginTestDrift {
             field: "signature_or_trust".to_string(),
             expected: "verified".to_string(),
-            actual: message,
+            actual: plain_message,
         });
     }
 
@@ -8606,10 +8624,11 @@ fn verify_registry_index_signature(
         expected_issuer: Some(issuer.to_string()),
     };
     preen_core::plugin::verify_with_policy(verifier, &policy, input).map_err(|verify_err| {
+        let (kind, reason) = classify_verify_error(verify_err);
         err_code(
-            CliErrorKind::Verification,
+            kind,
             "registry_signature_verify_failed",
-            format!("registry signature verification failed: {verify_err:?}"),
+            format!("registry signature verification failed: {reason}"),
         )
     })?;
     Ok(())
@@ -10551,6 +10570,24 @@ fn validate_os_targets(loaded: &LoadedRulePack) -> Result<(), String> {
     Ok(())
 }
 
+fn classify_verify_error(verify_err: VerifyError) -> (CliErrorKind, String) {
+    match verify_err {
+        VerifyError::NotTrusted { identity } => (
+            CliErrorKind::Trust,
+            format!("identity not allowed: {identity}"),
+        ),
+        VerifyError::SignatureInvalid(reason) => (CliErrorKind::Verification, reason),
+        VerifyError::LogVerificationFailed(reason) => (
+            CliErrorKind::Verification,
+            format!("log verification failed: {reason}"),
+        ),
+        VerifyError::PolicyUnavailable(reason) => (
+            CliErrorKind::Trust,
+            format!("trust policy unavailable: {reason}"),
+        ),
+    }
+}
+
 fn verify_rule_pack(loaded: &LoadedRulePack, policy: &TrustPolicy) -> Result<(), String> {
     verify_rule_pack_with_verifier(loaded, policy, &SigstoreVerifier)
 }
@@ -10590,16 +10627,10 @@ fn verify_rule_pack_with_verifier(
             .as_ref()
             .and_then(|s| s.issuer.clone()),
     };
-    let outcome =
-        preen_core::plugin::verify_with_policy(verifier, policy, input).map_err(|verify_err| {
-            err(
-                CliErrorKind::Verification,
-                format!("verification failed: {verify_err:?}"),
-            )
-        })?;
-    if !policy.allowlist.is_empty() && !policy.is_identity_allowed(&outcome.identity) {
-        return Err(err(CliErrorKind::Trust, "identity not allowed"));
-    }
+    preen_core::plugin::verify_with_policy(verifier, policy, input).map_err(|verify_err| {
+        let (kind, reason) = classify_verify_error(verify_err);
+        err(kind, format!("verification failed: {reason}"))
+    })?;
     Ok(())
 }
 

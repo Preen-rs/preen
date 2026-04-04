@@ -767,11 +767,7 @@ impl ActionExecutorPort for OsActionExecutor {
         }
 
         if matches!(action_type, ActionType::SystemStatus) {
-            return Ok(ActionExecutionResult {
-                affected_items: 0,
-                freed_bytes: 0,
-                warnings: Vec::new(),
-            });
+            return Self::execute_disk_usage_snapshot(plan).await;
         }
 
         if matches!(action_type, ActionType::OptimizeSystem) {

@@ -336,6 +336,71 @@ async fn system_status_is_noop_success() {
 }
 
 #[tokio::test]
+async fn system_status_reports_file_count_and_size() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.bin"), vec![1_u8; 8]).unwrap();
+    fs::create_dir_all(dir.path().join("nested")).unwrap();
+    fs::write(dir.path().join("nested").join("b.bin"), vec![1_u8; 4]).unwrap();
+    let plan = sample_plan(
+        ActionType::SystemStatus,
+        ExecutionMode::DryRun,
+        vec![dir.path().to_string_lossy().to_string()],
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert!(out.freed_bytes >= 12);
+    assert!(out.warnings.is_empty());
+}
+
+#[tokio::test]
+async fn system_status_apply_is_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("x.dat"), vec![1_u8; 3]).unwrap();
+    fs::write(dir.path().join("y.dat"), vec![1_u8; 5]).unwrap();
+    let plan = sample_plan(
+        ActionType::SystemStatus,
+        ExecutionMode::Apply,
+        vec![dir.path().to_string_lossy().to_string()],
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert!(out.freed_bytes >= 8);
+    assert!(out.warnings.is_empty());
+    assert!(dir.path().join("x.dat").exists());
+    assert!(dir.path().join("y.dat").exists());
+}
+
+#[tokio::test]
+async fn system_status_reports_missing_path_and_truncation_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.bin"), vec![1_u8; 4]).unwrap();
+    fs::write(dir.path().join("b.bin"), vec![1_u8; 3]).unwrap();
+    fs::write(dir.path().join("c.bin"), vec![1_u8; 2]).unwrap();
+    let missing = dir.path().join("missing");
+    let mut plan = sample_plan_with(
+        ActionType::SystemStatus,
+        ExecutionMode::DryRun,
+        vec![
+            missing.to_string_lossy().to_string(),
+            dir.path().to_string_lossy().to_string(),
+        ],
+        Vec::new(),
+        HashMap::new(),
+        Some(30),
+    );
+    plan.request.action.max_items = Some(2);
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 2);
+    assert!(out.freed_bytes >= 9);
+    assert_eq!(out.warnings.len(), 2);
+    assert!(out.warnings[0].contains("path not found"));
+    assert!(out.warnings[1].contains("truncated at max_items=2"));
+}
+
+#[tokio::test]
 async fn scan_paths_counts_files_without_modifying_targets() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("nested")).unwrap();

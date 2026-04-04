@@ -6204,14 +6204,14 @@ fn registry_update_install_then_test_detects_signature_or_trust_drift() {
         Some("test_signature_or_trust_failed")
     );
     assert!(!parsed["data"]["signature_verified"].as_bool().unwrap());
-    assert!(!parsed["data"]["trust_verified"].as_bool().unwrap());
+    assert!(parsed["data"]["trust_verified"].as_bool().unwrap());
     assert_eq!(
         check_passed_from_json(&parsed["data"], "signature_verified"),
         Some(false)
     );
     assert_eq!(
         check_passed_from_json(&parsed["data"], "trust_verified"),
-        Some(false)
+        Some(true)
     );
     let drifts = parsed["data"]["drifts"].as_array().unwrap();
     assert!(
@@ -6467,7 +6467,7 @@ fn run_typed_registry_update_local_source_identity_mismatch_has_detail_code() {
 
     let cli = make_registry_update_cli(&index, &sig);
     let err = run_typed_with_verifier_for_test(cli, &UntrustedIdentityVerifier).unwrap_err();
-    assert_eq!(err.kind, CliErrorKind::Verification);
+    assert_eq!(err.kind, CliErrorKind::Trust);
     assert_eq!(
         err.detail_code.as_deref(),
         Some("registry_signature_verify_failed")
