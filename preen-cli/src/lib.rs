@@ -6934,6 +6934,7 @@ fn preflight_single(
             "unsupported action_api",
         ));
     }
+    validate_runtime_action_support(&loaded, "preflight_action_api_unsupported")?;
     let trust = load_trust_policy()?;
     emit_progress(
         verbose,
@@ -7152,6 +7153,7 @@ fn install_plugin_internal_in_dir(
             "unsupported action_api",
         ));
     }
+    validate_runtime_action_support(&loaded, "install_action_api_unsupported")?;
     let trust = load_trust_policy().map_err(|e| {
         map_install_error_with_detail_code(
             e,
@@ -8010,6 +8012,7 @@ fn plugin_checks_in_dir(
             "unsupported action_api",
         ));
     }
+    validate_runtime_action_support(&loaded, "verify_action_api_unsupported")?;
     validate_os_targets(&loaded)
         .map_err(|e| err_code(CliErrorKind::Validation, "verify_os_target_failed", e))?;
     let mut resolved_rev_verified = true;
@@ -8160,12 +8163,18 @@ fn plugin_test_report_in_dir(
         });
     }
 
-    let action_api_verified = loaded.manifest.action_api == 1;
+    let unsupported_actions = unsupported_runtime_actions(&loaded);
+    let action_api_verified = loaded.manifest.action_api == 1 && unsupported_actions.is_empty();
     if !action_api_verified {
+        let actual = if loaded.manifest.action_api != 1 {
+            format!("action_api={}", loaded.manifest.action_api)
+        } else {
+            format!("unsupported_actions={}", unsupported_actions.join(","))
+        };
         drifts.push(PluginTestDrift {
             field: "action_api".to_string(),
-            expected: "1".to_string(),
-            actual: loaded.manifest.action_api.to_string(),
+            expected: "1_and_runtime_supported_actions".to_string(),
+            actual,
         });
     }
 
@@ -10594,6 +10603,41 @@ fn validate_os_targets(loaded: &LoadedRulePack) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn unsupported_runtime_actions(loaded: &LoadedRulePack) -> Vec<String> {
+    let mut unsupported = loaded
+        .rules
+        .iter()
+        .filter_map(|rule| {
+            if OsActionExecutor::supports_action_type(&rule.action.action_type) {
+                None
+            } else {
+                Some(format!("{}:{:?}", rule.id, rule.action.action_type))
+            }
+        })
+        .collect::<Vec<_>>();
+    unsupported.sort();
+    unsupported.dedup();
+    unsupported
+}
+
+fn validate_runtime_action_support(
+    loaded: &LoadedRulePack,
+    detail_code: &str,
+) -> Result<(), String> {
+    let unsupported = unsupported_runtime_actions(loaded);
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    Err(err_code(
+        CliErrorKind::Validation,
+        detail_code,
+        format!(
+            "unsupported action types for current runtime: {}",
+            unsupported.join(", ")
+        ),
+    ))
 }
 
 fn classify_verify_error(verify_err: VerifyError) -> (CliErrorKind, String) {

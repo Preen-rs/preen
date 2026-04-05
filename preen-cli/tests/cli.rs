@@ -951,6 +951,27 @@ params = {}
     git_stdout_in(base, &["rev-parse", "HEAD"])
 }
 
+fn rewrite_rule_action_type(rule_path: &Path, action_type_toml: &str) {
+    let rule = fs::read_to_string(rule_path).unwrap();
+    let replacement = format!("action_type = {action_type_toml}");
+    let mutated = rule.replacen("action_type = \"TrashPaths\"", &replacement, 1);
+    assert_ne!(rule, mutated);
+    fs::write(rule_path, mutated).unwrap();
+}
+
+fn set_repo_rule_action_type(repo: &Path, action_type_toml: &str) -> String {
+    let rule_path = repo.join("rules/rule-1.toml");
+    rewrite_rule_action_type(&rule_path, action_type_toml);
+    run_git_in(repo, &["add", "rules/rule-1.toml"]);
+    run_git_in_no_sign(repo, &["commit", "-m", "set unsupported action type"]);
+    git_stdout_in(repo, &["rev-parse", "HEAD"])
+}
+
+fn set_installed_rule_action_type(install_dir: &Path, action_type_toml: &str) {
+    let rule_path = install_dir.join("test.pack").join("rules/rule-1.toml");
+    rewrite_rule_action_type(&rule_path, action_type_toml);
+}
+
 fn init_preflight_git_repo_with_old_tag(base: &Path) -> String {
     let first_commit = init_preflight_git_repo(base);
     run_git_in(base, &["tag", "v0.0.1", &first_commit]);
@@ -5995,6 +6016,34 @@ fn registry_update_install_then_verify_fails_on_action_api_with_stable_hint() {
 }
 
 #[test]
+fn registry_update_install_then_verify_fails_on_unsupported_action_type_with_stable_hint() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
+    set_installed_rule_action_type(
+        &fixture.install_dir,
+        "{ Other = \"CustomUnsupportedAction\" }",
+    );
+
+    let raw = plugin_verify_for_test(
+        "test.pack",
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        true,
+        "en-US",
+        &AlwaysOkVerifier,
+    )
+    .unwrap_err();
+    assert_verify_error_has_detail_and_hint(
+        raw,
+        CliErrorKind::Validation,
+        "verify_action_api_unsupported",
+        "action_api_unsupported",
+    );
+}
+
+#[test]
 fn registry_update_install_then_verify_fails_on_os_target_with_stable_hint() {
     let _guard = ENV_LOCK.lock().unwrap();
     let fixture = RegistryRepoFixture::new();
@@ -6302,6 +6351,69 @@ fn registry_update_install_then_test_all_action_api_drift_has_specific_failure_c
 }
 
 #[test]
+fn registry_update_install_then_test_marks_unsupported_action_type_as_action_api_failure() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
+    set_installed_rule_action_type(
+        &fixture.install_dir,
+        "{ Other = \"CustomUnsupportedAction\" }",
+    );
+
+    let json = plugin_test_for_test(
+        "test.pack",
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        true,
+        "en-US",
+        &AlwaysOkVerifier,
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&json).unwrap();
+    assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("test_action_api_unsupported")
+    );
+    assert_eq!(
+        check_passed_from_json(&parsed["data"], "action_api_verified"),
+        Some(false)
+    );
+}
+
+#[test]
+fn registry_update_install_then_test_all_unsupported_action_type_has_specific_failure_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let fixture = RegistryRepoFixture::new();
+    fixture.prepare_registry(&AlwaysOkVerifier).unwrap();
+    fixture.install_test_pack(&AlwaysOkVerifier).unwrap();
+    set_installed_rule_action_type(
+        &fixture.install_dir,
+        "{ Other = \"CustomUnsupportedAction\" }",
+    );
+
+    let json = plugin_test_all_for_test(
+        Some(&fixture.lockfile),
+        &fixture.install_dir,
+        true,
+        false,
+        &AlwaysOkVerifier,
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["kind"].as_str(), Some("plugin.test_all"));
+    assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
+    let failures = parsed["data"]["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0]["pack_id"].as_str(), Some("test.pack"));
+    assert_eq!(
+        failures[0]["detail_code"].as_str(),
+        Some("test_action_api_unsupported")
+    );
+}
+
+#[test]
 fn run_typed_registry_update_local_source_verification_failure() {
     let _guard = ENV_LOCK.lock().unwrap();
     let tmp = tempfile::tempdir().unwrap();
@@ -6538,6 +6650,34 @@ fn run_typed_preflight_local_git_success_with_injected_verifier() {
     let cli = Cli::try_parse_from(["preen", "plugin", "preflight", &spec]).unwrap();
     let result = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier);
     assert!(result.is_ok());
+}
+
+#[test]
+fn run_typed_preflight_local_git_rejects_unsupported_action_type() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("plugin-repo");
+    let _ = init_preflight_git_repo(&repo);
+    let rev = set_repo_rule_action_type(&repo, "{ Other = \"CustomUnsupportedAction\" }");
+    let spec = format!("file://{}@{}", repo.display(), rev);
+    let cli = Cli::try_parse_from(["preen", "plugin", "preflight", &spec, "--json"]).unwrap();
+    let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysOkVerifier).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("preflight_action_api_unsupported")
+    );
+    assert!(err.message.contains("unsupported action types"));
+    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+    assert_eq!(parsed["kind"].as_str(), Some("error"));
+    assert_eq!(parsed["data"]["error_kind"].as_str(), Some("validation"));
+    assert_eq!(
+        parsed["data"]["detail_code"].as_str(),
+        Some("preflight_action_api_unsupported")
+    );
+    assert_eq!(
+        parsed["data"]["hint_code"].as_str(),
+        Some("action_api_unsupported")
+    );
 }
 
 #[test]
