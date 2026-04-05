@@ -16,9 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use preen_core::ItemCategory;
 use preen_core::action_runtime::{
-    ActionAuditEvent, ActionAuditSink, ActionExecutorPort, DefaultSafetyPolicy, ExecutionMode,
-    RuntimeExecutionError, execute_action_with_audit, execution_error_detail_code,
-    plan_error_detail_code,
+    ActionAuditEvent, ActionAuditSink, ActionExecutionError, ActionExecutorPort,
+    DefaultSafetyPolicy, ExecutionMode, RuntimeExecutionError, execute_action_with_audit,
+    execution_error_detail_code, plan_error_detail_code,
 };
 use preen_core::error::CoreError;
 use preen_core::metrics::NoopMetrics;
@@ -4421,12 +4421,38 @@ fn map_runtime_error_with_prefix(error: RuntimeExecutionError, prefix: &str) -> 
             &format!("{prefix}_{}", plan_error_detail_code(&plan_error)),
             plan_error.to_string(),
         ),
-        RuntimeExecutionError::Execute(execution_error) => err_code(
-            CliErrorKind::Internal,
-            &format!("{prefix}_{}", execution_error_detail_code(&execution_error)),
-            execution_error.to_string(),
-        ),
+        RuntimeExecutionError::Execute(execution_error) => {
+            let suffix = runtime_execution_detail_suffix(prefix, &execution_error);
+            err_code(
+                CliErrorKind::Internal,
+                &format!("{prefix}_{suffix}"),
+                execution_error.to_string(),
+            )
+        }
     }
+}
+
+fn runtime_execution_detail_suffix(
+    prefix: &str,
+    execution_error: &ActionExecutionError,
+) -> &'static str {
+    match execution_error {
+        ActionExecutionError::Failed { message } => runtime_failed_detail_suffix(prefix, message),
+        _ => execution_error_detail_code(execution_error),
+    }
+}
+
+fn runtime_failed_detail_suffix(prefix: &str, message: &str) -> &'static str {
+    if message.starts_with("delete dir failed:") {
+        return "delete_dir_failed";
+    }
+    if message.starts_with("delete file failed:") {
+        return "delete_file_failed";
+    }
+    if prefix == "clean" && message.starts_with("trash failed:") {
+        return "trash_failed";
+    }
+    "execution_failed"
 }
 
 fn map_clean_runtime_error(error: RuntimeExecutionError) -> String {

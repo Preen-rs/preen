@@ -7220,6 +7220,42 @@ fn runtime_error_detail_code_for_prefix_returns_none_for_unknown_prefix() {
 }
 
 #[test]
+fn runtime_error_detail_code_maps_delete_dir_failed_message() {
+    let detail = runtime_error_detail_code_for_prefix_for_test(
+        "purge",
+        RuntimeExecutionError::Execute(ActionExecutionError::Failed {
+            message: "delete dir failed: /tmp/demo: permission denied".to_string(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(detail, "purge_delete_dir_failed");
+}
+
+#[test]
+fn runtime_error_detail_code_maps_delete_file_failed_message() {
+    let detail = runtime_error_detail_code_for_prefix_for_test(
+        "uninstall",
+        RuntimeExecutionError::Execute(ActionExecutionError::Failed {
+            message: "delete file failed: /tmp/demo.txt: permission denied".to_string(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(detail, "uninstall_delete_file_failed");
+}
+
+#[test]
+fn runtime_error_detail_code_maps_clean_trash_failed_message() {
+    let detail = runtime_error_detail_code_for_prefix_for_test(
+        "clean",
+        RuntimeExecutionError::Execute(ActionExecutionError::Failed {
+            message: "trash failed: /tmp/demo: not supported".to_string(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(detail, "clean_trash_failed");
+}
+
+#[test]
 fn load_lockfile_missing_file_returns_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("missing.lock");
