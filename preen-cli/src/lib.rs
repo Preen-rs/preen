@@ -73,6 +73,7 @@ const DEFAULT_UNINSTALL_PREVIEW_LIMIT: usize = 20;
 const DEFAULT_OPTIMIZE_TIMEOUT_SEC: u64 = 60;
 const DEFAULT_ANALYZE_MAX_DEPTH: usize = 8;
 const DEFAULT_ANALYZE_TOP_ENTRIES: usize = 20;
+const DEFAULT_STATUS_WATCH_INTERVAL_SEC: u64 = 2;
 const DEFAULT_PURGE_ARTIFACT_NAMES: [&str; 10] = [
     "node_modules",
     "target",
@@ -488,6 +489,14 @@ struct StatusOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StatusWatchOutput {
+    mode: String,
+    interval_sec: u64,
+    ticks: usize,
+    frames: Vec<StatusOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct SystemMetricsOutput {
     cpu_cores: Option<usize>,
     load_avg_1m_milli: Option<u64>,
@@ -674,9 +683,22 @@ fn run_typed_with_verifier_and_clean_executor(
             path,
             max_depth,
             debug,
+            interactive,
             json,
-        } => run_analyze(path.clone(), *max_depth, *debug, *json).map_err(CliError::from),
-        CliCommand::Status { json } => run_status(*json).map_err(CliError::from),
+        } => run_analyze(
+            path.clone(),
+            *max_depth,
+            *debug,
+            *interactive,
+            *json,
+            clean_executor,
+        )
+        .map_err(CliError::from),
+        CliCommand::Status {
+            json,
+            watch,
+            interval_sec,
+        } => run_status(*json, *watch, *interval_sec).map_err(CliError::from),
         CliCommand::Check { fix, debug, json } => {
             run_check(*fix, *debug, *json).map_err(CliError::from)
         }
@@ -693,8 +715,9 @@ fn run_typed_with_verifier_and_clean_executor(
         CliCommand::Update {
             force,
             nightly,
+            execute,
             json,
-        } => run_update(*force, *nightly, *json).map_err(CliError::from),
+        } => run_update(*force, *nightly, *execute, *json).map_err(CliError::from),
         CliCommand::Remove {
             dry_run,
             confirm,
@@ -1950,15 +1973,266 @@ fn run_analyze(
     path: Option<PathBuf>,
     max_depth: Option<usize>,
     debug: bool,
+    interactive: bool,
     json: bool,
+    clean_executor: &dyn ActionExecutorPort,
 ) -> Result<(), String> {
     let output = run_analyze_output(path, max_depth, debug)?;
+    if interactive {
+        run_analyze_interactive(output, clean_executor)?;
+        return Ok(());
+    }
     if json {
         println!("{}", analyze_json(output.clone())?);
         return Ok(());
     }
     print_analyze_output(&output);
     Ok(())
+}
+
+fn run_analyze_interactive(
+    output: AnalyzeOutput,
+    clean_executor: &dyn ActionExecutorPort,
+) -> Result<(), String> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(err_code(
+            CliErrorKind::Unsupported,
+            "analyze_interactive_tty_required",
+            "analyze interactive mode requires a terminal (TTY)",
+        ));
+    }
+
+    print_analyze_output(&output);
+    if output.entries.is_empty() {
+        println!("interactive: no entries available for selection");
+        return Ok(());
+    }
+
+    let root = PathBuf::from(&output.root);
+    println!("interactive: select entries to move to trash.");
+    println!("interactive: enter comma-separated indices (e.g. 1,3,5) or 'q' to cancel.");
+    for (index, entry) in output.entries.iter().enumerate() {
+        println!(
+            "entry[{idx}]: type={item_type} size_bytes={size} path={path}",
+            idx = index + 1,
+            item_type = entry.item_type,
+            size = entry.size_bytes,
+            path = entry.path
+        );
+    }
+    print!("selection> ");
+    let _ = std::io::stdout().flush();
+    let selection_raw = read_interactive_line()?;
+    let selection = parse_analyze_selection(&selection_raw, output.entries.len())?;
+    if selection.is_empty() {
+        println!("interactive: canceled (no items selected)");
+        return Ok(());
+    }
+
+    let mut selected_paths = Vec::with_capacity(selection.len());
+    for index in selection {
+        selected_paths.push(PathBuf::from(output.entries[index].path.clone()));
+    }
+    let selected = normalize_analyze_selection_for_trash(&root, selected_paths)?;
+    if selected.is_empty() {
+        println!("interactive: canceled (selection collapsed to empty set)");
+        return Ok(());
+    }
+
+    print!(
+        "confirm> move {} selected entr{} to trash? [y/N]: ",
+        selected.len(),
+        if selected.len() == 1 { "y" } else { "ies" }
+    );
+    let _ = std::io::stdout().flush();
+    if !confirm_interactive_apply(&read_interactive_line()?) {
+        println!("interactive: canceled");
+        return Ok(());
+    }
+
+    let (affected_items, freed_bytes, mut warnings, audit_events) =
+        execute_analyze_trash_with_executor(&selected, clean_executor)?;
+    warnings = dedupe_warnings_with_limit(warnings, analyze_warning_limit());
+    println!(
+        "interactive: moved_to_trash={} freed_bytes={} audit_events={}",
+        affected_items, freed_bytes, audit_events
+    );
+    for warning in warnings {
+        println!("warning: {warning}");
+    }
+    Ok(())
+}
+
+fn read_interactive_line() -> Result<String, String> {
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).map_err(|error| {
+        err_code(
+            CliErrorKind::Io,
+            "analyze_interactive_read_failed",
+            format!("interactive input read failed: {error}"),
+        )
+    })?;
+    Ok(input.trim().to_string())
+}
+
+fn parse_analyze_selection(input: &str, max_entries: usize) -> Result<Vec<usize>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("q")
+        || trimmed.eq_ignore_ascii_case("quit")
+    {
+        return Ok(Vec::new());
+    }
+    let mut selected = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in trimmed
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        let index = token.parse::<usize>().map_err(|_| {
+            err_code(
+                CliErrorKind::Validation,
+                "analyze_interactive_invalid_selection",
+                format!("invalid analyze selection index: {token}"),
+            )
+        })?;
+        if index == 0 || index > max_entries {
+            return Err(err_code(
+                CliErrorKind::Validation,
+                "analyze_interactive_invalid_selection",
+                format!("analyze selection index out of range: {index}"),
+            ));
+        }
+        let zero_based = index - 1;
+        if seen.insert(zero_based) {
+            selected.push(zero_based);
+        }
+    }
+    Ok(selected)
+}
+
+fn normalize_analyze_selection_for_trash(
+    root: &Path,
+    selected_paths: Vec<PathBuf>,
+) -> Result<Vec<String>, String> {
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        err_code(
+            CliErrorKind::Validation,
+            "analyze_root_not_resolvable",
+            format!("analyze root resolve failed: {}: {error}", root.display()),
+        )
+    })?;
+    let mut canonical_paths = Vec::new();
+    for path in selected_paths {
+        let canonical = fs::canonicalize(&path).map_err(|error| {
+            err_code(
+                CliErrorKind::Validation,
+                "analyze_interactive_invalid_path",
+                format!(
+                    "selected analyze path resolve failed: {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+        canonical_paths.push(canonical);
+    }
+    canonical_paths.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+
+    let mut deduped = Vec::new();
+    for path in canonical_paths {
+        if deduped
+            .iter()
+            .any(|parent: &PathBuf| path.starts_with(parent))
+        {
+            continue;
+        }
+        deduped.push(path);
+    }
+
+    let selected = deduped
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let roots = vec![canonical_root.to_string_lossy().to_string()];
+    enforce_scope_with_prefix(&selected, &roots, "analyze")?;
+    Ok(selected)
+}
+
+fn confirm_interactive_apply(input: &str) -> bool {
+    matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+fn execute_analyze_trash_with_executor(
+    selected_paths: &[String],
+    clean_executor: &dyn ActionExecutorPort,
+) -> Result<(u64, u64, Vec<String>, usize), String> {
+    let manifest = Manifest {
+        schema_version: 1,
+        pack_id: "preen.builtin.analyze".to_string(),
+        name: "Built-in Analyze".to_string(),
+        version: "0.1.0".to_string(),
+        description: "Built-in analyze interactive trash plan".to_string(),
+        author: "Preen".to_string(),
+        license: "MIT".to_string(),
+        homepage: None,
+        core_compat: ">=0.1.0,<2.0.0".to_string(),
+        action_api: 1,
+        os_targets: vec![if cfg!(target_os = "macos") {
+            OsTarget::Macos
+        } else {
+            OsTarget::Linux
+        }],
+        capabilities: vec![Capability::FsRead, Capability::FsTrash],
+        signing: None,
+        rules: vec![RuleRef {
+            id: "builtin-analyze-trash".to_string(),
+            name: "Built-in Analyze Interactive Trash".to_string(),
+            rule_file: "builtin".to_string(),
+        }],
+    };
+    let rule = RuleFile {
+        schema_version: 1,
+        id: "builtin-analyze-trash".to_string(),
+        name: "Built-in Analyze Interactive Trash".to_string(),
+        category: ItemCategory::Other("disk_usage".to_string()),
+        risk: RiskLevel::High,
+        enabled: true,
+        matcher: MatchSpec {
+            mode: MatchMode::Paths,
+            paths: selected_paths.to_vec(),
+            strategy: Some(ScanStrategy::Recursive),
+            command: Vec::new(),
+            parser: None,
+        },
+        action: ActionSpec {
+            action_type: ActionType::TrashPaths,
+            paths: selected_paths.to_vec(),
+            command: Vec::new(),
+            mode: None,
+            timeout_sec: Some(600),
+            allow_globs: false,
+            max_items: Some(selected_paths.len() as u64),
+            package_manager: None,
+            project_types: Vec::new(),
+            params: std::collections::HashMap::new(),
+        },
+    };
+    let runtime = new_cli_runtime()?;
+    execute_action_with_default_policy(
+        &runtime,
+        &manifest,
+        &rule,
+        false,
+        true,
+        clean_executor,
+        map_analyze_runtime_error,
+    )
 }
 
 fn run_analyze_output(
@@ -2281,7 +2555,10 @@ fn print_analyze_output(out: &AnalyzeOutput) {
     print!("{}", analyze_text(out));
 }
 
-fn run_status(json: bool) -> Result<(), String> {
+fn run_status(json: bool, watch: bool, interval_sec: u64) -> Result<(), String> {
+    if watch {
+        return run_status_watch(json, interval_sec);
+    }
     let output = run_status_output()?;
     if should_emit_status_json(json) {
         println!("{}", status_json(output.clone())?);
@@ -2289,6 +2566,37 @@ fn run_status(json: bool) -> Result<(), String> {
     }
     print_status_output(&output);
     Ok(())
+}
+
+fn run_status_watch(json: bool, interval_sec: u64) -> Result<(), String> {
+    let emit_json = should_emit_status_json(json);
+    let max_ticks = status_watch_max_ticks();
+    let mut tick = 0usize;
+    loop {
+        let output = run_status_output()?;
+        if emit_json {
+            println!("{}", status_json(output.clone())?);
+        } else {
+            if tick > 0 {
+                println!("---");
+            }
+            print_status_output(&output);
+        }
+        tick += 1;
+        if let Some(limit) = max_ticks
+            && tick >= limit
+        {
+            break;
+        }
+        if interval_sec > 0 {
+            std::thread::sleep(Duration::from_secs(interval_sec));
+        }
+    }
+    Ok(())
+}
+
+fn status_watch_max_ticks() -> Option<usize> {
+    parse_positive_usize_env("PREEN_STATUS_WATCH_MAX_TICKS")
 }
 
 fn should_emit_status_json(json_flag: bool) -> bool {
@@ -2311,6 +2619,13 @@ fn bool_env(name: &str) -> Option<bool> {
         return Some(false);
     }
     None
+}
+
+fn parse_positive_usize_env(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
 }
 
 fn run_status_output() -> Result<StatusOutput, String> {
@@ -3592,7 +3907,7 @@ fn completion_json(out: CompletionOutput) -> Result<String, String> {
     to_json_envelope("system.completion", out)
 }
 
-fn run_update(force: bool, nightly: bool, json: bool) -> Result<(), String> {
+fn run_update(force: bool, nightly: bool, execute: bool, json: bool) -> Result<(), String> {
     if nightly {
         let install_source = detect_install_source();
         if install_source != "script" {
@@ -3605,7 +3920,7 @@ fn run_update(force: bool, nightly: bool, json: bool) -> Result<(), String> {
             ));
         }
     }
-    let output = run_update_output(force, nightly);
+    let output = run_update_output(force, nightly, execute)?;
     if json {
         println!("{}", update_json(output.clone())?);
         return Ok(());
@@ -3614,7 +3929,7 @@ fn run_update(force: bool, nightly: bool, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn run_update_output(force: bool, nightly: bool) -> UpdateOutput {
+fn run_update_output(force: bool, nightly: bool, execute: bool) -> Result<UpdateOutput, String> {
     let mut warnings = Vec::new();
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let install_source = detect_install_source();
@@ -3691,15 +4006,42 @@ fn run_update_output(force: bool, nightly: bool) -> UpdateOutput {
         },
     });
 
-    if force {
-        warnings.push(
-            "force mode is advisory only in this build; run suggested command manually".to_string(),
-        );
+    let mut executed = false;
+    if execute {
+        if !force && update_available == Some(false) {
+            warnings.push(
+                "already latest; skipped update execution (use --force to reinstall)".to_string(),
+            );
+        } else {
+            execute_update_command(&suggested_command)?;
+            executed = true;
+        }
+    } else if force {
+        warnings.push("force mode is advisory unless --execute is supplied".to_string());
     }
+    checks.push(SystemStatusCheckOutput {
+        id: "update_execution".to_string(),
+        label: "Update execution".to_string(),
+        severity: "warning".to_string(),
+        passed: !execute || executed || (!force && update_available == Some(false)),
+        message: if !execute {
+            "execution not requested (--execute not set)".to_string()
+        } else if executed {
+            "update command executed successfully".to_string()
+        } else {
+            "update execution skipped (already latest)".to_string()
+        },
+    });
 
-    UpdateOutput {
+    Ok(UpdateOutput {
         mode: if force {
-            "force_plan".to_string()
+            if execute {
+                "apply".to_string()
+            } else {
+                "force_plan".to_string()
+            }
+        } else if execute {
+            "apply".to_string()
         } else {
             "plan".to_string()
         },
@@ -3714,10 +4056,70 @@ fn run_update_output(force: bool, nightly: bool) -> UpdateOutput {
         update_available,
         install_source,
         suggested_command,
-        executed: false,
+        executed,
         checks,
         warnings,
+    })
+}
+
+fn execute_update_command(command: &str) -> Result<(), String> {
+    if let Some(path) = std::env::var_os("PREEN_UPDATE_EXECUTE_CAPTURE_PATH") {
+        fs::write(&path, command).map_err(|error| {
+            err_code(
+                CliErrorKind::Io,
+                "update_execute_capture_write_failed",
+                format!(
+                    "update capture write failed: {}: {error}",
+                    PathBuf::from(&path).display()
+                ),
+            )
+        })?;
     }
+    if let Ok(mode) = std::env::var("PREEN_UPDATE_EXECUTE_MOCK") {
+        let normalized = mode.trim().to_ascii_lowercase();
+        if normalized == "success" {
+            return Ok(());
+        }
+        if normalized == "fail" {
+            return Err(err_code(
+                CliErrorKind::Internal,
+                "update_execute_failed",
+                "mocked update execute failure",
+            ));
+        }
+        if let Some(message) = mode.strip_prefix("fail:") {
+            return Err(err_code(
+                CliErrorKind::Internal,
+                "update_execute_failed",
+                format!("mocked update execute failure: {message}"),
+            ));
+        }
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "update_execute_mock_invalid",
+            format!("unsupported PREEN_UPDATE_EXECUTE_MOCK value: {mode}"),
+        ));
+    }
+
+    let status = ProcessCommand::new("sh")
+        .arg("-lc")
+        .arg(command)
+        .status()
+        .map_err(|error| {
+            err_code(
+                CliErrorKind::Internal,
+                "update_execute_failed",
+                format!("update command launch failed: {error}"),
+            )
+        })?;
+    if !status.success() {
+        return Err(err_code(
+            CliErrorKind::Internal,
+            "update_execute_failed",
+            format!("update command exited with status {status}"),
+        ));
+    }
+    Ok(())
 }
 
 fn fetch_latest_release_version() -> Result<Option<String>, String> {
@@ -4449,10 +4851,14 @@ fn runtime_failed_detail_suffix(prefix: &str, message: &str) -> &'static str {
     if message.starts_with("delete file failed:") {
         return "delete_file_failed";
     }
-    if prefix == "clean" && message.starts_with("trash failed:") {
+    if matches!(prefix, "clean" | "analyze") && message.starts_with("trash failed:") {
         return "trash_failed";
     }
     "execution_failed"
+}
+
+fn map_analyze_runtime_error(error: RuntimeExecutionError) -> String {
+    map_runtime_error_with_prefix(error, "analyze")
 }
 
 fn map_clean_runtime_error(error: RuntimeExecutionError) -> String {
@@ -10102,6 +10508,17 @@ pub fn analyze_output_with_debug_for_test(
         .map_err(|e| err_with(CliErrorKind::Internal, "analyze output parse failed", e))
 }
 
+pub fn analyze_selection_for_trash_for_test(
+    root: &Path,
+    selected_paths: &[&Path],
+) -> Result<Vec<String>, String> {
+    let selected = selected_paths
+        .iter()
+        .map(|path| path.to_path_buf())
+        .collect::<Vec<_>>();
+    normalize_analyze_selection_for_trash(root, selected)
+}
+
 pub fn status_output_for_test() -> Result<serde_json::Value, String> {
     let output = run_status_output()?;
     let json = status_json(output)?;
@@ -10116,6 +10533,28 @@ pub fn status_text_output_for_test() -> Result<String, String> {
 
 pub fn status_should_emit_json_for_test(json_flag: bool) -> bool {
     should_emit_status_json(json_flag)
+}
+
+pub fn status_watch_output_for_test(ticks: usize) -> Result<serde_json::Value, String> {
+    let frame_count = ticks.max(1);
+    let mut frames = Vec::with_capacity(frame_count);
+    for _ in 0..frame_count {
+        frames.push(run_status_output()?);
+    }
+    let output = StatusWatchOutput {
+        mode: "watch".to_string(),
+        interval_sec: 0,
+        ticks: frame_count,
+        frames,
+    };
+    let json = to_json_envelope("system.status.watch", output)?;
+    serde_json::from_str(&json).map_err(|e| {
+        err_with(
+            CliErrorKind::Internal,
+            "status watch output parse failed",
+            e,
+        )
+    })
 }
 
 pub fn touchid_output_for_test(
@@ -10200,15 +10639,27 @@ pub fn completion_text_output_for_test(
 }
 
 pub fn update_output_for_test(force: bool, nightly: bool) -> Result<serde_json::Value, String> {
-    let output = run_update_output(force, nightly);
+    let output = run_update_output(force, nightly, false)?;
     let json = update_json(output)?;
     serde_json::from_str(&json)
         .map_err(|e| err_with(CliErrorKind::Internal, "update output parse failed", e))
 }
 
 pub fn update_text_output_for_test(force: bool, nightly: bool) -> String {
-    let output = run_update_output(force, nightly);
+    let output = run_update_output(force, nightly, false)
+        .unwrap_or_else(|error| panic!("update output for test failed: {error}"));
     update_text(&output)
+}
+
+pub fn update_output_with_execute_for_test(
+    force: bool,
+    nightly: bool,
+    execute: bool,
+) -> Result<serde_json::Value, String> {
+    let output = run_update_output(force, nightly, execute)?;
+    let json = update_json(output)?;
+    serde_json::from_str(&json)
+        .map_err(|e| err_with(CliErrorKind::Internal, "update output parse failed", e))
 }
 
 pub fn remove_output_for_test(dry_run: bool, confirm: bool) -> Result<serde_json::Value, String> {
@@ -10260,6 +10711,7 @@ pub fn runtime_error_detail_code_for_prefix_for_test(
     error: RuntimeExecutionError,
 ) -> Option<String> {
     let encoded = match prefix {
+        "analyze" => map_analyze_runtime_error(error),
         "clean" => map_clean_runtime_error(error),
         "purge" => map_purge_runtime_error(error),
         "installer" => map_installer_runtime_error(error),
@@ -11037,12 +11489,18 @@ enum CliCommand {
         max_depth: Option<usize>,
         #[arg(long)]
         debug: bool,
+        #[arg(long, conflicts_with = "json")]
+        interactive: bool,
         #[arg(long)]
         json: bool,
     },
     Status {
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        watch: bool,
+        #[arg(long, default_value_t = DEFAULT_STATUS_WATCH_INTERVAL_SEC, requires = "watch")]
+        interval_sec: u64,
     },
     Purge {
         #[arg(long, short = 'n')]
@@ -11095,6 +11553,8 @@ enum CliCommand {
         force: bool,
         #[arg(long)]
         nightly: bool,
+        #[arg(long)]
+        execute: bool,
         #[arg(long)]
         json: bool,
     },

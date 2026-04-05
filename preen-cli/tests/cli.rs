@@ -9,10 +9,11 @@ use async_trait::async_trait;
 use clap::Parser;
 use preen_cli::{
     Cli, CliError, CliErrorKind, analyze_output_for_test, analyze_output_with_debug_for_test,
-    analyze_output_with_depth_for_test, analyze_text_output_for_test, check_output_for_test,
-    check_output_with_debug_for_test, check_registry_freshness_for_test,
-    check_text_output_for_test, clean_output_for_test, clean_runtime_error_detail_code_for_test,
-    clean_selection_summary_for_test, clean_text_output_for_test, clean_whitelist_output_for_test,
+    analyze_output_with_depth_for_test, analyze_selection_for_trash_for_test,
+    analyze_text_output_for_test, check_output_for_test, check_output_with_debug_for_test,
+    check_registry_freshness_for_test, check_text_output_for_test, clean_output_for_test,
+    clean_runtime_error_detail_code_for_test, clean_selection_summary_for_test,
+    clean_text_output_for_test, clean_whitelist_output_for_test,
     clean_whitelist_text_output_for_test, cli_label_for_test, clone_rule_pack_for_test,
     completion_output_for_test, completion_text_output_for_test, default_signature_source_for_test,
     enforce_clean_scope_for_test, enforce_installer_scope_for_test,
@@ -43,12 +44,12 @@ use preen_cli::{
     runtime_error_detail_code_for_prefix_for_test, save_lockfile_at, search_registry_for_test,
     search_registry_json_for_test, search_registry_with_options_for_test,
     should_emit_formatted_error, status_output_for_test, status_should_emit_json_for_test,
-    status_text_output_for_test, test_failure_row_for_test, touchid_output_for_test,
-    touchid_text_output_for_test, trust_policy_from_str, uninstall_output_for_test,
-    uninstall_output_with_debug_for_test, uninstall_paths_json_for_test,
+    status_text_output_for_test, status_watch_output_for_test, test_failure_row_for_test,
+    touchid_output_for_test, touchid_text_output_for_test, trust_policy_from_str,
+    uninstall_output_for_test, uninstall_output_with_debug_for_test, uninstall_paths_json_for_test,
     uninstall_paths_text_for_test, uninstall_runtime_error_detail_code_for_test,
-    uninstall_text_output_for_test, update_output_for_test, update_text_output_for_test,
-    validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
+    uninstall_text_output_for_test, update_output_for_test, update_output_with_execute_for_test,
+    update_text_output_for_test, validate_registry_trust_inputs_for_test, verify_lockfile_hashes,
     write_registry_index_with_backup_for_test,
 };
 use preen_core::action_runtime::{
@@ -1736,8 +1737,13 @@ fn static_detail_code_contract_is_frozen() {
     let expected: BTreeSet<String> = [
         "analyze_cwd_unavailable",
         "analyze_home_missing",
+        "analyze_interactive_invalid_path",
+        "analyze_interactive_invalid_selection",
+        "analyze_interactive_read_failed",
+        "analyze_interactive_tty_required",
         "analyze_root_not_directory",
         "analyze_root_not_found",
+        "analyze_root_not_resolvable",
         "analyze_target_not_readable",
         "clean_confirmation_required",
         "clean_dry_run_unsupported_os",
@@ -1777,6 +1783,9 @@ fn static_detail_code_contract_is_frozen() {
         "remove_path_scope_violation",
         "status_state_dir_unavailable",
         "test_all_failed",
+        "update_execute_capture_write_failed",
+        "update_execute_failed",
+        "update_execute_mock_invalid",
         "update_nightly_unsupported_source",
         "uninstall_confirmation_required",
         "uninstall_no_roots",
@@ -2943,6 +2952,59 @@ fn analyze_text_error_is_classified_as_system_without_plugin_hints() {
 }
 
 #[test]
+fn analyze_interactive_requires_tty_and_reports_system_code() {
+    with_analyze_root_fixture(|analyze_root| {
+        let cli = Cli::try_parse_from([
+            "preen",
+            "analyze",
+            analyze_root.to_string_lossy().as_ref(),
+            "--interactive",
+        ])
+        .unwrap();
+        let err = run_typed(cli.clone()).unwrap_err();
+        assert_eq!(err.kind, CliErrorKind::Unsupported);
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("analyze_interactive_tty_required")
+        );
+        let output = cli.format_error(&err);
+        assert!(output.contains("detail_code=analyze_interactive_tty_required"));
+        assert!(!output.contains("hint_code="));
+    });
+}
+
+#[test]
+fn analyze_interactive_rejects_json_conflict() {
+    let parsed = Cli::try_parse_from(["preen", "analyze", "/tmp", "--interactive", "--json"]);
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn analyze_selection_dedupes_nested_paths_for_trash() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("dir").join("nested")).unwrap();
+    fs::write(root.join("dir").join("nested").join("a.bin"), b"1").unwrap();
+    fs::write(root.join("dir").join("b.bin"), b"2").unwrap();
+
+    let selected = analyze_selection_for_trash_for_test(
+        root,
+        &[
+            root.join("dir").as_path(),
+            root.join("dir").join("nested").as_path(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(
+        selected[0],
+        fs::canonicalize(root.join("dir"))
+            .unwrap()
+            .to_string_lossy()
+    );
+}
+
+#[test]
 fn status_json_happy_path_with_temp_user_env() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
@@ -3018,6 +3080,52 @@ fn status_force_json_env_can_disable_auto_json() {
     with_env_overrides(&[("PREEN_STATUS_FORCE_JSON", OsString::from("0"))], || {
         assert!(!status_should_emit_json_for_test(false));
     });
+}
+
+#[test]
+fn status_force_json_env_can_enable_auto_json() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_env_overrides(&[("PREEN_STATUS_FORCE_JSON", OsString::from("1"))], || {
+        assert!(status_should_emit_json_for_test(false));
+    });
+}
+
+#[test]
+fn status_watch_output_contains_expected_frame_count() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = status_watch_output_for_test(3).unwrap();
+        assert_eq!(output["kind"].as_str(), Some("system.status.watch"));
+        assert_eq!(output["data"]["mode"].as_str(), Some("watch"));
+        assert_eq!(output["data"]["ticks"].as_u64(), Some(3));
+        assert_eq!(output["data"]["frames"].as_array().unwrap().len(), 3);
+    });
+}
+
+#[test]
+fn status_watch_command_runs_and_stops_with_env_tick_limit() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        with_env_overrides(
+            &[
+                ("PREEN_STATUS_WATCH_MAX_TICKS", OsString::from("2")),
+                ("PREEN_STATUS_FORCE_JSON", OsString::from("1")),
+            ],
+            || {
+                let cli =
+                    Cli::try_parse_from(["preen", "status", "--watch", "--interval-sec", "0"])
+                        .unwrap();
+                let result = run_typed(cli);
+                assert!(result.is_ok());
+            },
+        );
+    });
+}
+
+#[test]
+fn status_watch_interval_requires_watch_flag() {
+    let parsed = Cli::try_parse_from(["preen", "status", "--interval-sec", "1"]);
+    assert!(parsed.is_err());
 }
 
 #[test]
@@ -3283,6 +3391,84 @@ fn update_nightly_rejects_non_script_install_source() {
         assert_eq!(
             parsed["data"]["detail_code"].as_str(),
             Some("update_nightly_unsupported_source")
+        );
+    });
+}
+
+#[test]
+fn update_execute_runs_suggested_command_when_available() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let capture_dir = tempfile::tempdir().unwrap();
+        let capture_path = capture_dir.path().join("update-command.txt");
+        let output = with_env_overrides(
+            &[
+                ("PREEN_UPDATE_LATEST_VERSION", OsString::from("9.9.9")),
+                ("PREEN_UPDATE_INSTALL_SOURCE", OsString::from("cargo")),
+                ("PREEN_UPDATE_EXECUTE_MOCK", OsString::from("success")),
+                (
+                    "PREEN_UPDATE_EXECUTE_CAPTURE_PATH",
+                    capture_path.as_os_str().to_os_string(),
+                ),
+            ],
+            || update_output_with_execute_for_test(false, false, true).unwrap(),
+        );
+        assert_eq!(output["data"]["mode"].as_str(), Some("apply"));
+        assert_eq!(output["data"]["executed"].as_bool(), Some(true));
+        let capture = fs::read_to_string(&capture_path).unwrap();
+        assert!(capture.contains("cargo install preen-cli"));
+    });
+}
+
+#[test]
+fn update_execute_skips_when_already_latest_without_force() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = with_env_overrides(
+            &[
+                (
+                    "PREEN_UPDATE_LATEST_VERSION",
+                    OsString::from(env!("CARGO_PKG_VERSION")),
+                ),
+                ("PREEN_UPDATE_INSTALL_SOURCE", OsString::from("cargo")),
+                ("PREEN_UPDATE_EXECUTE_MOCK", OsString::from("success")),
+            ],
+            || update_output_with_execute_for_test(false, false, true).unwrap(),
+        );
+        assert_eq!(output["data"]["mode"].as_str(), Some("apply"));
+        assert_eq!(output["data"]["executed"].as_bool(), Some(false));
+        let warnings = output["data"]["warnings"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(warnings.iter().any(|value| {
+            value
+                .as_str()
+                .unwrap_or_default()
+                .contains("already latest; skipped update execution")
+        }));
+    });
+}
+
+#[test]
+fn update_execute_failure_maps_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let cli = Cli::try_parse_from(["preen", "update", "--execute", "--json"]).unwrap();
+        let err = with_env_overrides(
+            &[
+                ("PREEN_UPDATE_LATEST_VERSION", OsString::from("9.9.9")),
+                ("PREEN_UPDATE_INSTALL_SOURCE", OsString::from("cargo")),
+                ("PREEN_UPDATE_EXECUTE_MOCK", OsString::from("fail:boom")),
+            ],
+            || run_typed(cli.clone()).unwrap_err(),
+        );
+        assert_eq!(err.kind, CliErrorKind::Internal);
+        assert_eq!(err.detail_code.as_deref(), Some("update_execute_failed"));
+        let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+        assert_eq!(
+            parsed["data"]["detail_code"].as_str(),
+            Some("update_execute_failed")
         );
     });
 }
@@ -4134,7 +4320,16 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "analyze", "/tmp", "--json"],
         vec!["preen", "analyze", "/tmp", "--debug", "--json"],
         vec!["preen", "analyze", "/tmp", "--max-depth", "3", "--json"],
+        vec!["preen", "analyze", "/tmp", "--interactive"],
         vec!["preen", "status", "--json"],
+        vec![
+            "preen",
+            "status",
+            "--watch",
+            "--interval-sec",
+            "1",
+            "--json",
+        ],
         vec!["preen", "purge", "--dry-run", "--json"],
         vec!["preen", "purge", "--dry-run", "--debug", "--json"],
         vec!["preen", "purge", "--confirm", "--json"],
@@ -4148,6 +4343,7 @@ fn top_level_system_command_option_matrix_parses() {
         vec!["preen", "touchid", "enable", "--dry-run", "--json"],
         vec!["preen", "completion", "zsh", "--dry-run", "--json"],
         vec!["preen", "update", "--force", "--nightly", "--json"],
+        vec!["preen", "update", "--execute", "--json"],
         vec!["preen", "remove", "--dry-run", "--json"],
         vec!["preen", "remove", "--confirm", "--json"],
     ];
@@ -4289,6 +4485,8 @@ fn top_level_system_command_option_matrix_rejects_conflicts() {
         &["preen", "installer", "--paths", "--dry-run"],
         &["preen", "touchid", "invalid-action", "--dry-run"],
         &["preen", "completion", "invalid-shell", "--dry-run"],
+        &["preen", "analyze", "/tmp", "--interactive", "--json"],
+        &["preen", "status", "--interval-sec", "1"],
     ];
 
     for args in invalid_cases {
@@ -4390,12 +4588,15 @@ fn system_option_matrix_accepts_valid_flag_combinations() {
         vec!["preen", "uninstall", "--paths"],
         vec!["preen", "analyze", "/tmp", "--max-depth", "2"],
         vec!["preen", "analyze", "/tmp", "--debug"],
+        vec!["preen", "analyze", "/tmp", "--interactive"],
         vec!["preen", "status"],
+        vec!["preen", "status", "--watch", "--interval-sec", "1"],
         vec!["preen", "check", "--fix"],
         vec!["preen", "check", "--debug"],
         vec!["preen", "touchid", "status", "--dry-run"],
         vec!["preen", "completion", "zsh", "--dry-run"],
         vec!["preen", "update", "--force", "--nightly"],
+        vec!["preen", "update", "--execute"],
         vec!["preen", "remove", "--dry-run"],
         vec!["preen", "remove", "--confirm"],
     ];
@@ -4427,6 +4628,8 @@ fn system_option_matrix_rejects_conflicting_flags() {
         vec!["preen", "uninstall", "Demo.app", "--paths"],
         vec!["preen", "uninstall", "--paths", "--dry-run"],
         vec!["preen", "uninstall", "--paths", "--confirm"],
+        vec!["preen", "analyze", "/tmp", "--interactive", "--json"],
+        vec!["preen", "status", "--interval-sec", "1"],
         vec!["preen", "remove", "--dry-run", "--confirm"],
     ];
 

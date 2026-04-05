@@ -1,0 +1,10 @@
+schema_version = 1
+
+[[cases]]
+id = "watch_json_frames"
+
+[[cases]]
+id = "watch_interval_requires_watch"
+
+[[cases]]
+id = "force_json_env_override"

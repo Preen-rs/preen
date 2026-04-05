@@ -1,0 +1,10 @@
+schema_version = 1
+
+[[cases]]
+id = "interactive_tty_required"
+
+[[cases]]
+id = "interactive_json_conflict"
+
+[[cases]]
+id = "selection_dedupes_nested_paths"
