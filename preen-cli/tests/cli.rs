@@ -4847,6 +4847,17 @@ fn json_error_output_is_suppressed_when_report_already_emitted_for_test_all() {
 }
 
 #[test]
+fn json_error_output_is_suppressed_when_report_already_emitted_for_test_single() {
+    let json_cli = Cli::try_parse_from(["preen", "plugin", "test", "test.pack", "--json"]).unwrap();
+    let err = CliError {
+        kind: CliErrorKind::Verification,
+        detail_code: Some("test_manifest_hash_drift".to_string()),
+        message: "plugin test failed for test.pack".to_string(),
+    };
+    assert!(!should_emit_formatted_error(&json_cli, &err));
+}
+
+#[test]
 fn format_error_json_for_test_all_failed_includes_aggregate_hint_metadata() {
     let json_cli = Cli::try_parse_from(["preen", "plugin", "test", "--all", "--json"]).unwrap();
     let err = CliError {
@@ -5819,6 +5830,208 @@ fn update_local_git_old_tag_repairs_tampered_resolved_rev_to_pinned_commit() {
             "HEAD",
         );
         assert_eq!(checked_out, tag_commit);
+    });
+}
+
+#[test]
+fn install_rolls_back_new_plugin_dir_when_lockfile_save_fails() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{rev}", repo.to_string_lossy());
+        let install_dir = tmp.path().join("installed");
+        let blocked_parent = tmp.path().join("blocked-parent-file");
+        fs::write(&blocked_parent, "blocked").unwrap();
+        let lockfile = blocked_parent.join("plugins.lock");
+
+        let err =
+            install_plugin_in_dir_for_test(&spec, Some(&lockfile), &install_dir, &AlwaysOkVerifier)
+                .unwrap_err();
+        let tagged = CliError::from(err);
+        assert_eq!(tagged.kind, CliErrorKind::Io);
+        assert_eq!(
+            tagged.detail_code.as_deref(),
+            Some("install_lockfile_save_failed")
+        );
+        assert!(
+            !install_dir.join("test.pack").exists(),
+            "new plugin dir must be rolled back on lockfile save failure"
+        );
+    });
+}
+
+#[test]
+fn install_restores_existing_plugin_dir_when_lockfile_save_fails() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{rev}", repo.to_string_lossy());
+        let install_dir = tmp.path().join("installed");
+        let existing_pack_dir = install_dir.join("test.pack");
+        fs::create_dir_all(&existing_pack_dir).unwrap();
+        let sentinel = existing_pack_dir.join("sentinel.txt");
+        fs::write(&sentinel, "keep-me").unwrap();
+
+        let blocked_parent = tmp.path().join("blocked-parent-file");
+        fs::write(&blocked_parent, "blocked").unwrap();
+        let lockfile = blocked_parent.join("plugins.lock");
+
+        let err =
+            install_plugin_in_dir_for_test(&spec, Some(&lockfile), &install_dir, &AlwaysOkVerifier)
+                .unwrap_err();
+        let tagged = CliError::from(err);
+        assert_eq!(tagged.kind, CliErrorKind::Io);
+        assert_eq!(
+            tagged.detail_code.as_deref(),
+            Some("install_lockfile_save_failed")
+        );
+        assert!(sentinel.exists(), "existing plugin dir must be restored");
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep-me");
+    });
+}
+
+#[test]
+fn update_plugin_registry_source_resolves_latest_version() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let old_tag = init_preflight_git_repo_with_old_tag(&repo);
+        let old_rev = git_rev_parse(&repo, &old_tag);
+        let manifest_path = repo.join("manifest.toml");
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        let updated_manifest = manifest.replacen("version = \"0.1.0\"", "version = \"0.2.0\"", 1);
+        fs::write(&manifest_path, updated_manifest).unwrap();
+        run_git_in(&repo, &["add", "manifest.toml"]);
+        run_git_in_no_sign(&repo, &["commit", "-m", "bump manifest version"]);
+        let latest_rev = git_rev_parse(&repo, "HEAD");
+        let index = tmp.path().join("registry-index.toml");
+        let sig = tmp.path().join("registry-index.toml.sig");
+        let cache = tmp.path().join("cache-index.toml");
+        let lockfile = tmp.path().join("plugins.lock");
+        let install_dir = tmp.path().join("installed");
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let repo_url = file_source_url(&repo);
+        fs::write(
+            &index,
+            format!(
+                r#"
+schema_version = 1
+generated_at = "{now}"
+
+[[entries]]
+pack_id = "test.pack"
+name = "Test Pack"
+description = "Cleanup pack"
+repo_url = "{repo_url}"
+latest_version = "0.2.0"
+  [[entries.versions]]
+  version = "0.1.0"
+  rev = "{old_rev}"
+  [[entries.versions]]
+  version = "0.2.0"
+  rev = "{latest_rev}"
+"#,
+            ),
+        )
+        .unwrap();
+        write_registry_signature(&sig);
+        apply_registry_freshness_env(&cache, "warn", None);
+        run_registry_update_cli_with_verifier(&index, &sig, &AlwaysOkVerifier).unwrap();
+        install_plugin_in_dir_for_test(
+            "test.pack@0.1.0",
+            Some(&lockfile),
+            &install_dir,
+            &AlwaysOkVerifier,
+        )
+        .unwrap();
+
+        let update = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "update",
+            "test.pack",
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(update, &AlwaysOkVerifier).unwrap();
+
+        let updated = load_lockfile_at(&lockfile).unwrap();
+        assert_eq!(updated.plugins.len(), 1);
+        assert_eq!(updated.plugins[0].source, "registry");
+        assert_eq!(updated.plugins[0].version, "0.2.0");
+        assert_eq!(updated.plugins[0].rev, latest_rev);
+    });
+}
+
+#[test]
+fn update_plugin_registry_source_rejects_manifest_version_mismatch() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let old_tag = init_preflight_git_repo_with_old_tag(&repo);
+        let old_rev = git_rev_parse(&repo, &old_tag);
+        let latest_rev = git_rev_parse(&repo, "HEAD");
+        let index = tmp.path().join("registry-index.toml");
+        let sig = tmp.path().join("registry-index.toml.sig");
+        let cache = tmp.path().join("cache-index.toml");
+        let lockfile = tmp.path().join("plugins.lock");
+        let install_dir = tmp.path().join("installed");
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let repo_url = file_source_url(&repo);
+        fs::write(
+            &index,
+            format!(
+                r#"
+schema_version = 1
+generated_at = "{now}"
+
+[[entries]]
+pack_id = "test.pack"
+name = "Test Pack"
+description = "Cleanup pack"
+repo_url = "{repo_url}"
+latest_version = "0.2.0"
+  [[entries.versions]]
+  version = "0.1.0"
+  rev = "{old_rev}"
+  [[entries.versions]]
+  version = "0.2.0"
+  rev = "{latest_rev}"
+"#,
+            ),
+        )
+        .unwrap();
+        write_registry_signature(&sig);
+        apply_registry_freshness_env(&cache, "warn", None);
+        run_registry_update_cli_with_verifier(&index, &sig, &AlwaysOkVerifier).unwrap();
+        install_plugin_in_dir_for_test(
+            "test.pack@0.1.0",
+            Some(&lockfile),
+            &install_dir,
+            &AlwaysOkVerifier,
+        )
+        .unwrap();
+
+        let update = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "update",
+            "test.pack",
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        let err = run_typed_with_verifier_for_test(update, &AlwaysOkVerifier).unwrap_err();
+        assert_eq!(err.kind, CliErrorKind::Validation);
+        assert_eq!(err.detail_code.as_deref(), Some("install_pack_load_failed"));
+        assert!(err.message.contains("registry version mismatch"));
     });
 }
 

@@ -7580,6 +7580,39 @@ fn install_plugin_internal_in_dir(
             "install_source_resolve_failed",
         )
     })?;
+    install_plugin_from_resolved_source_in_dir(
+        ResolvedInstallSource { source, url, rev },
+        InstallExpectations::default(),
+        lockfile,
+        install_dir,
+        command,
+        verbose,
+        verifier,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedInstallSource {
+    source: String,
+    url: String,
+    rev: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct InstallExpectations {
+    expected_pack_id: Option<String>,
+    expected_version: Option<String>,
+}
+
+fn install_plugin_from_resolved_source_in_dir(
+    resolved: ResolvedInstallSource,
+    expectations: InstallExpectations,
+    lockfile: Option<PathBuf>,
+    install_dir: &Path,
+    command: &'static str,
+    verbose: bool,
+    verifier: &dyn SignatureVerifier,
+) -> Result<LockedPlugin, String> {
     let mut lock = load_lockfile(lockfile.as_deref()).map_err(|e| {
         map_install_error_with_detail_code(e, CliErrorKind::Io, "install_lockfile_load_failed")
     })?;
@@ -7588,9 +7621,9 @@ fn install_plugin_internal_in_dir(
     let temp_dir = TempDir::new_in(install_dir)
         .map_err(|e| err_with(CliErrorKind::Io, "temp dir create failed", e))?;
     let pack_dir = temp_dir.path().join("repo");
-    emit_progress(verbose, command, "clone", &url);
-    let resolved_rev = clone_rule_pack_at(&url, &rev, &pack_dir, "install")?;
-    emit_progress(verbose, command, "load_pack", &url);
+    emit_progress(verbose, command, "clone", &resolved.url);
+    let resolved_rev = clone_rule_pack_at(&resolved.url, &resolved.rev, &pack_dir, "install")?;
+    emit_progress(verbose, command, "load_pack", &resolved.url);
     let loaded = load_rule_pack_from_dir(&pack_dir).map_err(|e| {
         err_code(
             CliErrorKind::Validation,
@@ -7598,6 +7631,30 @@ fn install_plugin_internal_in_dir(
             format!("load failed: {e:?}"),
         )
     })?;
+    if let Some(expected_pack_id) = expectations.expected_pack_id.as_deref()
+        && loaded.manifest.pack_id != expected_pack_id
+    {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "install_pack_load_failed",
+            format!(
+                "registry pack_id mismatch: expected {expected_pack_id}, got {}",
+                loaded.manifest.pack_id
+            ),
+        ));
+    }
+    if let Some(expected_version) = expectations.expected_version.as_deref()
+        && loaded.manifest.version != expected_version
+    {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "install_pack_load_failed",
+            format!(
+                "registry version mismatch: expected {expected_version}, got {}",
+                loaded.manifest.version
+            ),
+        ));
+    }
     emit_progress(
         verbose,
         command,
@@ -7653,22 +7710,14 @@ fn install_plugin_internal_in_dir(
     })?;
 
     ensure_valid_plugin_pack_id(&loaded.manifest.pack_id)?;
-    let final_dir = install_dir.join(&loaded.manifest.pack_id);
-    if final_dir.exists() {
-        fs::remove_dir_all(&final_dir)
-            .map_err(|e| err_with(CliErrorKind::Io, "existing plugin remove failed", e))?;
-    }
+    let final_dir = plugin_pack_dir(install_dir, &loaded.manifest.pack_id)?;
     emit_progress(verbose, command, "write_files", &loaded.manifest.pack_id);
-    fs::rename(&pack_dir, &final_dir)
-        .map_err(|e| err_with(CliErrorKind::Io, "plugin move failed", e))?;
-    temp_dir
-        .close()
-        .map_err(|e| err_with(CliErrorKind::Io, "temp dir close failed", e))?;
+    let backup_dir = swap_plugin_install_dir(&pack_dir, &final_dir)?;
     let locked = LockedPlugin {
         pack_id: loaded.manifest.pack_id.clone(),
-        source,
-        url,
-        rev,
+        source: resolved.source,
+        url: resolved.url,
+        rev: resolved.rev,
         resolved_rev: Some(resolved_rev),
         version: loaded.manifest.version.clone(),
         manifest_hash,
@@ -7682,10 +7731,97 @@ fn install_plugin_internal_in_dir(
     };
     upsert_lockfile(&mut lock, locked.clone());
     emit_progress(verbose, command, "write_lockfile", &locked.pack_id);
-    save_lockfile(lockfile.as_deref(), &lock).map_err(|e| {
+    if let Err(save_err) = save_lockfile(lockfile.as_deref(), &lock).map_err(|e| {
         map_install_error_with_detail_code(e, CliErrorKind::Io, "install_lockfile_save_failed")
-    })?;
+    }) {
+        if let Err(rollback_err) = rollback_plugin_install_swap(&final_dir, backup_dir.as_deref()) {
+            return Err(map_install_error_with_detail_code(
+                format!("{save_err}; rollback failed: {rollback_err}"),
+                CliErrorKind::Io,
+                "install_lockfile_save_failed",
+            ));
+        }
+        return Err(save_err);
+    }
+    cleanup_plugin_backup_dir(backup_dir)?;
+    drop(temp_dir);
     Ok(locked)
+}
+
+fn swap_plugin_install_dir(staged_dir: &Path, final_dir: &Path) -> Result<Option<PathBuf>, String> {
+    let backup_dir = if final_dir.exists() {
+        let backup = next_plugin_backup_dir(final_dir)?;
+        fs::rename(final_dir, &backup)
+            .map_err(|e| err_with(CliErrorKind::Io, "existing plugin backup failed", e))?;
+        Some(backup)
+    } else {
+        None
+    };
+    if let Err(error) = fs::rename(staged_dir, final_dir) {
+        if let Some(ref backup) = backup_dir
+            && let Err(restore_error) = fs::rename(backup, final_dir)
+        {
+            return Err(err(
+                CliErrorKind::Io,
+                format!("plugin move failed: {error}; backup restore failed: {restore_error}"),
+            ));
+        }
+        return Err(err_with(CliErrorKind::Io, "plugin move failed", error));
+    }
+    Ok(backup_dir)
+}
+
+fn rollback_plugin_install_swap(final_dir: &Path, backup_dir: Option<&Path>) -> Result<(), String> {
+    if final_dir.exists() {
+        remove_file_or_dir(final_dir, "plugin rollback cleanup failed")?;
+    }
+    if let Some(backup) = backup_dir {
+        fs::rename(backup, final_dir)
+            .map_err(|e| err_with(CliErrorKind::Io, "plugin rollback restore failed", e))?;
+    }
+    Ok(())
+}
+
+fn cleanup_plugin_backup_dir(backup_dir: Option<PathBuf>) -> Result<(), String> {
+    if let Some(path) = backup_dir
+        && path.exists()
+    {
+        remove_file_or_dir(&path, "plugin backup cleanup failed")?;
+    }
+    Ok(())
+}
+
+fn next_plugin_backup_dir(final_dir: &Path) -> Result<PathBuf, String> {
+    let parent = final_dir
+        .parent()
+        .ok_or_else(|| err(CliErrorKind::Io, "plugin backup parent missing"))?;
+    let name = final_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| err(CliErrorKind::Io, "plugin backup name invalid"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for attempt in 0..32u8 {
+        let candidate = parent.join(format!(".{name}.preen-backup-{nonce}-{attempt}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(err(
+        CliErrorKind::Io,
+        "failed to allocate unique plugin backup directory",
+    ))
+}
+
+fn remove_file_or_dir(path: &Path, context: &str) -> Result<(), String> {
+    if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|e| err_with(CliErrorKind::Io, context, e))?;
+    } else {
+        fs::remove_file(path).map_err(|e| err_with(CliErrorKind::Io, context, e))?;
+    }
+    Ok(())
 }
 
 fn map_install_error_with_detail_code(
@@ -8734,6 +8870,7 @@ fn update_plugin(
     verbose: bool,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
+    ensure_valid_plugin_pack_id(pack_id)?;
     let lockfile_path = resolve_lockfile_write_path(lockfile.as_deref())?;
     let lock = load_lockfile(lockfile.as_deref())?;
     let existing = lock
@@ -8742,15 +8879,24 @@ fn update_plugin(
         .find(|p| p.pack_id == pack_id)
         .ok_or_else(|| err(CliErrorKind::NotFound, "plugin not found"))?
         .clone();
-    let locked = install_plugin_internal_with_verifier(
-        &format!("{}@{}", existing.url, existing.rev),
+    let (resolved, expectations) = resolve_update_source(&existing).map_err(|e| {
+        map_install_error_with_detail_code(
+            e,
+            CliErrorKind::Validation,
+            "install_source_resolve_failed",
+        )
+    })?;
+    let install_dir = ensure_install_base_dir()?;
+    let locked = install_plugin_from_resolved_source_in_dir(
+        resolved,
+        expectations,
         lockfile,
+        &install_dir,
         "plugin.update",
         verbose,
         verifier,
     )?;
-    let install_base_dir = ensure_install_base_dir()?;
-    let installed_path = plugin_pack_dir(&install_base_dir, &locked.pack_id)?;
+    let installed_path = plugin_pack_dir(&install_dir, &locked.pack_id)?;
     let resolved_rev = locked
         .resolved_rev
         .clone()
@@ -8774,6 +8920,33 @@ fn update_plugin(
         );
     }
     Ok(())
+}
+
+fn resolve_update_source(
+    existing: &LockedPlugin,
+) -> Result<(ResolvedInstallSource, InstallExpectations), String> {
+    if existing.source == "registry" {
+        let resolved = resolve_registry_plugin(&existing.pack_id, None)?;
+        return Ok((
+            ResolvedInstallSource {
+                source: "registry".to_string(),
+                url: resolved.url,
+                rev: resolved.rev,
+            },
+            InstallExpectations {
+                expected_pack_id: Some(existing.pack_id.clone()),
+                expected_version: Some(resolved.version),
+            },
+        ));
+    }
+    Ok((
+        ResolvedInstallSource {
+            source: existing.source.clone(),
+            url: existing.url.clone(),
+            rev: existing.rev.clone(),
+        },
+        InstallExpectations::default(),
+    ))
 }
 
 fn remove_plugin(pack_id: &str, lockfile: Option<PathBuf>, json: bool) -> Result<(), String> {
@@ -8847,13 +9020,16 @@ fn resolve_install_source(spec: InstallSpec) -> Result<(String, String, String),
     match spec {
         InstallSpec::Git { url, rev } => Ok(("git".to_string(), url, rev)),
         InstallSpec::Registry { pack_id, version } => {
-            let resolved = resolve_registry_plugin(&pack_id, &version)?;
+            let resolved = resolve_registry_plugin(&pack_id, Some(&version))?;
             Ok(("registry".to_string(), resolved.url, resolved.rev))
         }
     }
 }
 
-fn resolve_registry_plugin(pack_id: &str, version: &str) -> Result<ResolvedRegistryPlugin, String> {
+fn resolve_registry_plugin(
+    pack_id: &str,
+    version: Option<&str>,
+) -> Result<ResolvedRegistryPlugin, String> {
     let path = registry_index_path()?;
     let content = fs::read_to_string(&path).map_err(|e| {
         err(
@@ -8867,7 +9043,7 @@ fn resolve_registry_plugin(pack_id: &str, version: &str) -> Result<ResolvedRegis
             format!("registry index parse failed: {e:?}"),
         )
     })?;
-    index.resolve(pack_id, Some(version)).map_err(|e| {
+    index.resolve(pack_id, version).map_err(|e| {
         err(
             CliErrorKind::Validation,
             format!("registry resolve failed: {e:?}"),
@@ -10149,6 +10325,18 @@ fn resolve_lockfile_write_path(path: Option<&Path>) -> Result<PathBuf, String> {
     }
 }
 
+fn lockfile_temp_path(path: &Path) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("plugins.lock");
+    path.with_file_name(format!(".{file_name}.tmp-{}-{nonce}", std::process::id()))
+}
+
 pub fn save_lockfile_at(path: &Path, lock: &PluginLockfile) -> Result<(), String> {
     let content = lock.to_string().map_err(|e| {
         err(
@@ -10162,7 +10350,28 @@ pub fn save_lockfile_at(path: &Path, lock: &PluginLockfile) -> Result<(), String
         fs::create_dir_all(parent)
             .map_err(|e| err_with(CliErrorKind::Io, "lockfile dir create failed", e))?;
     }
-    fs::write(path, content).map_err(|e| err_with(CliErrorKind::Io, "lockfile write failed", e))
+    let temp_path = lockfile_temp_path(path);
+    let write_result = (|| -> Result<(), String> {
+        let mut temp = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temp_path)
+            .map_err(|e| err_with(CliErrorKind::Io, "lockfile temp create failed", e))?;
+        temp.write_all(content.as_bytes())
+            .map_err(|e| err_with(CliErrorKind::Io, "lockfile temp write failed", e))?;
+        temp.sync_all()
+            .map_err(|e| err_with(CliErrorKind::Io, "lockfile temp sync failed", e))?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    fs::rename(&temp_path, path).map_err(|e| {
+        let _ = fs::remove_file(&temp_path);
+        err_with(CliErrorKind::Io, "lockfile write failed", e)
+    })
 }
 
 pub fn verify_lockfile_hashes(lock: &PluginLockfile, base_dir: &Path) -> Result<(), String> {
@@ -11828,7 +12037,19 @@ fn json_error_already_reported(cli: &Cli, err: &CliError) -> bool {
                     | Some("verify_signature_hash_drift")
                     | Some("verify_version_drift")
             ),
-            PluginCommand::Test { all, .. } => *all && detail == Some("test_all_failed"),
+            PluginCommand::Test { .. } => matches!(
+                detail,
+                Some("test_all_failed")
+                    | Some("test_signature_or_trust_failed")
+                    | Some("test_core_compat_failed")
+                    | Some("test_action_api_unsupported")
+                    | Some("test_action_type_unsupported")
+                    | Some("test_os_target_failed")
+                    | Some("test_resolved_rev_drift")
+                    | Some("test_manifest_hash_drift")
+                    | Some("test_signature_hash_drift")
+                    | Some("test_version_drift")
+            ),
             PluginCommand::Preflight { all, .. } => *all && detail == Some("preflight_all_failed"),
             _ => false,
         },
