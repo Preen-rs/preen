@@ -1747,6 +1747,7 @@ fn static_detail_code_contract_is_frozen() {
         "completion_shell_unknown",
         "completion_write_failed",
         "install_action_api_unsupported",
+        "install_action_type_unsupported",
         "install_core_compat_failed",
         "install_os_target_failed",
         "install_pack_load_failed",
@@ -1756,6 +1757,7 @@ fn static_detail_code_contract_is_frozen() {
         "optimize_confirmation_required",
         "optimize_no_tasks",
         "preflight_action_api_unsupported",
+        "preflight_action_type_unsupported",
         "preflight_all_failed",
         "preflight_core_compat_failed",
         "preflight_os_target_failed",
@@ -1780,6 +1782,7 @@ fn static_detail_code_contract_is_frozen() {
         "uninstall_no_roots",
         "uninstall_target_required",
         "verify_action_api_unsupported",
+        "verify_action_type_unsupported",
         "verify_core_compat_failed",
         "verify_manifest_hash_drift",
         "verify_os_target_failed",
@@ -5025,6 +5028,11 @@ fn detail_code_hints_prioritize_security_and_compatibility() {
     assert_eq!(code, "action_api_unsupported");
     assert_eq!(priority, 1);
 
+    let (code, action, priority) = hint_for_detail_code_for_test("verify_action_type_unsupported");
+    assert_eq!(code, "action_type_unsupported");
+    assert_eq!(action, "upgrade_plugin_or_runtime_supported_action_types");
+    assert_eq!(priority, 1);
+
     let (code, _, priority) = hint_for_detail_code_for_test("install_source_resolve_failed");
     assert_eq!(code, "registry_or_source_resolve_failed");
     assert_eq!(priority, 2);
@@ -6038,8 +6046,8 @@ fn registry_update_install_then_verify_fails_on_unsupported_action_type_with_sta
     assert_verify_error_has_detail_and_hint(
         raw,
         CliErrorKind::Validation,
-        "verify_action_api_unsupported",
-        "action_api_unsupported",
+        "verify_action_type_unsupported",
+        "action_type_unsupported",
     );
 }
 
@@ -6374,7 +6382,7 @@ fn registry_update_install_then_test_marks_unsupported_action_type_as_action_api
     assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
     assert_eq!(
         parsed["data"]["detail_code"].as_str(),
-        Some("test_action_api_unsupported")
+        Some("test_action_type_unsupported")
     );
     assert_eq!(
         check_passed_from_json(&parsed["data"], "action_api_verified"),
@@ -6409,7 +6417,7 @@ fn registry_update_install_then_test_all_unsupported_action_type_has_specific_fa
     assert_eq!(failures[0]["pack_id"].as_str(), Some("test.pack"));
     assert_eq!(
         failures[0]["detail_code"].as_str(),
-        Some("test_action_api_unsupported")
+        Some("test_action_type_unsupported")
     );
 }
 
@@ -6664,7 +6672,7 @@ fn run_typed_preflight_local_git_rejects_unsupported_action_type() {
     assert_eq!(err.kind, CliErrorKind::Validation);
     assert_eq!(
         err.detail_code.as_deref(),
-        Some("preflight_action_api_unsupported")
+        Some("preflight_action_type_unsupported")
     );
     assert!(err.message.contains("unsupported action types"));
     let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
@@ -6672,11 +6680,11 @@ fn run_typed_preflight_local_git_rejects_unsupported_action_type() {
     assert_eq!(parsed["data"]["error_kind"].as_str(), Some("validation"));
     assert_eq!(
         parsed["data"]["detail_code"].as_str(),
-        Some("preflight_action_api_unsupported")
+        Some("preflight_action_type_unsupported")
     );
     assert_eq!(
         parsed["data"]["hint_code"].as_str(),
-        Some("action_api_unsupported")
+        Some("action_type_unsupported")
     );
 }
 

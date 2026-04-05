@@ -6934,7 +6934,7 @@ fn preflight_single(
             "unsupported action_api",
         ));
     }
-    validate_runtime_action_support(&loaded, "preflight_action_api_unsupported")?;
+    validate_runtime_action_support(&loaded, "preflight_action_type_unsupported")?;
     let trust = load_trust_policy()?;
     emit_progress(
         verbose,
@@ -7153,7 +7153,7 @@ fn install_plugin_internal_in_dir(
             "unsupported action_api",
         ));
     }
-    validate_runtime_action_support(&loaded, "install_action_api_unsupported")?;
+    validate_runtime_action_support(&loaded, "install_action_type_unsupported")?;
     let trust = load_trust_policy().map_err(|e| {
         map_install_error_with_detail_code(
             e,
@@ -7949,7 +7949,9 @@ fn plugin_test_suggested_actions(
             | "test_version_drift" => {
                 push_unique_action(&mut actions, &format!("preen plugin update {pack_id}"));
             }
-            "test_core_compat_failed" | "test_action_api_unsupported" => {
+            "test_core_compat_failed"
+            | "test_action_api_unsupported"
+            | "test_action_type_unsupported" => {
                 push_unique_action(&mut actions, "preen update");
             }
             _ => {}
@@ -8012,7 +8014,7 @@ fn plugin_checks_in_dir(
             "unsupported action_api",
         ));
     }
-    validate_runtime_action_support(&loaded, "verify_action_api_unsupported")?;
+    validate_runtime_action_support(&loaded, "verify_action_type_unsupported")?;
     validate_os_targets(&loaded)
         .map_err(|e| err_code(CliErrorKind::Validation, "verify_os_target_failed", e))?;
     let mut resolved_rev_verified = true;
@@ -8163,20 +8165,25 @@ fn plugin_test_report_in_dir(
         });
     }
 
-    let unsupported_actions = unsupported_runtime_actions(&loaded);
-    let action_api_verified = loaded.manifest.action_api == 1 && unsupported_actions.is_empty();
-    if !action_api_verified {
-        let actual = if loaded.manifest.action_api != 1 {
-            format!("action_api={}", loaded.manifest.action_api)
-        } else {
-            format!("unsupported_actions={}", unsupported_actions.join(","))
-        };
+    let action_api_matches = loaded.manifest.action_api == 1;
+    if !action_api_matches {
         drifts.push(PluginTestDrift {
             field: "action_api".to_string(),
-            expected: "1_and_runtime_supported_actions".to_string(),
-            actual,
+            expected: "1".to_string(),
+            actual: loaded.manifest.action_api.to_string(),
         });
     }
+
+    let unsupported_actions = unsupported_runtime_actions(&loaded);
+    let action_type_supported = unsupported_actions.is_empty();
+    if !action_type_supported {
+        drifts.push(PluginTestDrift {
+            field: "action_type".to_string(),
+            expected: "runtime_supported_action_types".to_string(),
+            actual: unsupported_actions.join(","),
+        });
+    }
+    let action_api_verified = action_api_matches && action_type_supported;
 
     let os_target_verified = validate_os_targets(&loaded).is_ok();
     if !os_target_verified {
@@ -10630,14 +10637,28 @@ fn validate_runtime_action_support(
     if unsupported.is_empty() {
         return Ok(());
     }
-    Err(err_code(
-        CliErrorKind::Validation,
-        detail_code,
-        format!(
-            "unsupported action types for current runtime: {}",
-            unsupported.join(", ")
-        ),
-    ))
+    let message = format!(
+        "unsupported action types for current runtime: {}",
+        unsupported.join(", ")
+    );
+    match detail_code {
+        "preflight_action_type_unsupported" => Err(err_code(
+            CliErrorKind::Validation,
+            "preflight_action_type_unsupported",
+            message,
+        )),
+        "install_action_type_unsupported" => Err(err_code(
+            CliErrorKind::Validation,
+            "install_action_type_unsupported",
+            message,
+        )),
+        "verify_action_type_unsupported" => Err(err_code(
+            CliErrorKind::Validation,
+            "verify_action_type_unsupported",
+            message,
+        )),
+        _ => Err(err_code(CliErrorKind::Validation, detail_code, message)),
+    }
 }
 
 fn classify_verify_error(verify_err: VerifyError) -> (CliErrorKind, String) {
@@ -11248,6 +11269,7 @@ fn json_error_already_reported(cli: &Cli, err: &CliError) -> bool {
                     | Some("verify_signature_or_trust_failed")
                     | Some("verify_core_compat_failed")
                     | Some("verify_action_api_unsupported")
+                    | Some("verify_action_type_unsupported")
                     | Some("verify_os_target_failed")
                     | Some("verify_resolved_rev_drift")
                     | Some("verify_manifest_hash_drift")

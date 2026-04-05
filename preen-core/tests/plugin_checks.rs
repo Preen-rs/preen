@@ -59,6 +59,10 @@ fn plugin_failure_hint_supports_mapping_and_locale_message() {
     assert_eq!(verify_hint.code, "manifest_hash_drift");
     assert_eq!(verify_hint.priority, 2);
 
+    let action_type_hint = plugin_failure_hint_from_detail_code("verify_action_type_unsupported");
+    assert_eq!(action_type_hint.code, "action_type_unsupported");
+    assert_eq!(action_type_hint.priority, 1);
+
     let test_hint = plugin_failure_hint_from_detail_code("test_signature_or_trust_failed");
     assert_eq!(test_hint.code, "trust_or_signature_failed");
     assert_eq!(test_hint.priority, 0);
@@ -121,6 +125,13 @@ fn plugin_localized_error_message_uses_detail_code_and_fallback() {
         "en-US",
     );
     assert!(install_source.contains("Git checkout failed"));
+
+    let action_type = plugin_localized_error_message(
+        Some("verify_action_type_unsupported"),
+        "unsupported action type",
+        "en-US",
+    );
+    assert!(action_type.contains("action types unsupported"));
 
     let passthrough = plugin_localized_error_message(None, "custom failure", "de-DE");
     assert_eq!(passthrough, "custom failure");

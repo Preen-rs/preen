@@ -427,6 +427,14 @@ pub fn plugin_failure_hint_from_detail_code(code: &str) -> PluginFailureHint {
             action: "upgrade_preen_core_or_plugin_action_api",
             priority: 1,
         },
+        "preflight_action_type_unsupported"
+        | "install_action_type_unsupported"
+        | "verify_action_type_unsupported"
+        | "test_action_type_unsupported" => PluginFailureHint {
+            code: "action_type_unsupported",
+            action: "upgrade_plugin_or_runtime_supported_action_types",
+            priority: 1,
+        },
         "preflight_os_target_failed"
         | "install_os_target_failed"
         | "verify_os_target_failed"
@@ -544,6 +552,7 @@ pub fn plugin_detail_code_from_drift_field(field: &str) -> Option<&'static str> 
         "signature_or_trust" => Some("test_signature_or_trust_failed"),
         "core_compat" => Some("test_core_compat_failed"),
         "action_api" => Some("test_action_api_unsupported"),
+        "action_type" => Some("test_action_type_unsupported"),
         "os_targets" => Some("test_os_target_failed"),
         "resolved_rev" => Some("test_resolved_rev_drift"),
         "manifest_hash" => Some("test_manifest_hash_drift"),
@@ -581,6 +590,11 @@ pub fn plugin_failure_hint_from_drift_field(field: &str) -> PluginFailureHint {
         "action_api" => PluginFailureHint {
             code: "action_api_unsupported",
             action: "upgrade_plugin_or_runtime_action_api",
+            priority: 1,
+        },
+        "action_type" => PluginFailureHint {
+            code: "action_type_unsupported",
+            action: "upgrade_plugin_or_runtime_supported_action_types",
             priority: 1,
         },
         "os_targets" => PluginFailureHint {
@@ -632,6 +646,9 @@ pub fn plugin_failure_hint_message(code: &str, language: &str) -> String {
         }
         "action_api_unsupported" => {
             rust_i18n::t!("plugin.hints.action_api_unsupported", locale = locale).to_string()
+        }
+        "action_type_unsupported" => {
+            rust_i18n::t!("plugin.hints.action_type_unsupported", locale = locale).to_string()
         }
         "os_target_failed" => {
             rust_i18n::t!("plugin.hints.os_target_failed", locale = locale).to_string()
@@ -714,6 +731,11 @@ pub fn plugin_localized_error_message(
                 locale = locale
             )
             .to_string(),
+            "preflight_action_type_unsupported" => rust_i18n::t!(
+                "plugin.errors.detail.preflight_action_type_unsupported",
+                locale = locale
+            )
+            .to_string(),
             "preflight_signature_or_trust_failed" => rust_i18n::t!(
                 "plugin.errors.detail.preflight_signature_or_trust_failed",
                 locale = locale
@@ -731,6 +753,18 @@ pub fn plugin_localized_error_message(
             .to_string(),
             "verify_action_api_unsupported" | "test_action_api_unsupported" => rust_i18n::t!(
                 "plugin.errors.detail.preflight_action_api_unsupported",
+                locale = locale
+            )
+            .to_string(),
+            "install_action_api_unsupported" => rust_i18n::t!(
+                "plugin.errors.detail.preflight_action_api_unsupported",
+                locale = locale
+            )
+            .to_string(),
+            "install_action_type_unsupported"
+            | "verify_action_type_unsupported"
+            | "test_action_type_unsupported" => rust_i18n::t!(
+                "plugin.errors.detail.preflight_action_type_unsupported",
                 locale = locale
             )
             .to_string(),
@@ -755,6 +789,11 @@ pub fn plugin_localized_error_message(
         }
         "unsupported action_api" => rust_i18n::t!(
             "plugin.errors.message.unsupported_action_api",
+            locale = locale
+        )
+        .to_string(),
+        "unsupported action_type" => rust_i18n::t!(
+            "plugin.errors.message.unsupported_action_type",
             locale = locale
         )
         .to_string(),
