@@ -6,7 +6,7 @@ use preen_core::plugin::ActionType;
 use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 use tokio::process::Command as TokioCommand;
@@ -16,6 +16,18 @@ use walkdir::WalkDir;
 pub struct OsActionExecutor;
 
 impl OsActionExecutor {
+    const MAX_RUN_COMMAND_TIMEOUT_SEC: u64 = 600;
+
+    const SAFE_COMMAND_PATH_PREFIXES: [&'static str; 7] = [
+        "/bin",
+        "/sbin",
+        "/usr/bin",
+        "/usr/sbin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/nix/store",
+    ];
+
     const DEFAULT_PROJECT_ARTIFACT_NAMES: [&'static str; 10] = [
         "node_modules",
         "target",
@@ -320,13 +332,105 @@ impl OsActionExecutor {
             .to_string()
     }
 
+    fn is_safe_command_path(path: &Path) -> bool {
+        let Some(normalized) = Self::normalize_absolute_path(path) else {
+            return false;
+        };
+
+        Self::SAFE_COMMAND_PATH_PREFIXES
+            .iter()
+            .map(Path::new)
+            .any(|prefix| normalized == prefix || normalized.starts_with(prefix))
+    }
+
+    fn is_path_like(value: &str) -> bool {
+        value.contains('/')
+    }
+
+    fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
+        if !path.is_absolute() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        for component in path.components() {
+            match component {
+                Component::RootDir => {}
+                Component::CurDir => {}
+                Component::Normal(part) => parts.push(part.to_owned()),
+                Component::ParentDir => {
+                    parts.pop()?;
+                }
+                Component::Prefix(_) => return None,
+            }
+        }
+
+        let mut normalized = PathBuf::from("/");
+        for part in parts {
+            normalized.push(part);
+        }
+        Some(normalized)
+    }
+
+    fn is_executable_file(path: &Path) -> bool {
+        let Ok(metadata) = fs::metadata(path) else {
+            return false;
+        };
+        if !metadata.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    }
+
+    fn resolve_safe_program(program: &str) -> Option<PathBuf> {
+        Self::SAFE_COMMAND_PATH_PREFIXES
+            .iter()
+            .map(|prefix| Path::new(prefix).join(program))
+            .find(|candidate| Self::is_executable_file(candidate))
+    }
+
+    fn format_command_for_log(command: &[String]) -> String {
+        command
+            .iter()
+            .map(|part| {
+                part.chars()
+                    .flat_map(|c| c.escape_default())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn is_command_allowed(command: &str, allowlist: &[String]) -> bool {
         let command_name = Self::normalize_command_name(command);
+        let command_path_like = Self::is_path_like(command);
+        let command_path = Path::new(command);
+
+        if command_path_like {
+            if allowlist.iter().any(|entry| entry.trim() == command) {
+                return true;
+            }
+            let basename_allowed = allowlist.iter().any(|entry| {
+                let normalized = entry.trim();
+                !normalized.is_empty() && Self::normalize_command_name(normalized) == command_name
+            });
+            if basename_allowed {
+                return Self::is_safe_command_path(command_path);
+            }
+            return false;
+        }
+
         allowlist.iter().any(|entry| {
             let normalized = entry.trim();
             !normalized.is_empty()
-                && (normalized == command
-                    || normalized == command_name
+                && (normalized == command_name
                     || Self::normalize_command_name(normalized) == command_name)
         })
     }
@@ -358,13 +462,32 @@ impl OsActionExecutor {
                 freed_bytes: 0,
                 warnings: vec![format!(
                     "dry-run skipped command: {}",
-                    plan.request.action.command.join(" ")
+                    Self::format_command_for_log(&plan.request.action.command)
                 )],
             });
         }
 
         let timeout_sec = plan.request.action.timeout_sec.unwrap_or(60).max(1);
-        let mut command = TokioCommand::new(program);
+        if timeout_sec > Self::MAX_RUN_COMMAND_TIMEOUT_SEC {
+            return Err(ActionExecutionError::Failed {
+                message: format!(
+                    "run command timeout exceeds max {} seconds: {timeout_sec}",
+                    Self::MAX_RUN_COMMAND_TIMEOUT_SEC
+                ),
+            });
+        }
+
+        let executable = if Self::is_path_like(program) {
+            program.clone()
+        } else {
+            Self::resolve_safe_program(program)
+                .ok_or_else(|| ActionExecutionError::CommandDenied {
+                    command: program.clone(),
+                })?
+                .to_string_lossy()
+                .to_string()
+        };
+        let mut command = TokioCommand::new(&executable);
         if plan.request.action.command.len() > 1 {
             command.args(&plan.request.action.command[1..]);
         }
@@ -372,8 +495,11 @@ impl OsActionExecutor {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        let mut command_for_log_parts = plan.request.action.command.clone();
+        command_for_log_parts[0] = executable.clone();
+        let command_for_log = Self::format_command_for_log(&command_for_log_parts);
         let mut child = command.spawn().map_err(|e| ActionExecutionError::Failed {
-            message: format!("run command spawn failed: {program}: {e}"),
+            message: format!("run command spawn failed: {executable}: {e}"),
         })?;
 
         let status =
@@ -385,7 +511,7 @@ impl OsActionExecutor {
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                     return Err(ActionExecutionError::CommandTimeout {
-                        command: plan.request.action.command.join(" "),
+                        command: command_for_log,
                         timeout_sec,
                     });
                 }
@@ -393,7 +519,7 @@ impl OsActionExecutor {
 
         if !status.success() {
             return Err(ActionExecutionError::CommandNonZero {
-                command: plan.request.action.command.join(" "),
+                command: command_for_log,
                 code: status.code(),
             });
         }

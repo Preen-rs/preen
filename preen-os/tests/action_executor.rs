@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use preen_core::action_runtime::{
@@ -837,6 +839,129 @@ async fn run_command_accepts_allowlist_from_env() {
 }
 
 #[tokio::test]
+async fn run_command_rejects_unsafe_path_when_only_basename_is_allowlisted() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("echo");
+    fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+    }
+
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "echo".to_string());
+    let plan = sample_plan_with(
+        ActionType::RunCommand,
+        ExecutionMode::Apply,
+        vec![],
+        vec![script.to_string_lossy().to_string()],
+        params,
+        Some(5),
+    );
+
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::CommandDenied { .. }));
+}
+
+#[tokio::test]
+async fn run_command_rejects_traversal_under_safe_prefix_when_only_basename_is_allowlisted() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("echo");
+    fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+    }
+
+    let escaped = script.to_string_lossy().trim_start_matches('/').to_string();
+    let traversal = format!("/usr/bin/../../{escaped}");
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "echo".to_string());
+    let plan = sample_plan_with(
+        ActionType::RunCommand,
+        ExecutionMode::Apply,
+        vec![],
+        vec![traversal],
+        params,
+        Some(5),
+    );
+
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::CommandDenied { .. }));
+}
+
+#[tokio::test]
+async fn run_command_allows_unsafe_path_when_explicitly_allowlisted() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("echo");
+    fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+    }
+
+    let mut params = HashMap::new();
+    params.insert(
+        "allowlist".to_string(),
+        script.to_string_lossy().to_string(),
+    );
+    let plan = sample_plan_with(
+        ActionType::RunCommand,
+        ExecutionMode::Apply,
+        vec![],
+        vec![script.to_string_lossy().to_string()],
+        params,
+        Some(5),
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert_eq!(out.freed_bytes, 0);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn run_command_bare_command_uses_safe_path_not_path_env() {
+    let _guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("hijacked");
+    let script = dir.path().join("echo");
+    fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch {}\nexit 0\n", marker.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+    }
+    let _path = EnvVarGuard::set("PATH", &dir.path().to_string_lossy());
+
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "echo".to_string());
+    let plan = sample_plan_with(
+        ActionType::RunCommand,
+        ExecutionMode::Apply,
+        vec![],
+        vec!["echo".to_string(), "ok".to_string()],
+        params,
+        Some(5),
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert!(!marker.exists());
+}
+
+#[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn run_command_params_allowlist_overrides_env_allowlist() {
     let _guard = env_lock();
@@ -912,4 +1037,22 @@ async fn run_command_timeout_none_uses_default() {
     );
     let out = OsActionExecutor.execute(&plan).await.unwrap();
     assert_eq!(out.affected_items, 1);
+}
+
+#[tokio::test]
+async fn run_command_timeout_above_policy_max_is_rejected() {
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "echo".to_string());
+    let plan = sample_plan_with(
+        ActionType::RunCommand,
+        ExecutionMode::Apply,
+        vec![],
+        vec!["/bin/echo".to_string(), "ok".to_string()],
+        params,
+        Some(601),
+    );
+
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::Failed { .. }));
+    assert!(err.to_string().contains("timeout exceeds max 600 seconds"));
 }
