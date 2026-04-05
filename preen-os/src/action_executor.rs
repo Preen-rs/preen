@@ -15,6 +15,22 @@ use walkdir::WalkDir;
 #[derive(Debug, Default, Clone)]
 pub struct OsActionExecutor;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionRoute {
+    TrashPaths,
+    DeletePaths,
+    PruneEmptyDirs,
+    RemoveOrphansOrAppUninstall,
+    DiskUsageSnapshot,
+    ProjectCleanup,
+    FindInstallers,
+    OptimizeSystem,
+    RunCommand,
+    ScanPaths,
+    MatchRegex,
+    OlderThanDays,
+}
+
 impl OsActionExecutor {
     const MAX_RUN_COMMAND_TIMEOUT_SEC: u64 = 600;
 
@@ -857,6 +873,130 @@ impl OsActionExecutor {
             warnings,
         })
     }
+
+    fn execute_scan_paths(
+        plan: &ExecutionPlan,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        let mut affected_items: u64 = 0;
+        let mut warnings: Vec<String> = Vec::new();
+        let max_items = Self::parse_max_items(plan);
+        for raw in &plan.request.action.paths {
+            let path = Self::expand_path(raw);
+            if !path.exists() {
+                warnings.push(format!("path not found: {}", path.display()));
+                continue;
+            }
+            let remaining = max_items.saturating_sub(affected_items as usize);
+            let (count, truncated) = Self::count_matching_files(&path, remaining, |_| {
+                Ok::<bool, ActionExecutionError>(true)
+            })?;
+            affected_items = affected_items.saturating_add(count);
+            if truncated {
+                warnings.push(format!(
+                    "scan result truncated at max_items={max_items} for {}",
+                    path.display()
+                ));
+                break;
+            }
+        }
+        Ok(ActionExecutionResult {
+            affected_items,
+            freed_bytes: 0,
+            warnings,
+        })
+    }
+
+    fn execute_prune_empty_dirs(
+        plan: &ExecutionPlan,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        let mut affected_items: u64 = 0;
+        let mut warnings: Vec<String> = Vec::new();
+        let max_items = Self::parse_max_items(plan);
+
+        for raw in &plan.request.action.paths {
+            let path = Self::expand_path(raw);
+            if !path.exists() {
+                warnings.push(format!("path not found: {}", path.display()));
+                continue;
+            }
+            if !path.is_dir() {
+                warnings.push(format!("path is not directory: {}", path.display()));
+                continue;
+            }
+            let remaining = max_items.saturating_sub(affected_items as usize);
+            let (dirs, truncated) = Self::collect_empty_dirs(&path, remaining)?;
+            affected_items = affected_items.saturating_add(dirs.len() as u64);
+            if plan.request.mode == ExecutionMode::Apply {
+                for dir in dirs {
+                    fs::remove_dir(&dir).map_err(|e| ActionExecutionError::Failed {
+                        message: format!(
+                            "prune_empty_dirs remove_dir failed: {}: {e}",
+                            dir.display()
+                        ),
+                    })?;
+                }
+            }
+            if truncated {
+                warnings.push(format!(
+                    "scan result truncated at max_items={max_items} for {}",
+                    path.display()
+                ));
+                break;
+            }
+        }
+
+        Ok(ActionExecutionResult {
+            affected_items,
+            freed_bytes: 0,
+            warnings,
+        })
+    }
+
+    async fn execute_remove_orphans_or_app_uninstall(
+        plan: &ExecutionPlan,
+    ) -> Result<ActionExecutionResult, ActionExecutionError> {
+        let action_type = &plan.request.action.action_type;
+        if !plan.request.action.paths.is_empty() {
+            return Self::execute_delete_like_paths(plan, false);
+        }
+        if !plan.request.action.command.is_empty() {
+            return Self::execute_run_command(plan).await;
+        }
+        Err(ActionExecutionError::Failed {
+            message: format!(
+                "{} requires paths or command",
+                match action_type {
+                    ActionType::RemoveOrphans => "remove_orphans",
+                    ActionType::AppUninstall => "app_uninstall",
+                    _ => "action",
+                }
+            ),
+        })
+    }
+
+    fn route_action(action_type: &ActionType) -> Result<ActionRoute, ActionExecutionError> {
+        match action_type {
+            ActionType::TrashPaths => Ok(ActionRoute::TrashPaths),
+            ActionType::DeletePaths => Ok(ActionRoute::DeletePaths),
+            ActionType::PruneEmptyDirs => Ok(ActionRoute::PruneEmptyDirs),
+            ActionType::RemoveOrphans | ActionType::AppUninstall => {
+                Ok(ActionRoute::RemoveOrphansOrAppUninstall)
+            }
+            ActionType::DiskUsageSnapshot | ActionType::SystemStatus => {
+                Ok(ActionRoute::DiskUsageSnapshot)
+            }
+            ActionType::ProjectCleanup => Ok(ActionRoute::ProjectCleanup),
+            ActionType::FindInstallers => Ok(ActionRoute::FindInstallers),
+            ActionType::OptimizeSystem => Ok(ActionRoute::OptimizeSystem),
+            ActionType::RunCommand => Ok(ActionRoute::RunCommand),
+            ActionType::ScanPaths => Ok(ActionRoute::ScanPaths),
+            ActionType::MatchRegex => Ok(ActionRoute::MatchRegex),
+            ActionType::OlderThanDays => Ok(ActionRoute::OlderThanDays),
+            ActionType::Other(_) => Err(ActionExecutionError::UnsupportedAction {
+                action: format!("{action_type:?}"),
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -865,168 +1005,29 @@ impl ActionExecutorPort for OsActionExecutor {
         &self,
         plan: &ExecutionPlan,
     ) -> Result<ActionExecutionResult, ActionExecutionError> {
-        let action_type = &plan.request.action.action_type;
-        if !matches!(
-            action_type,
-            ActionType::TrashPaths
-                | ActionType::DeletePaths
-                | ActionType::PruneEmptyDirs
-                | ActionType::RemoveOrphans
-                | ActionType::AppUninstall
-                | ActionType::DiskUsageSnapshot
-                | ActionType::SystemStatus
-                | ActionType::ProjectCleanup
-                | ActionType::FindInstallers
-                | ActionType::OptimizeSystem
-                | ActionType::RunCommand
-                | ActionType::ScanPaths
-                | ActionType::MatchRegex
-                | ActionType::OlderThanDays
-        ) {
-            return Err(ActionExecutionError::UnsupportedAction {
-                action: format!("{action_type:?}"),
-            });
-        }
-
-        if matches!(action_type, ActionType::RunCommand) {
-            return Self::execute_run_command(plan).await;
-        }
-
-        if matches!(action_type, ActionType::SystemStatus) {
-            return Self::execute_disk_usage_snapshot(plan).await;
-        }
-
-        if matches!(action_type, ActionType::OptimizeSystem) {
-            if plan.request.action.command.is_empty() {
-                return Err(ActionExecutionError::Failed {
-                    message: "optimize_system requires command".to_string(),
-                });
+        let route = Self::route_action(&plan.request.action.action_type)?;
+        match route {
+            ActionRoute::TrashPaths => Self::execute_delete_like_paths(plan, true),
+            ActionRoute::DeletePaths => Self::execute_delete_like_paths(plan, false),
+            ActionRoute::PruneEmptyDirs => Self::execute_prune_empty_dirs(plan),
+            ActionRoute::RemoveOrphansOrAppUninstall => {
+                Self::execute_remove_orphans_or_app_uninstall(plan).await
             }
-            return Self::execute_run_command(plan).await;
-        }
-
-        if matches!(action_type, ActionType::ProjectCleanup) {
-            return Self::execute_project_cleanup(plan).await;
-        }
-
-        if matches!(action_type, ActionType::FindInstallers) {
-            return Self::execute_find_installers(plan).await;
-        }
-
-        if matches!(action_type, ActionType::DiskUsageSnapshot) {
-            return Self::execute_disk_usage_snapshot(plan).await;
-        }
-
-        if matches!(
-            action_type,
-            ActionType::RemoveOrphans | ActionType::AppUninstall
-        ) {
-            if !plan.request.action.paths.is_empty() {
-                return Self::execute_delete_like_paths(plan, false);
+            ActionRoute::DiskUsageSnapshot => Self::execute_disk_usage_snapshot(plan).await,
+            ActionRoute::ProjectCleanup => Self::execute_project_cleanup(plan).await,
+            ActionRoute::FindInstallers => Self::execute_find_installers(plan).await,
+            ActionRoute::OptimizeSystem => {
+                if plan.request.action.command.is_empty() {
+                    return Err(ActionExecutionError::Failed {
+                        message: "optimize_system requires command".to_string(),
+                    });
+                }
+                Self::execute_run_command(plan).await
             }
-            if !plan.request.action.command.is_empty() {
-                return Self::execute_run_command(plan).await;
-            }
-            return Err(ActionExecutionError::Failed {
-                message: format!(
-                    "{} requires paths or command",
-                    match action_type {
-                        ActionType::RemoveOrphans => "remove_orphans",
-                        ActionType::AppUninstall => "app_uninstall",
-                        _ => "action",
-                    }
-                ),
-            });
-        }
-
-        if matches!(action_type, ActionType::ScanPaths) {
-            let mut affected_items: u64 = 0;
-            let mut warnings: Vec<String> = Vec::new();
-            let max_items = Self::parse_max_items(plan);
-            for raw in &plan.request.action.paths {
-                let path = Self::expand_path(raw);
-                if !path.exists() {
-                    warnings.push(format!("path not found: {}", path.display()));
-                    continue;
-                }
-                let remaining = max_items.saturating_sub(affected_items as usize);
-                let (count, truncated) = Self::count_matching_files(&path, remaining, |_| {
-                    Ok::<bool, ActionExecutionError>(true)
-                })?;
-                affected_items = affected_items.saturating_add(count);
-                if truncated {
-                    warnings.push(format!(
-                        "scan result truncated at max_items={max_items} for {}",
-                        path.display()
-                    ));
-                    break;
-                }
-            }
-            return Ok(ActionExecutionResult {
-                affected_items,
-                freed_bytes: 0,
-                warnings,
-            });
-        }
-
-        if matches!(action_type, ActionType::MatchRegex) {
-            return Self::execute_match_regex(plan);
-        }
-
-        if matches!(action_type, ActionType::OlderThanDays) {
-            return Self::execute_older_than_days(plan);
-        }
-
-        if matches!(action_type, ActionType::PruneEmptyDirs) {
-            let mut affected_items: u64 = 0;
-            let mut warnings: Vec<String> = Vec::new();
-            let max_items = Self::parse_max_items(plan);
-
-            for raw in &plan.request.action.paths {
-                let path = Self::expand_path(raw);
-                if !path.exists() {
-                    warnings.push(format!("path not found: {}", path.display()));
-                    continue;
-                }
-                if !path.is_dir() {
-                    warnings.push(format!("path is not directory: {}", path.display()));
-                    continue;
-                }
-                let remaining = max_items.saturating_sub(affected_items as usize);
-                let (dirs, truncated) = Self::collect_empty_dirs(&path, remaining)?;
-                affected_items = affected_items.saturating_add(dirs.len() as u64);
-                if plan.request.mode == ExecutionMode::Apply {
-                    for dir in dirs {
-                        fs::remove_dir(&dir).map_err(|e| ActionExecutionError::Failed {
-                            message: format!(
-                                "prune_empty_dirs remove_dir failed: {}: {e}",
-                                dir.display()
-                            ),
-                        })?;
-                    }
-                }
-                if truncated {
-                    warnings.push(format!(
-                        "scan result truncated at max_items={max_items} for {}",
-                        path.display()
-                    ));
-                    break;
-                }
-            }
-
-            return Ok(ActionExecutionResult {
-                affected_items,
-                freed_bytes: 0,
-                warnings,
-            });
-        }
-
-        match action_type {
-            ActionType::TrashPaths => Self::execute_delete_like_paths(plan, true),
-            ActionType::DeletePaths => Self::execute_delete_like_paths(plan, false),
-            _ => Err(ActionExecutionError::UnsupportedAction {
-                action: format!("{action_type:?}"),
-            }),
+            ActionRoute::RunCommand => Self::execute_run_command(plan).await,
+            ActionRoute::ScanPaths => Self::execute_scan_paths(plan),
+            ActionRoute::MatchRegex => Self::execute_match_regex(plan),
+            ActionRoute::OlderThanDays => Self::execute_older_than_days(plan),
         }
     }
 }

@@ -182,6 +182,96 @@ async fn app_uninstall_requires_paths_or_command() {
 }
 
 #[tokio::test]
+async fn remove_orphans_requires_paths_or_command() {
+    let plan = sample_plan(ActionType::RemoveOrphans, ExecutionMode::DryRun, vec![]);
+    let err = OsActionExecutor.execute(&plan).await.unwrap_err();
+    assert!(matches!(err, ActionExecutionError::Failed { .. }));
+    assert!(
+        err.to_string()
+            .contains("remove_orphans requires paths or command")
+    );
+}
+
+#[tokio::test]
+async fn remove_orphans_both_paths_and_command_prefers_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let orphan = dir.path().join("orphan.tmp");
+    fs::write(&orphan, b"x").unwrap();
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "ls".to_string());
+    let plan = sample_plan_with(
+        ActionType::RemoveOrphans,
+        ExecutionMode::Apply,
+        vec![orphan.to_string_lossy().to_string()],
+        vec!["/bin/echo".to_string(), "should-not-run".to_string()],
+        params,
+        Some(5),
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert!(!orphan.exists());
+}
+
+#[tokio::test]
+async fn app_uninstall_both_paths_and_command_prefers_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("Demo.app");
+    fs::create_dir_all(&app).unwrap();
+    fs::write(app.join("Info.plist"), b"x").unwrap();
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "ls".to_string());
+    let plan = sample_plan_with(
+        ActionType::AppUninstall,
+        ExecutionMode::Apply,
+        vec![app.to_string_lossy().to_string()],
+        vec!["/bin/echo".to_string(), "should-not-run".to_string()],
+        params,
+        Some(5),
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert!(!app.exists());
+}
+
+#[tokio::test]
+async fn remove_orphans_command_only_dispatches_to_run_command() {
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "echo".to_string());
+    let plan = sample_plan_with(
+        ActionType::RemoveOrphans,
+        ExecutionMode::Apply,
+        vec![],
+        vec!["/bin/echo".to_string(), "ok".to_string()],
+        params,
+        Some(5),
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert_eq!(out.freed_bytes, 0);
+}
+
+#[tokio::test]
+async fn app_uninstall_command_only_dispatches_to_run_command() {
+    let mut params = HashMap::new();
+    params.insert("allowlist".to_string(), "echo".to_string());
+    let plan = sample_plan_with(
+        ActionType::AppUninstall,
+        ExecutionMode::Apply,
+        vec![],
+        vec!["/bin/echo".to_string(), "ok".to_string()],
+        params,
+        Some(5),
+    );
+
+    let out = OsActionExecutor.execute(&plan).await.unwrap();
+    assert_eq!(out.affected_items, 1);
+    assert_eq!(out.freed_bytes, 0);
+}
+
+#[tokio::test]
 async fn remove_orphans_apply_deletes_target_paths() {
     let dir = tempfile::tempdir().unwrap();
     let orphan = dir.path().join("orphan.cache");
@@ -400,6 +490,44 @@ async fn system_status_reports_missing_path_and_truncation_warnings() {
     assert_eq!(out.warnings.len(), 2);
     assert!(out.warnings[0].contains("path not found"));
     assert!(out.warnings[1].contains("truncated at max_items=2"));
+}
+
+#[tokio::test]
+async fn system_status_and_disk_usage_snapshot_same_input_same_output() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.bin"), vec![1_u8; 4]).unwrap();
+    fs::write(dir.path().join("b.bin"), vec![1_u8; 3]).unwrap();
+    let missing = dir.path().join("missing");
+
+    let mut status_plan = sample_plan_with(
+        ActionType::SystemStatus,
+        ExecutionMode::DryRun,
+        vec![
+            missing.to_string_lossy().to_string(),
+            dir.path().to_string_lossy().to_string(),
+        ],
+        Vec::new(),
+        HashMap::new(),
+        Some(30),
+    );
+    status_plan.request.action.max_items = Some(1);
+
+    let mut snapshot_plan = sample_plan_with(
+        ActionType::DiskUsageSnapshot,
+        ExecutionMode::DryRun,
+        vec![
+            missing.to_string_lossy().to_string(),
+            dir.path().to_string_lossy().to_string(),
+        ],
+        Vec::new(),
+        HashMap::new(),
+        Some(30),
+    );
+    snapshot_plan.request.action.max_items = Some(1);
+
+    let status_out = OsActionExecutor.execute(&status_plan).await.unwrap();
+    let snapshot_out = OsActionExecutor.execute(&snapshot_plan).await.unwrap();
+    assert_eq!(status_out, snapshot_out);
 }
 
 #[tokio::test]
@@ -1055,4 +1183,141 @@ async fn run_command_timeout_above_policy_max_is_rejected() {
     let err = OsActionExecutor.execute(&plan).await.unwrap_err();
     assert!(matches!(err, ActionExecutionError::Failed { .. }));
     assert!(err.to_string().contains("timeout exceeds max 600 seconds"));
+}
+
+#[tokio::test]
+async fn dispatch_matrix_supported_actions_do_not_return_unsupported() {
+    let root = tempfile::tempdir().unwrap();
+    let trash_file = root.path().join("trash.txt");
+    fs::write(&trash_file, b"x").unwrap();
+    let delete_file = root.path().join("delete.txt");
+    fs::write(&delete_file, b"x").unwrap();
+    let prune_dir = root.path().join("prune").join("empty");
+    fs::create_dir_all(&prune_dir).unwrap();
+    let orphan_file = root.path().join("orphan.dat");
+    fs::write(&orphan_file, b"x").unwrap();
+    let app_dir = root.path().join("Demo.app");
+    fs::create_dir_all(&app_dir).unwrap();
+    fs::write(app_dir.join("Info.plist"), b"x").unwrap();
+    let snapshot_dir = root.path().join("snapshot");
+    fs::create_dir_all(&snapshot_dir).unwrap();
+    fs::write(snapshot_dir.join("a.bin"), b"x").unwrap();
+    let project_dir = root.path().join("project");
+    fs::create_dir_all(project_dir.join("node_modules")).unwrap();
+    fs::write(project_dir.join("node_modules").join("pkg.json"), b"x").unwrap();
+    let installers_dir = root.path().join("installers");
+    fs::create_dir_all(&installers_dir).unwrap();
+    fs::write(installers_dir.join("app.pkg"), b"x").unwrap();
+    let scan_dir = root.path().join("scan");
+    fs::create_dir_all(&scan_dir).unwrap();
+    fs::write(scan_dir.join("a.txt"), b"x").unwrap();
+    let regex_dir = root.path().join("regex");
+    fs::create_dir_all(&regex_dir).unwrap();
+    fs::write(regex_dir.join("a.log"), b"x").unwrap();
+    let older_dir = root.path().join("older");
+    fs::create_dir_all(&older_dir).unwrap();
+    fs::write(older_dir.join("old.tmp"), b"x").unwrap();
+
+    let mut regex_params = HashMap::new();
+    regex_params.insert("regex".to_string(), ".*\\.log$".to_string());
+    let mut older_params = HashMap::new();
+    older_params.insert("days".to_string(), "0".to_string());
+    let mut command_params = HashMap::new();
+    command_params.insert("allowlist".to_string(), "echo".to_string());
+
+    let cases = vec![
+        sample_plan(
+            ActionType::TrashPaths,
+            ExecutionMode::DryRun,
+            vec![trash_file.to_string_lossy().to_string()],
+        ),
+        sample_plan(
+            ActionType::DeletePaths,
+            ExecutionMode::DryRun,
+            vec![delete_file.to_string_lossy().to_string()],
+        ),
+        sample_plan(
+            ActionType::PruneEmptyDirs,
+            ExecutionMode::DryRun,
+            vec![prune_dir.parent().unwrap().to_string_lossy().to_string()],
+        ),
+        sample_plan(
+            ActionType::RemoveOrphans,
+            ExecutionMode::Apply,
+            vec![orphan_file.to_string_lossy().to_string()],
+        ),
+        sample_plan(
+            ActionType::AppUninstall,
+            ExecutionMode::Apply,
+            vec![app_dir.to_string_lossy().to_string()],
+        ),
+        sample_plan(
+            ActionType::DiskUsageSnapshot,
+            ExecutionMode::DryRun,
+            vec![snapshot_dir.to_string_lossy().to_string()],
+        ),
+        sample_plan(
+            ActionType::SystemStatus,
+            ExecutionMode::DryRun,
+            vec![snapshot_dir.to_string_lossy().to_string()],
+        ),
+        sample_plan(
+            ActionType::ProjectCleanup,
+            ExecutionMode::DryRun,
+            vec![project_dir.to_string_lossy().to_string()],
+        ),
+        sample_plan(
+            ActionType::FindInstallers,
+            ExecutionMode::DryRun,
+            vec![installers_dir.to_string_lossy().to_string()],
+        ),
+        sample_plan_with(
+            ActionType::OptimizeSystem,
+            ExecutionMode::Apply,
+            vec![],
+            vec!["/bin/echo".to_string(), "ok".to_string()],
+            command_params.clone(),
+            Some(5),
+        ),
+        sample_plan_with(
+            ActionType::RunCommand,
+            ExecutionMode::Apply,
+            vec![],
+            vec!["/bin/echo".to_string(), "ok".to_string()],
+            command_params,
+            Some(5),
+        ),
+        sample_plan(
+            ActionType::ScanPaths,
+            ExecutionMode::DryRun,
+            vec![scan_dir.to_string_lossy().to_string()],
+        ),
+        sample_plan_with(
+            ActionType::MatchRegex,
+            ExecutionMode::DryRun,
+            vec![regex_dir.to_string_lossy().to_string()],
+            Vec::new(),
+            regex_params,
+            Some(30),
+        ),
+        sample_plan_with(
+            ActionType::OlderThanDays,
+            ExecutionMode::DryRun,
+            vec![older_dir.to_string_lossy().to_string()],
+            Vec::new(),
+            older_params,
+            Some(30),
+        ),
+    ];
+
+    for plan in cases {
+        let result = OsActionExecutor.execute(&plan).await;
+        if let Err(err) = result {
+            assert!(
+                !matches!(err, ActionExecutionError::UnsupportedAction { .. }),
+                "supported action returned unsupported: {:?}",
+                plan.request.action.action_type
+            );
+        }
+    }
 }
