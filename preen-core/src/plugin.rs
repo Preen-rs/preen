@@ -9,6 +9,39 @@ use crate::{ItemCategory, rules::ScanStrategy};
 pub const MANIFEST_SCHEMA_V1: u32 = 1;
 pub const RULE_SCHEMA_V1: u32 = 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackIdValidationError {
+    InvalidFormat,
+    PathTraversal,
+}
+
+pub fn validate_pack_id(pack_id: &str) -> Result<(), PackIdValidationError> {
+    if pack_id.contains("..") {
+        return Err(PackIdValidationError::PathTraversal);
+    }
+
+    let bytes = pack_id.as_bytes();
+    let Some(first) = bytes.first() else {
+        return Err(PackIdValidationError::InvalidFormat);
+    };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err(PackIdValidationError::InvalidFormat);
+    }
+
+    for byte in &bytes[1..] {
+        if !byte.is_ascii_lowercase()
+            && !byte.is_ascii_digit()
+            && *byte != b'.'
+            && *byte != b'_'
+            && *byte != b'-'
+        {
+            return Err(PackIdValidationError::InvalidFormat);
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OsTarget {
     Macos,
@@ -161,6 +194,7 @@ pub struct RuleFile {
 pub enum ValidationError {
     SchemaVersionUnsupported { found: u32, expected: u32 },
     MissingField { field: String },
+    InvalidPackId { pack_id: String },
     DuplicateRuleId { id: String },
     InvalidMatchSpec { reason: String },
     InvalidActionSpec { reason: String },
@@ -1102,6 +1136,11 @@ impl Manifest {
         if self.pack_id.trim().is_empty() {
             return Err(ValidationError::MissingField {
                 field: "pack_id".to_string(),
+            });
+        }
+        if validate_pack_id(&self.pack_id).is_err() {
+            return Err(ValidationError::InvalidPackId {
+                pack_id: self.pack_id.clone(),
             });
         }
         if self.name.trim().is_empty() {

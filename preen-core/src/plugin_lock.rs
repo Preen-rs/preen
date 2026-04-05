@@ -3,6 +3,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::plugin::validate_pack_id;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginLockfile {
     pub schema_version: u32,
@@ -30,6 +32,11 @@ impl LockedPlugin {
                 field: "plugins[].pack_id".to_string(),
             });
         }
+        if validate_pack_id(&self.pack_id).is_err() {
+            return Err(LockfileError::InvalidPackId {
+                pack_id: self.pack_id.clone(),
+            });
+        }
         if self.url.trim().is_empty() {
             return Err(LockfileError::MissingField {
                 field: "plugins[].url".to_string(),
@@ -48,6 +55,7 @@ impl LockedPlugin {
 pub enum LockfileError {
     SchemaVersionUnsupported { found: u32, expected: u32 },
     MissingField { field: String },
+    InvalidPackId { pack_id: String },
     DuplicatePackId { pack_id: String },
     Parse(String),
 }

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
+use crate::plugin::validate_pack_id;
+
 pub const REGISTRY_SCHEMA_V1: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ pub enum RegistryError {
     Parse(String),
     SchemaVersionUnsupported { found: u32, expected: u32 },
     MissingField { field: String },
+    InvalidPackId { pack_id: String },
     DuplicatePackId { pack_id: String },
     PackNotFound { pack_id: String },
     VersionNotFound { pack_id: String, version: String },
@@ -70,6 +73,11 @@ impl RegistryIndex {
             if entry.pack_id.trim().is_empty() {
                 return Err(RegistryError::MissingField {
                     field: "entries[].pack_id".to_string(),
+                });
+            }
+            if validate_pack_id(&entry.pack_id).is_err() {
+                return Err(RegistryError::InvalidPackId {
+                    pack_id: entry.pack_id.clone(),
                 });
             }
             if !seen.insert(entry.pack_id.clone()) {

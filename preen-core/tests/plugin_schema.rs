@@ -61,6 +61,56 @@ fn manifest_duplicate_rule_id_fails() {
 }
 
 #[test]
+fn manifest_invalid_pack_id_format_fails() {
+    let input = r#"
+        schema_version = 1
+        pack_id = "Test.pack"
+        name = "Test Pack"
+        version = "0.1.0"
+        description = "desc"
+        author = "me"
+        license = "MIT"
+        core_compat = ">=0.1.0,<2.0.0"
+        action_api = 1
+        os_targets = ["Linux"]
+        capabilities = ["FsRead"]
+
+        [[rules]]
+        id = "rule-1"
+        name = "Rule 1"
+        rule_file = "rules/rule-1.toml"
+    "#;
+
+    let err = input.parse::<Manifest>().unwrap_err();
+    assert!(matches!(err, ValidationError::InvalidPackId { .. }));
+}
+
+#[test]
+fn manifest_pack_id_path_traversal_fails() {
+    let input = r#"
+        schema_version = 1
+        pack_id = "../test.pack"
+        name = "Test Pack"
+        version = "0.1.0"
+        description = "desc"
+        author = "me"
+        license = "MIT"
+        core_compat = ">=0.1.0,<2.0.0"
+        action_api = 1
+        os_targets = ["Linux"]
+        capabilities = ["FsRead"]
+
+        [[rules]]
+        id = "rule-1"
+        name = "Rule 1"
+        rule_file = "rules/rule-1.toml"
+    "#;
+
+    let err = input.parse::<Manifest>().unwrap_err();
+    assert!(matches!(err, ValidationError::InvalidPackId { .. }));
+}
+
+#[test]
 fn ruleset_missing_ref_fails() {
     let input = r#"
         schema_version = 1

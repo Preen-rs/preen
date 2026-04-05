@@ -3026,10 +3026,9 @@ fn analyze_uses_env_path_when_arg_missing() {
 fn analyze_relative_env_path_resolves_against_current_cwd() {
     let _guard = ENV_LOCK.lock().unwrap();
     let cwd = std::env::current_dir().unwrap();
-    let output = with_env_overrides(
-        &[("PREEN_ANALYZE_PATH", OsString::from("."))],
-        || analyze_output_for_test(None).unwrap(),
-    );
+    let output = with_env_overrides(&[("PREEN_ANALYZE_PATH", OsString::from("."))], || {
+        analyze_output_for_test(None).unwrap()
+    });
     let resolved = PathBuf::from(output["data"]["root"].as_str().unwrap_or_default());
     assert_eq!(
         fs::canonicalize(resolved).unwrap(),
@@ -3676,6 +3675,29 @@ fn remove_command_runs_without_error() {
 fn remove_rejects_dry_run_with_confirm_conflict() {
     let parsed = Cli::try_parse_from(["preen", "remove", "--dry-run", "--confirm"]);
     assert!(parsed.is_err());
+}
+
+#[test]
+fn remove_rejects_relative_override_paths() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache_path = cache_root.path().join("cache");
+        fs::create_dir_all(&cache_path).unwrap();
+        let cli = Cli::try_parse_from(["preen", "remove", "--dry-run", "--json"]).unwrap();
+        let err = with_env_overrides(
+            &[
+                ("PREEN_REMOVE_STATE_DIR", OsString::from("relative/state")),
+                ("PREEN_REMOVE_CACHE_DIR", cache_path.into_os_string()),
+            ],
+            || run_typed(cli.clone()).unwrap_err(),
+        );
+        assert_eq!(err.kind, CliErrorKind::Validation);
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("remove_path_scope_violation")
+        );
+    });
 }
 
 #[test]
@@ -5220,6 +5242,15 @@ fn run_typed_returns_validation_for_invalid_install_spec() {
 }
 
 #[test]
+fn run_typed_rejects_registry_install_with_invalid_pack_id() {
+    let cli = Cli::try_parse_from(["preen", "plugin", "install", "../evil@1.0.0"]).unwrap();
+    let err = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert_eq!(err.detail_code.as_deref(), Some("install_spec_invalid"));
+    assert!(err.message.contains("invalid pack_id"));
+}
+
+#[test]
 fn run_typed_returns_detail_code_for_install_clone_failure() {
     let tmp = tempfile::tempdir().unwrap();
     let err = clone_rule_pack_for_test(
@@ -5638,7 +5669,8 @@ fn verify_command_uses_verify_prefixed_detail_code_on_signature_failure() {
             "--json",
         ])
         .unwrap();
-        let err = run_typed_with_verifier_for_test(verify.clone(), &AlwaysFailVerifier).unwrap_err();
+        let err =
+            run_typed_with_verifier_for_test(verify.clone(), &AlwaysFailVerifier).unwrap_err();
         assert_eq!(err.kind, CliErrorKind::Verification);
         assert_eq!(
             err.detail_code.as_deref(),
@@ -5813,6 +5845,32 @@ fn update_plugin_not_found_returns_not_found_error() {
     .unwrap();
     let err = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier).unwrap_err();
     assert_eq!(err.kind, CliErrorKind::NotFound);
+}
+
+#[test]
+fn plugin_remove_rejects_invalid_pack_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lockfile = tmp.path().join("plugins.lock");
+    save_lockfile_at(
+        &lockfile,
+        &PluginLockfile {
+            schema_version: PluginLockfile::SCHEMA_V1,
+            plugins: Vec::new(),
+        },
+    )
+    .unwrap();
+    let cli = Cli::try_parse_from([
+        "preen",
+        "plugin",
+        "remove",
+        "../evil",
+        "--lockfile",
+        lockfile.to_str().unwrap(),
+    ])
+    .unwrap();
+    let err = run_typed(cli).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Validation);
+    assert!(err.message.contains("invalid pack_id"));
 }
 
 #[test]

@@ -24,7 +24,7 @@ use preen_core::error::CoreError;
 use preen_core::metrics::NoopMetrics;
 use preen_core::plugin::{
     ActionSpec, ActionType, Capability, CliJsonEnvelope, Manifest, MatchMode, MatchSpec, OsTarget,
-    PluginCheckId, PluginCheckStatus, PluginDetailCode,
+    PackIdValidationError, PluginCheckId, PluginCheckStatus, PluginDetailCode,
     PluginPreflightAllReport as PluginPreflightAllOutput,
     PluginPreflightFailure as PluginPreflightFailureOutput,
     PluginPreflightReport as PluginPreflightOutput, PluginTestAllReport as PluginTestAllOutput,
@@ -35,7 +35,7 @@ use preen_core::plugin::{
     plugin_failure_hint_context, plugin_failure_hint_context_from_detail_code,
     plugin_failure_hint_message, plugin_localized_error_message,
     plugin_primary_detail_code_from_drifts, plugin_primary_failure_hint_from_drifts,
-    plugin_unknown_failure_hint_context,
+    plugin_unknown_failure_hint_context, validate_pack_id as validate_plugin_pack_id,
 };
 use preen_core::plugin_loader::{LoadedRulePack, load_rule_pack_from_dir};
 use preen_core::plugin_lock::{LockedPlugin, PluginLockfile};
@@ -4224,6 +4224,20 @@ fn parse_semver_like(value: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
+fn ensure_valid_plugin_pack_id(pack_id: &str) -> Result<(), String> {
+    match validate_plugin_pack_id(pack_id) {
+        Ok(()) => Ok(()),
+        Err(PackIdValidationError::PathTraversal) => Err(err(
+            CliErrorKind::Validation,
+            format!("invalid pack_id (path traversal): {pack_id}"),
+        )),
+        Err(PackIdValidationError::InvalidFormat) => Err(err(
+            CliErrorKind::Validation,
+            format!("invalid pack_id: {pack_id}"),
+        )),
+    }
+}
+
 fn update_json(out: UpdateOutput) -> Result<String, String> {
     to_json_envelope("system.update", out)
 }
@@ -4245,6 +4259,7 @@ fn run_remove(dry_run: bool, confirm: bool, json: bool) -> Result<(), String> {
 fn collect_remove_candidate(
     path: PathBuf,
     dry_run: bool,
+    managed_roots: &[PathBuf],
     detected_paths: &mut Vec<String>,
     removed_paths: &mut Vec<String>,
     skipped_paths: &mut Vec<String>,
@@ -4258,7 +4273,7 @@ fn collect_remove_candidate(
     if dry_run {
         skipped_paths.push(display);
     } else {
-        remove_path_recursively(&path)?;
+        remove_path_recursively(&path, managed_roots)?;
         removed_paths.push(display);
     }
     Ok(())
@@ -4286,17 +4301,22 @@ fn run_remove_output(dry_run: bool, confirm: bool) -> Result<RemoveOutput, Strin
     let mut removed_paths = Vec::new();
     let mut skipped_paths = Vec::new();
     let mut warnings = Vec::new();
+    let state_dir = resolve_remove_state_dir()?;
+    let cache_dir = resolve_remove_cache_dir()?;
+    let managed_roots = remove_managed_roots(&[state_dir.clone(), cache_dir.clone()])?;
 
     collect_remove_candidate(
-        resolve_remove_state_dir()?,
+        state_dir,
         dry_run,
+        &managed_roots,
         &mut detected_paths,
         &mut removed_paths,
         &mut skipped_paths,
     )?;
     collect_remove_candidate(
-        resolve_remove_cache_dir()?,
+        cache_dir,
         dry_run,
+        &managed_roots,
         &mut detected_paths,
         &mut removed_paths,
         &mut skipped_paths,
@@ -4366,21 +4386,15 @@ fn run_remove_output(dry_run: bool, confirm: bool) -> Result<RemoveOutput, Strin
 }
 
 fn resolve_remove_state_dir() -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("PREEN_REMOVE_STATE_DIR") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed));
-        }
+    if let Some(path) = resolve_remove_override_path("PREEN_REMOVE_STATE_DIR")? {
+        return Ok(path);
     }
     preen_state_dir()
 }
 
 fn resolve_remove_cache_dir() -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("PREEN_REMOVE_CACHE_DIR") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed));
-        }
+    if let Some(path) = resolve_remove_override_path("PREEN_REMOVE_CACHE_DIR")? {
+        return Ok(path);
     }
     match std::env::consts::OS {
         "macos" => {
@@ -4399,7 +4413,47 @@ fn resolve_remove_cache_dir() -> Result<PathBuf, String> {
     }
 }
 
-fn remove_path_recursively(path: &Path) -> Result<(), String> {
+fn resolve_remove_override_path(var_name: &str) -> Result<Option<PathBuf>, String> {
+    let Ok(raw) = std::env::var(var_name) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "remove_path_scope_violation",
+            format!("{var_name} must be an absolute path"),
+        ));
+    }
+    Ok(Some(path))
+}
+
+fn remove_managed_roots(candidates: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    for candidate in candidates {
+        let root = candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone());
+        if !root.is_absolute() {
+            return Err(err_code(
+                CliErrorKind::Validation,
+                "remove_path_scope_violation",
+                format!(
+                    "managed remove root must be absolute: {}",
+                    candidate.display()
+                ),
+            ));
+        }
+        roots.push(root);
+    }
+    Ok(roots)
+}
+
+fn remove_path_recursively(path: &Path, managed_roots: &[PathBuf]) -> Result<(), String> {
     let target = path
         .canonicalize()
         .or_else(|_| Ok::<PathBuf, std::io::Error>(path.to_path_buf()))
@@ -4411,7 +4465,7 @@ fn remove_path_recursively(path: &Path) -> Result<(), String> {
             )
         })?;
 
-    if !is_safe_remove_target(&target) {
+    if !is_safe_managed_remove_target(&target, managed_roots) {
         return Err(err_code(
             CliErrorKind::Validation,
             "remove_path_scope_violation",
@@ -4437,6 +4491,15 @@ fn remove_path_recursively(path: &Path) -> Result<(), String> {
         })?;
     }
     Ok(())
+}
+
+fn is_safe_managed_remove_target(path: &Path, managed_roots: &[PathBuf]) -> bool {
+    if !path.is_absolute() || path == Path::new("/") {
+        return false;
+    }
+    managed_roots
+        .iter()
+        .any(|root| path == root || path.starts_with(root))
 }
 
 fn is_safe_remove_target(path: &Path) -> bool {
@@ -7182,7 +7245,8 @@ fn install_plugin(
     let lockfile_path = resolve_lockfile_write_path(lockfile.as_deref())?;
     let locked =
         install_plugin_internal_with_verifier(spec, lockfile, "plugin.install", verbose, verifier)?;
-    let installed_path = ensure_install_base_dir()?.join(&locked.pack_id);
+    let install_base_dir = ensure_install_base_dir()?;
+    let installed_path = plugin_pack_dir(&install_base_dir, &locked.pack_id)?;
     let resolved_rev = locked
         .resolved_rev
         .clone()
@@ -7588,6 +7652,7 @@ fn install_plugin_internal_in_dir(
         map_install_error_with_detail_code(e, CliErrorKind::Io, "install_signature_hash_failed")
     })?;
 
+    ensure_valid_plugin_pack_id(&loaded.manifest.pack_id)?;
     let final_dir = install_dir.join(&loaded.manifest.pack_id);
     if final_dir.exists() {
         fs::remove_dir_all(&final_dir)
@@ -8397,7 +8462,7 @@ fn plugin_checks_in_dir(
         .iter()
         .find(|p| p.pack_id == pack_id)
         .ok_or_else(|| err(CliErrorKind::NotFound, "plugin not found"))?;
-    let pack_dir = base_dir.join(&plugin.pack_id);
+    let pack_dir = plugin_pack_dir(base_dir, &plugin.pack_id)?;
     let loaded = load_rule_pack_from_dir(&pack_dir).map_err(|e| {
         err_code(
             CliErrorKind::Validation,
@@ -8517,7 +8582,7 @@ fn plugin_test_report_in_dir(
         .iter()
         .find(|p| p.pack_id == pack_id)
         .ok_or_else(|| err(CliErrorKind::NotFound, "plugin not found"))?;
-    let pack_dir = base_dir.join(&plugin.pack_id);
+    let pack_dir = plugin_pack_dir(base_dir, &plugin.pack_id)?;
     let loaded = load_rule_pack_from_dir(&pack_dir)
         .map_err(|e| err(CliErrorKind::Validation, format!("load failed: {e:?}")))?;
     let trust = load_trust_policy()?;
@@ -8684,7 +8749,8 @@ fn update_plugin(
         verbose,
         verifier,
     )?;
-    let installed_path = ensure_install_base_dir()?.join(&locked.pack_id);
+    let install_base_dir = ensure_install_base_dir()?;
+    let installed_path = plugin_pack_dir(&install_base_dir, &locked.pack_id)?;
     let resolved_rev = locked
         .resolved_rev
         .clone()
@@ -8711,9 +8777,10 @@ fn update_plugin(
 }
 
 fn remove_plugin(pack_id: &str, lockfile: Option<PathBuf>, json: bool) -> Result<(), String> {
+    ensure_valid_plugin_pack_id(pack_id)?;
     let mut lock = load_lockfile(lockfile.as_deref())?;
     let base_dir = ensure_install_base_dir()?;
-    let pack_dir = base_dir.join(pack_id);
+    let pack_dir = plugin_pack_dir(&base_dir, pack_id)?;
     let mut removed = false;
     if pack_dir.exists() {
         fs::remove_dir_all(&pack_dir)
@@ -8769,6 +8836,7 @@ pub fn parse_plugin_spec(spec: &str) -> Result<InstallSpec, String> {
             rev: rev.to_string(),
         });
     }
+    ensure_valid_plugin_pack_id(url)?;
     Ok(InstallSpec::Registry {
         pack_id: url.to_string(),
         version: rev.to_string(),
@@ -9318,8 +9386,14 @@ fn registry_search_json(entries: &[RegistrySearchOutput]) -> Result<String, Stri
     to_json_envelope("plugin.search", entries)
 }
 
+fn plugin_pack_dir(base_dir: &Path, pack_id: &str) -> Result<PathBuf, String> {
+    ensure_valid_plugin_pack_id(pack_id)?;
+    Ok(base_dir.join(pack_id))
+}
+
 fn plugin_install_path(pack_id: &str) -> Result<PathBuf, String> {
-    Ok(preen_state_dir()?.join("plugins").join(pack_id))
+    let base_dir = preen_state_dir()?.join("plugins");
+    plugin_pack_dir(&base_dir, pack_id)
 }
 
 fn plugin_info_json(plugin: &LockedPlugin) -> Result<String, String> {
@@ -10093,7 +10167,7 @@ pub fn save_lockfile_at(path: &Path, lock: &PluginLockfile) -> Result<(), String
 
 pub fn verify_lockfile_hashes(lock: &PluginLockfile, base_dir: &Path) -> Result<(), String> {
     for plugin in &lock.plugins {
-        let pack_dir = base_dir.join(&plugin.pack_id);
+        let pack_dir = plugin_pack_dir(base_dir, &plugin.pack_id)?;
         let manifest_hash = hash_file(&pack_dir.join("manifest.toml"))?;
         if manifest_hash != plugin.manifest_hash {
             return Err(err(

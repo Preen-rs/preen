@@ -60,6 +60,44 @@ latest_version = "1.0.0"
 }
 
 #[test]
+fn registry_invalid_pack_id_format_fails() {
+    let input = r#"
+schema_version = 1
+
+[[entries]]
+pack_id = "Bad.pack"
+name = "Homebrew"
+description = "Cleanup pack"
+repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
+latest_version = "1.2.0"
+  [[entries.versions]]
+  version = "1.2.0"
+  rev = "abc123"
+"#;
+    let err = input.parse::<RegistryIndex>().unwrap_err();
+    assert!(matches!(err, RegistryError::InvalidPackId { .. }));
+}
+
+#[test]
+fn registry_pack_id_path_traversal_fails() {
+    let input = r#"
+schema_version = 1
+
+[[entries]]
+pack_id = "../homebrew"
+name = "Homebrew"
+description = "Cleanup pack"
+repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
+latest_version = "1.2.0"
+  [[entries.versions]]
+  version = "1.2.0"
+  rev = "abc123"
+"#;
+    let err = input.parse::<RegistryIndex>().unwrap_err();
+    assert!(matches!(err, RegistryError::InvalidPackId { .. }));
+}
+
+#[test]
 fn registry_version_not_found() {
     let input = r#"
 schema_version = 1
