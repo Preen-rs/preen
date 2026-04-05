@@ -3005,6 +3005,39 @@ fn analyze_selection_dedupes_nested_paths_for_trash() {
 }
 
 #[test]
+fn analyze_uses_env_path_when_arg_missing() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_analyze_root_fixture(|analyze_root| {
+        let output = with_env_overrides(
+            &[(
+                "PREEN_ANALYZE_PATH",
+                analyze_root.as_os_str().to_os_string(),
+            )],
+            || analyze_output_for_test(None).unwrap(),
+        );
+        assert_eq!(
+            output["data"]["root"].as_str(),
+            Some(analyze_root.to_string_lossy().as_ref())
+        );
+    });
+}
+
+#[test]
+fn analyze_relative_env_path_resolves_against_current_cwd() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let output = with_env_overrides(
+        &[("PREEN_ANALYZE_PATH", OsString::from("."))],
+        || analyze_output_for_test(None).unwrap(),
+    );
+    let resolved = PathBuf::from(output["data"]["root"].as_str().unwrap_or_default());
+    assert_eq!(
+        fs::canonicalize(resolved).unwrap(),
+        fs::canonicalize(cwd).unwrap()
+    );
+}
+
+#[test]
 fn status_json_happy_path_with_temp_user_env() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
@@ -3175,6 +3208,35 @@ fn status_suggested_actions_include_cleanup_and_optimize_for_pressure() {
                 "preen optimize --dry-run",
             ],
         );
+    });
+}
+
+#[test]
+fn status_suggested_actions_are_unique_under_combined_pressure() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let output = with_status_metrics_env(
+            &[
+                ("PREEN_STATUS_MEMORY_TOTAL_BYTES", "100"),
+                ("PREEN_STATUS_MEMORY_USED_BYTES", "95"),
+                ("PREEN_STATUS_DISK_TOTAL_BYTES", "100"),
+                ("PREEN_STATUS_DISK_AVAILABLE_BYTES", "5"),
+                ("PREEN_STATUS_LOAD_1M_MILLI", "10000"),
+            ],
+            || status_output_for_test().unwrap(),
+        );
+        let actions = output["data"]["suggested_actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+            .collect::<Vec<_>>();
+        let unique = actions
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(actions.len(), unique.len());
     });
 }
 
@@ -3471,6 +3533,54 @@ fn update_execute_failure_maps_detail_code() {
             Some("update_execute_failed")
         );
     });
+}
+
+#[test]
+fn update_suggested_command_matrix_by_source_and_channel() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let cases = [
+        ("cargo", false, "cargo install preen-cli --locked --force"),
+        ("cargo", true, "install.sh | bash -s -- --nightly"),
+        ("homebrew", false, "brew upgrade preen"),
+        ("homebrew", true, "install.sh | bash -s -- --nightly"),
+        ("script", false, "install.sh | bash"),
+        ("script", true, "install.sh | bash -s -- --nightly"),
+        ("unknown", false, "preen update --force"),
+        ("unknown", true, "preen update --nightly --force"),
+    ];
+
+    for (source, nightly, marker) in cases {
+        let output = with_env_overrides(
+            &[("PREEN_UPDATE_INSTALL_SOURCE", OsString::from(source))],
+            || update_output_for_test(false, nightly).unwrap(),
+        );
+        let command = output["data"]["suggested_command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            command.contains(marker),
+            "source={source} nightly={nightly} command={command}"
+        );
+    }
+}
+
+#[test]
+fn update_version_compare_matrix_covers_true_false_and_none() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let current = env!("CARGO_PKG_VERSION");
+    let cases = [
+        ("9.9.9", Some(true)),
+        (current, Some(false)),
+        ("invalid", None),
+    ];
+    for (latest, expected) in cases {
+        let output = with_env_overrides(
+            &[("PREEN_UPDATE_LATEST_VERSION", OsString::from(latest))],
+            || update_output_for_test(false, false).unwrap(),
+        );
+        let actual = output["data"]["update_available"].as_bool();
+        assert_eq!(actual, expected, "latest={latest}");
+    }
 }
 
 #[test]
