@@ -974,6 +974,10 @@ impl OsActionExecutor {
         })
     }
 
+    pub fn supports_action_type(action_type: &ActionType) -> bool {
+        Self::route_action(action_type).is_ok()
+    }
+
     fn route_action(action_type: &ActionType) -> Result<ActionRoute, ActionExecutionError> {
         match action_type {
             ActionType::TrashPaths => Ok(ActionRoute::TrashPaths),

@@ -101,6 +101,29 @@ pub enum ActionType {
     Other(String),
 }
 
+impl ActionType {
+    const BUILTIN_VARIANTS: [ActionType; 14] = [
+        ActionType::ScanPaths,
+        ActionType::MatchRegex,
+        ActionType::OlderThanDays,
+        ActionType::TrashPaths,
+        ActionType::DeletePaths,
+        ActionType::PruneEmptyDirs,
+        ActionType::RemoveOrphans,
+        ActionType::AppUninstall,
+        ActionType::DiskUsageSnapshot,
+        ActionType::SystemStatus,
+        ActionType::ProjectCleanup,
+        ActionType::FindInstallers,
+        ActionType::OptimizeSystem,
+        ActionType::RunCommand,
+    ];
+
+    pub fn builtin_variants() -> &'static [ActionType] {
+        &Self::BUILTIN_VARIANTS
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActionMode {
     Confirm,

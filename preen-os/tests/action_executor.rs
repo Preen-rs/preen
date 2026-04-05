@@ -154,6 +154,24 @@ async fn unsupported_action_returns_error() {
     ));
 }
 
+#[test]
+fn executor_supports_all_core_builtin_action_types() {
+    for action_type in ActionType::builtin_variants() {
+        assert!(
+            OsActionExecutor::supports_action_type(action_type),
+            "unsupported builtin action: {:?}",
+            action_type
+        );
+    }
+}
+
+#[test]
+fn executor_does_not_support_other_action_type() {
+    assert!(!OsActionExecutor::supports_action_type(&ActionType::Other(
+        "custom_action".to_string()
+    )));
+}
+
 #[tokio::test]
 async fn app_uninstall_apply_deletes_target_paths() {
     let dir = tempfile::tempdir().unwrap();
