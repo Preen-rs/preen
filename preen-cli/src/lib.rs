@@ -7700,7 +7700,8 @@ fn verify_plugin(
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
     let language = cli_language();
-    let report = plugin_test_report(pack_id, lockfile, verifier)?;
+    let report = plugin_test_report(pack_id, lockfile, verifier)
+        .map(plugin_report_detail_code_for_verify_command)?;
     if json {
         println!(
             "{}",
@@ -7718,9 +7719,7 @@ fn verify_plugin(
         let detail_code = report
             .detail_code
             .clone()
-            .or_else(|| {
-                plugin_primary_detail_code_from_drifts(&report.drifts).map(ToOwned::to_owned)
-            })
+            .or_else(|| verify_detail_code_from_drifts(&report.drifts))
             .unwrap_or_else(|| "verify_failed".to_string());
         return Err(err_code(
             failure_kind,
@@ -7729,6 +7728,25 @@ fn verify_plugin(
         ));
     }
     Ok(())
+}
+
+fn plugin_report_detail_code_for_verify_command(mut report: PluginTestOutput) -> PluginTestOutput {
+    report.detail_code = report
+        .detail_code
+        .as_deref()
+        .map(normalize_verify_detail_code);
+    report
+}
+
+fn normalize_verify_detail_code(detail_code: &str) -> String {
+    detail_code
+        .strip_prefix("test_")
+        .map(|suffix| format!("verify_{suffix}"))
+        .unwrap_or_else(|| detail_code.to_string())
+}
+
+fn verify_detail_code_from_drifts(drifts: &[PluginTestDrift]) -> Option<String> {
+    plugin_primary_detail_code_from_drifts(drifts).map(normalize_verify_detail_code)
 }
 
 fn test_plugin(

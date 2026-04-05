@@ -5608,6 +5608,52 @@ fn install_verify_remove_lifecycle_with_temp_user_state_dirs() {
 }
 
 #[test]
+fn verify_command_uses_verify_prefixed_detail_code_on_signature_failure() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{rev}", repo.to_string_lossy());
+        let lockfile = tmp.path().join("plugins.lock");
+
+        let install = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "install",
+            &spec,
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(install, &AlwaysOkVerifier).unwrap();
+
+        let verify = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "verify",
+            "test.pack",
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+            "--json",
+        ])
+        .unwrap();
+        let err = run_typed_with_verifier_for_test(verify.clone(), &AlwaysFailVerifier).unwrap_err();
+        assert_eq!(err.kind, CliErrorKind::Verification);
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("verify_signature_or_trust_failed")
+        );
+
+        let parsed: Value = serde_json::from_str(&verify.format_error(&err)).unwrap();
+        assert_eq!(
+            parsed["data"]["detail_code"].as_str(),
+            Some("verify_signature_or_trust_failed")
+        );
+    });
+}
+
+#[test]
 fn install_local_git_old_tag_sets_resolved_rev_in_lockfile() {
     let _guard = ENV_LOCK.lock().unwrap();
     with_temp_user_env(|| {
