@@ -93,6 +93,30 @@ fn static_detail_codes_from_source_for_test() -> BTreeSet<String> {
     codes
 }
 
+fn json_kinds_from_source_for_test() -> BTreeSet<String> {
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("lib.rs");
+    let source = fs::read_to_string(source_path).unwrap();
+    let mut kinds = BTreeSet::new();
+    let mut cursor = 0;
+    while let Some(rel) = source[cursor..].find("to_json_envelope(") {
+        let start = cursor + rel + "to_json_envelope(".len();
+        let segment = &source[start..];
+        let first_arg = segment.trim_start();
+        if let Some(without_opening_quote) = first_arg.strip_prefix('"')
+            && let Some(end_quote_rel) = without_opening_quote.find('"')
+        {
+            let kind = &without_opening_quote[..end_quote_rel];
+            if !kind.is_empty() {
+                kinds.insert(kind.to_string());
+            }
+        }
+        cursor = start;
+    }
+    kinds
+}
+
 struct AlwaysOkVerifier;
 
 impl SignatureVerifier for AlwaysOkVerifier {
@@ -238,8 +262,24 @@ fn with_temp_user_env<T>(f: impl FnOnce() -> T) -> T {
             vec![
                 ("HOME", home.into_os_string()),
                 ("XDG_CONFIG_HOME", xdg.into_os_string()),
+                (
+                    "PREEN_TRUST_ALLOWLIST",
+                    OsString::from(
+                        "https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0,https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main",
+                    ),
+                ),
             ]
         },
+        f,
+    )
+}
+
+fn with_invalid_trust_allowlist<T>(f: impl FnOnce() -> T) -> T {
+    with_env_state_overrides(
+        &[(
+            "PREEN_TRUST_ALLOWLIST",
+            Some(OsString::from("not-an-identity")),
+        )],
         f,
     )
 }
@@ -534,7 +574,11 @@ latest_version = "{latest_version}"
 }
 
 fn write_registry_signature(sig: &Path) {
-    fs::write(sig, "sig").unwrap();
+    fs::write(
+        sig,
+        r#"{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","verificationMaterial":{"certificate":{"rawBytes":"ZmFrZS1jZXJ0"}},"messageSignature":{"messageDigest":{"algorithm":"SHA2_256","digest":"ZmFrZS1kaWdlc3Q="},"signature":"ZmFrZS1zaWduYXR1cmU="}}"#,
+    )
+    .unwrap();
 }
 
 fn write_homebrew_registry_index(index: &Path, generated_at: &str) {
@@ -547,7 +591,7 @@ fn write_homebrew_registry_index(index: &Path, generated_at: &str) {
             description: "Cleanup pack",
             repo_url: "https://github.com/Preen-rs/preen-rulepack-homebrew",
             latest_version: "1.2.0",
-            rev: "abc123",
+            rev: "381d2c7b496b0efce4ef8be8f89a74b0ba40c647",
         },
     );
 }
@@ -762,6 +806,29 @@ fn parse_json_value(json: &str) -> Value {
 fn assert_json_envelope_kind(output: &Value, kind: &str) {
     assert_eq!(output["schema_version"].as_u64(), Some(1));
     assert_eq!(output["kind"].as_str(), Some(kind));
+}
+
+fn object_keys(value: &Value) -> BTreeSet<String> {
+    value
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+}
+
+fn assert_object_keys_exact(name: &str, value: &Value, expected: &[&str]) {
+    let actual = object_keys(value);
+    let expected = expected
+        .iter()
+        .map(|field| (*field).to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected, "{name} key set changed");
+}
+
+fn assert_data_keys_exact(output: &Value, kind: &str, expected: &[&str]) {
+    assert_json_envelope_kind(output, kind);
+    assert_object_keys_exact(kind, &output["data"], expected);
 }
 
 fn assert_empty_aggregate_results(output: &Value) {
@@ -1042,11 +1109,11 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 "#;
     let (url, rev) = resolve_registry_for_test(index, "preen-rs.homebrew", "1.2.0").unwrap();
     assert_eq!(url, "https://github.com/Preen-rs/preen-rulepack-homebrew");
-    assert_eq!(rev, "abc123");
+    assert_eq!(rev, "381d2c7b496b0efce4ef8be8f89a74b0ba40c647");
 }
 
 #[test]
@@ -1062,7 +1129,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 
 [[entries]]
 pack_id = "preen-rs.npm"
@@ -1072,7 +1139,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-npm"
 latest_version = "0.3.0"
   [[entries.versions]]
   version = "0.3.0"
-  rev = "def456"
+  rev = "b2a4a429f1ef8bf7662274b6dc2621f2a03a369f"
 "#;
     let all_rows = search_registry_for_test(index, None).unwrap();
     assert_eq!(all_rows.len(), 2);
@@ -1094,7 +1161,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-b"
 latest_version = "1.0.0"
   [[entries.versions]]
   version = "1.0.0"
-  rev = "bbb"
+  rev = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 [[entries]]
 pack_id = "preen-rs.a"
@@ -1104,7 +1171,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-a"
 latest_version = "2.0.0"
   [[entries.versions]]
   version = "2.0.0"
-  rev = "aaa"
+  rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 "#;
     let rows =
         search_registry_with_options_for_test(index, None, "pack_id", false, 0, None).unwrap();
@@ -1129,7 +1196,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 "#;
     let json = search_registry_json_for_test(index, Some("brew")).unwrap();
     let parsed: Value = serde_json::from_str(&json).unwrap();
@@ -1181,8 +1248,8 @@ fn plugin_info_json_for_test_contains_fields() {
         pack_id: "test.pack".to_string(),
         source: "git".to_string(),
         url: "https://github.com/Preen-rs/test".to_string(),
-        rev: "abc123".to_string(),
-        resolved_rev: Some("abc123".to_string()),
+        rev: "381d2c7b496b0efce4ef8be8f89a74b0ba40c647".to_string(),
+        resolved_rev: Some("381d2c7b496b0efce4ef8be8f89a74b0ba40c647".to_string()),
         version: "0.1.0".to_string(),
         manifest_hash: "sha256:deadbeef".to_string(),
         signature: "sha256:cafebabe".to_string(),
@@ -1205,8 +1272,8 @@ fn plugin_list_json_for_test_contains_fields() {
         pack_id: "test.pack".to_string(),
         source: "git".to_string(),
         url: "https://github.com/Preen-rs/test".to_string(),
-        rev: "abc123".to_string(),
-        resolved_rev: Some("abc123".to_string()),
+        rev: "381d2c7b496b0efce4ef8be8f89a74b0ba40c647".to_string(),
+        resolved_rev: Some("381d2c7b496b0efce4ef8be8f89a74b0ba40c647".to_string()),
         version: "0.1.0".to_string(),
         manifest_hash: "sha256:deadbeef".to_string(),
         signature: "sha256:cafebabe".to_string(),
@@ -1228,8 +1295,8 @@ fn list_plugins_with_options_for_test_filters_and_sorts() {
             pack_id: "preen-rs.b".to_string(),
             source: "git".to_string(),
             url: "https://example.com/b".to_string(),
-            rev: "bbb".to_string(),
-            resolved_rev: Some("bbb".to_string()),
+            rev: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            resolved_rev: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
             version: "1.0.0".to_string(),
             manifest_hash: "sha256:b".to_string(),
             signature: "sha256:b".to_string(),
@@ -1239,8 +1306,8 @@ fn list_plugins_with_options_for_test_filters_and_sorts() {
             pack_id: "preen-rs.a".to_string(),
             source: "registry".to_string(),
             url: "https://example.com/a".to_string(),
-            rev: "aaa".to_string(),
-            resolved_rev: Some("aaa".to_string()),
+            rev: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            resolved_rev: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
             version: "2.0.0".to_string(),
             manifest_hash: "sha256:a".to_string(),
             signature: "sha256:a".to_string(),
@@ -1248,8 +1315,14 @@ fn list_plugins_with_options_for_test_filters_and_sorts() {
         },
     ];
     let rows = list_plugins_with_options_for_test(&plugins, None, None, "pack_id", false).unwrap();
-    assert_eq!(rows[0], "preen-rs.a 2.0.0 aaa");
-    assert_eq!(rows[1], "preen-rs.b 1.0.0 bbb");
+    assert_eq!(
+        rows[0],
+        "preen-rs.a 2.0.0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(
+        rows[1],
+        "preen-rs.b 1.0.0 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
 
     let rows = list_plugins_with_options_for_test(
         &plugins,
@@ -1259,7 +1332,10 @@ fn list_plugins_with_options_for_test_filters_and_sorts() {
         true,
     )
     .unwrap();
-    assert_eq!(rows, vec!["preen-rs.a 2.0.0 aaa".to_string()]);
+    assert_eq!(
+        rows,
+        vec!["preen-rs.a 2.0.0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]
+    );
 }
 
 #[test]
@@ -1586,7 +1662,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 "#,
         Some("brew"),
     )
@@ -1606,6 +1682,442 @@ latest_version = "1.2.0"
             "description".to_string(),
         ])
     );
+
+    let plugin = LockedPlugin {
+        pack_id: "test.pack".to_string(),
+        source: "git".to_string(),
+        url: "https://github.com/Preen-rs/test".to_string(),
+        rev: "381d2c7b496b0efce4ef8be8f89a74b0ba40c647".to_string(),
+        resolved_rev: Some("381d2c7b496b0efce4ef8be8f89a74b0ba40c647".to_string()),
+        version: "0.1.0".to_string(),
+        manifest_hash: "sha256:deadbeef".to_string(),
+        signature: "sha256:cafebabe".to_string(),
+        trusted_identity: "https://github.com/Preen-rs/test".to_string(),
+    };
+    let info = plugin_info_json_for_test(&plugin).unwrap();
+    let info_v: Value = serde_json::from_str(&info).unwrap();
+    assert_object_keys_exact(
+        "plugin.info.data",
+        &info_v["data"],
+        &[
+            "pack_id",
+            "version",
+            "rev",
+            "resolved_rev",
+            "source",
+            "url",
+            "installed_path",
+            "installed_path_exists",
+            "manifest_hash",
+            "signature",
+            "trusted_identity",
+        ],
+    );
+
+    let list = plugin_list_json_for_test(&[plugin]).unwrap();
+    let list_v: Value = serde_json::from_str(&list).unwrap();
+    assert_json_envelope_kind(&list_v, "plugin.list");
+    assert_object_keys_exact(
+        "plugin.list.item",
+        &list_v["data"][0],
+        &["pack_id", "version", "rev", "resolved_rev", "source"],
+    );
+
+    let remove = plugin_remove_json_for_test("a.pack", true).unwrap();
+    let remove_v: Value = serde_json::from_str(&remove).unwrap();
+    assert_object_keys_exact(
+        "plugin.remove.data",
+        &remove_v["data"],
+        &["pack_id", "removed"],
+    );
+
+    let error_plugin = error_json_for_test(
+        "__preen_kind:validation__preen_code:preflight_spec_invalid__missing @<tag|commit> in install spec",
+    )
+    .unwrap();
+    let error_plugin_v: Value = serde_json::from_str(&error_plugin).unwrap();
+    assert_object_keys_exact(
+        "error(plugin).data",
+        &error_plugin_v["data"],
+        &[
+            "error_kind",
+            "detail_code",
+            "hint_code",
+            "hint_action",
+            "hint_message",
+            "message",
+        ],
+    );
+
+    let error_system = error_json_for_test(
+        "__preen_kind:unsupported__preen_code:command_not_implemented__remove command is not implemented yet",
+    )
+    .unwrap();
+    let error_system_v: Value = serde_json::from_str(&error_system).unwrap();
+    assert_object_keys_exact(
+        "error(system).data",
+        &error_system_v["data"],
+        &["error_kind", "detail_code", "message"],
+    );
+}
+
+#[test]
+fn system_json_envelopes_have_exact_expected_data_keys() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let clean = with_clean_path_override(|| clean_output_for_test(true, false, None).unwrap());
+    assert_data_keys_exact(
+        &clean,
+        "system.clean",
+        &[
+            "mode",
+            "strategy",
+            "scanned_items",
+            "target_count",
+            "estimated_freed_bytes",
+            "preview_paths",
+            "affected_items",
+            "freed_bytes",
+            "whitelist_entries",
+            "whitelist_hits",
+            "risk_summary",
+            "warnings",
+            "audit_events",
+        ],
+    );
+    assert_object_keys_exact(
+        "system.clean.risk_summary",
+        &clean["data"]["risk_summary"],
+        &["high_targets", "requires_confirmation"],
+    );
+
+    let clean_whitelist = with_temp_user_env(|| clean_whitelist_output_for_test().unwrap());
+    assert_data_keys_exact(
+        &clean_whitelist,
+        "system.clean.whitelist",
+        &["path", "entries", "created", "defaults_written"],
+    );
+
+    let purge = with_purge_path_override(|| purge_output_for_test(true, false).unwrap());
+    assert_data_keys_exact(
+        &purge,
+        "system.purge",
+        &[
+            "mode",
+            "scanned_roots",
+            "scanned_dirs",
+            "min_age_days",
+            "skipped_recent",
+            "target_count",
+            "estimated_freed_bytes",
+            "preview_paths",
+            "affected_items",
+            "freed_bytes",
+            "warnings",
+            "audit_events",
+        ],
+    );
+
+    let purge_paths = with_purge_path_override(|| purge_paths_json_for_test().unwrap());
+    assert_data_keys_exact(&purge_paths, "system.purge.paths", &["roots"]);
+
+    let installer =
+        with_installer_path_override(|| installer_output_for_test(true, false).unwrap());
+    assert_data_keys_exact(
+        &installer,
+        "system.installer",
+        &[
+            "mode",
+            "scanned_roots",
+            "scanned_files",
+            "scan_depth",
+            "target_count",
+            "estimated_freed_bytes",
+            "preview_paths",
+            "affected_items",
+            "freed_bytes",
+            "warnings",
+            "audit_events",
+        ],
+    );
+
+    let installer_paths = with_installer_path_override(|| installer_paths_json_for_test().unwrap());
+    assert_data_keys_exact(&installer_paths, "system.installer.paths", &["roots"]);
+
+    let uninstall = with_uninstall_path_override(|| {
+        uninstall_output_for_test(Some("DemoApp.app"), true, false).unwrap()
+    });
+    assert_data_keys_exact(
+        &uninstall,
+        "system.uninstall",
+        &[
+            "mode",
+            "target",
+            "scanned_roots",
+            "scanned_entries",
+            "scan_depth",
+            "target_count",
+            "estimated_freed_bytes",
+            "preview_paths",
+            "affected_items",
+            "freed_bytes",
+            "warnings",
+            "audit_events",
+        ],
+    );
+
+    let uninstall_paths = with_uninstall_path_override(|| uninstall_paths_json_for_test().unwrap());
+    assert_data_keys_exact(&uninstall_paths, "system.uninstall.paths", &["roots"]);
+
+    let optimize = optimize_output_for_test(true, false).unwrap();
+    assert_data_keys_exact(
+        &optimize,
+        "system.optimize",
+        &[
+            "mode",
+            "os",
+            "task_count",
+            "executed_tasks",
+            "affected_items",
+            "post_check_run",
+            "post_check_overall_passed",
+            "post_check_suggested_actions",
+            "warnings",
+            "audit_events",
+        ],
+    );
+
+    let optimize_whitelist = with_temp_user_env(|| optimize_whitelist_output_for_test().unwrap());
+    assert_data_keys_exact(
+        &optimize_whitelist,
+        "system.optimize.whitelist",
+        &[
+            "path",
+            "entries",
+            "created",
+            "defaults_written",
+            "available_tasks",
+        ],
+    );
+
+    with_temp_user_env(|| {
+        let check = check_output_for_test(false).unwrap();
+        assert_data_keys_exact(
+            &check,
+            "system.check",
+            &[
+                "mode",
+                "overall_passed",
+                "checks",
+                "fixes_applied",
+                "suggested_actions",
+                "warnings",
+            ],
+        );
+
+        let status = status_output_for_test().unwrap();
+        assert_data_keys_exact(
+            &status,
+            "system.status",
+            &[
+                "mode",
+                "os",
+                "arch",
+                "health_score",
+                "state_dir",
+                "plugin_count",
+                "registry_index_present",
+                "registry_generated_at",
+                "registry_age_days",
+                "metrics",
+                "overall_passed",
+                "checks",
+                "suggested_actions",
+                "warnings",
+            ],
+        );
+        assert_object_keys_exact(
+            "system.status.metrics",
+            &status["data"]["metrics"],
+            &[
+                "cpu_cores",
+                "load_avg_1m_milli",
+                "load_avg_5m_milli",
+                "load_avg_15m_milli",
+                "uptime_seconds",
+                "memory_total_bytes",
+                "memory_used_bytes",
+                "memory_used_pct",
+                "disk_total_bytes",
+                "disk_available_bytes",
+                "disk_free_pct",
+                "process_count",
+                "network_rx_bytes",
+                "network_tx_bytes",
+            ],
+        );
+
+        let touchid = touchid_output_for_test(Some("status"), true).unwrap();
+        assert_data_keys_exact(
+            &touchid,
+            "system.touchid",
+            &[
+                "mode",
+                "action",
+                "supported_os",
+                "configured",
+                "would_change",
+                "applied",
+                "warnings",
+            ],
+        );
+
+        let completion = with_shell_env(Some("/bin/zsh"), || {
+            completion_output_for_test(None, true).unwrap()
+        });
+        assert_data_keys_exact(
+            &completion,
+            "system.completion",
+            &[
+                "mode",
+                "shell",
+                "generated",
+                "installed",
+                "changed",
+                "config_path",
+                "snippet",
+                "warnings",
+            ],
+        );
+
+        let update = with_update_release_env(|| update_output_for_test(false, false).unwrap());
+        assert_data_keys_exact(
+            &update,
+            "system.update",
+            &[
+                "mode",
+                "channel",
+                "force",
+                "current_version",
+                "latest_version",
+                "update_available",
+                "install_source",
+                "suggested_command",
+                "executed",
+                "checks",
+                "warnings",
+            ],
+        );
+
+        let remove = with_remove_targets_env(|| remove_output_for_test(true, false).unwrap());
+        assert_data_keys_exact(
+            &remove,
+            "system.remove",
+            &[
+                "mode",
+                "executable",
+                "detected_paths",
+                "removed_paths",
+                "skipped_paths",
+                "checks",
+                "manual_steps",
+                "warnings",
+            ],
+        );
+    });
+
+    let analyze = with_analyze_root_fixture(|analyze_root| {
+        analyze_output_for_test(Some(analyze_root)).unwrap()
+    });
+    assert_data_keys_exact(
+        &analyze,
+        "system.analyze",
+        &[
+            "root",
+            "path",
+            "max_depth",
+            "top_entries_limit",
+            "scanned_entries",
+            "total_files",
+            "total_dirs",
+            "total_size_bytes",
+            "total_size",
+            "truncated_dirs",
+            "entries",
+            "top_entries",
+            "warnings",
+        ],
+    );
+
+    let status_watch = with_temp_user_env(|| status_watch_output_for_test(2).unwrap());
+    assert_data_keys_exact(
+        &status_watch,
+        "system.status.watch",
+        &["mode", "interval_sec", "ticks", "frames"],
+    );
+    assert_object_keys_exact(
+        "system.status.watch.frame",
+        &status_watch["data"]["frames"][0],
+        &[
+            "mode",
+            "os",
+            "arch",
+            "health_score",
+            "state_dir",
+            "plugin_count",
+            "registry_index_present",
+            "registry_generated_at",
+            "registry_age_days",
+            "metrics",
+            "overall_passed",
+            "checks",
+            "suggested_actions",
+            "warnings",
+        ],
+    );
+}
+
+#[test]
+fn json_kind_contract_is_frozen() {
+    let actual = json_kinds_from_source_for_test();
+    let expected: BTreeSet<String> = [
+        "error",
+        "plugin.info",
+        "plugin.install",
+        "plugin.list",
+        "plugin.preflight",
+        "plugin.preflight_all",
+        "plugin.registry_update",
+        "plugin.remove",
+        "plugin.search",
+        "plugin.test",
+        "plugin.test_all",
+        "plugin.test_spec",
+        "plugin.update",
+        "plugin.verify",
+        "system.analyze",
+        "system.check",
+        "system.clean",
+        "system.clean.whitelist",
+        "system.completion",
+        "system.installer",
+        "system.installer.paths",
+        "system.optimize",
+        "system.optimize.whitelist",
+        "system.purge",
+        "system.purge.paths",
+        "system.remove",
+        "system.status",
+        "system.status.watch",
+        "system.touchid",
+        "system.uninstall",
+        "system.uninstall.paths",
+        "system.update",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect();
+    assert_eq!(actual, expected, "json kind taxonomy changed");
 }
 
 #[test]
@@ -1783,6 +2295,8 @@ fn static_detail_code_contract_is_frozen() {
         "remove_path_scope_violation",
         "status_state_dir_unavailable",
         "test_all_failed",
+        "trust_policy_invalid",
+        "trust_policy_missing",
         "update_execute_capture_write_failed",
         "update_execute_failed",
         "update_execute_mock_invalid",
@@ -3267,18 +3781,20 @@ fn touchid_enable_apply_writes_pam_tid_line_when_supported() {
     with_temp_user_env(|| {
         let temp = tempfile::tempdir().unwrap();
         let pam = temp.path().join("sudo");
+        let pam_local = temp.path().join("sudo_local");
         fs::write(&pam, "# sudo config\n").unwrap();
         // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
         unsafe {
             std::env::set_var("PREEN_TOUCHID_FORCE_SUPPORTED", "1");
             std::env::set_var("PREEN_TOUCHID_SUDO_FILE", &pam);
-            std::env::remove_var("PREEN_TOUCHID_SUDO_LOCAL_FILE");
+            std::env::set_var("PREEN_TOUCHID_SUDO_LOCAL_FILE", &pam_local);
         }
         let output = touchid_output_for_test(Some("enable"), false).unwrap();
         // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
         unsafe {
             std::env::remove_var("PREEN_TOUCHID_FORCE_SUPPORTED");
             std::env::remove_var("PREEN_TOUCHID_SUDO_FILE");
+            std::env::remove_var("PREEN_TOUCHID_SUDO_LOCAL_FILE");
         }
         assert_eq!(output["data"]["applied"].as_bool(), Some(true));
         assert_eq!(output["data"]["configured"].as_bool(), Some(true));
@@ -3293,6 +3809,7 @@ fn touchid_disable_apply_removes_pam_tid_line_when_supported() {
     with_temp_user_env(|| {
         let temp = tempfile::tempdir().unwrap();
         let pam = temp.path().join("sudo");
+        let pam_local = temp.path().join("sudo_local");
         fs::write(
             &pam,
             "# sudo config\nauth       sufficient     pam_tid.so\nauth       include        sudo_local\n",
@@ -3302,13 +3819,14 @@ fn touchid_disable_apply_removes_pam_tid_line_when_supported() {
         unsafe {
             std::env::set_var("PREEN_TOUCHID_FORCE_SUPPORTED", "1");
             std::env::set_var("PREEN_TOUCHID_SUDO_FILE", &pam);
-            std::env::remove_var("PREEN_TOUCHID_SUDO_LOCAL_FILE");
+            std::env::set_var("PREEN_TOUCHID_SUDO_LOCAL_FILE", &pam_local);
         }
         let output = touchid_output_for_test(Some("disable"), false).unwrap();
         // SAFETY: test holds ENV_LOCK to avoid concurrent env mutation.
         unsafe {
             std::env::remove_var("PREEN_TOUCHID_FORCE_SUPPORTED");
             std::env::remove_var("PREEN_TOUCHID_SUDO_FILE");
+            std::env::remove_var("PREEN_TOUCHID_SUDO_LOCAL_FILE");
         }
         assert_eq!(output["data"]["applied"].as_bool(), Some(true));
         assert_eq!(output["data"]["configured"].as_bool(), Some(false));
@@ -5424,32 +5942,35 @@ fn run_typed_install_local_git_verification_failure_has_install_detail_code() {
 
 #[test]
 fn install_plugin_in_dir_local_git_old_tag_resolves_to_tag_commit() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo_with_old_tag(&repo);
-    let expected_commit = git_rev_parse(&repo, &rev);
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo_with_old_tag(&repo);
+        let expected_commit = git_rev_parse(&repo, &rev);
 
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let install_dir = tmp.path().join("installed-plugins");
-    let spec = format!("file://{}@{}", repo.display(), rev);
+        let lockfile = tmp.path().join("preen-plugins.lock");
+        let install_dir = tmp.path().join("installed-plugins");
+        let spec = format!("file://{}@{}", repo.display(), rev);
 
-    let locked =
-        install_plugin_in_dir_for_test(&spec, Some(&lockfile), &install_dir, &AlwaysOkVerifier)
-            .unwrap();
-    assert_eq!(
-        locked.resolved_rev.as_deref(),
-        Some(expected_commit.as_str())
-    );
+        let locked =
+            install_plugin_in_dir_for_test(&spec, Some(&lockfile), &install_dir, &AlwaysOkVerifier)
+                .unwrap();
+        assert_eq!(
+            locked.resolved_rev.as_deref(),
+            Some(expected_commit.as_str())
+        );
 
-    let checked_out = git_rev_parse(&install_dir.join("test.pack"), "HEAD");
-    assert_eq!(checked_out, expected_commit);
+        let checked_out = git_rev_parse(&install_dir.join("test.pack"), "HEAD");
+        assert_eq!(checked_out, expected_commit);
 
-    let lock = load_lockfile_at(&lockfile).unwrap();
-    assert_eq!(lock.plugins.len(), 1);
-    assert_eq!(
-        lock.plugins[0].resolved_rev.as_deref(),
-        Some(expected_commit.as_str())
-    );
+        let lock = load_lockfile_at(&lockfile).unwrap();
+        assert_eq!(lock.plugins.len(), 1);
+        assert_eq!(
+            lock.plugins[0].resolved_rev.as_deref(),
+            Some(expected_commit.as_str())
+        );
+    });
 }
 
 #[test]
@@ -6205,7 +6726,7 @@ fn run_typed_registry_update_rejects_invalid_identity() {
         err.detail_code.as_deref(),
         Some("registry_identity_invalid")
     );
-    assert!(err.message.contains("registry identity must start with"));
+    assert!(err.message.contains("registry identity must equal"));
 }
 
 #[test]
@@ -7082,6 +7603,33 @@ fn run_typed_registry_update_local_source_verification_failure() {
 }
 
 #[test]
+fn run_typed_registry_update_local_source_invalid_bundle_contract_has_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let index = tmp.path().join("registry-index.toml");
+    let sig = tmp.path().join("registry-index.toml.sig");
+    let cache = tmp.path().join("cache-index.toml");
+
+    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+    write_homebrew_registry_index(&index, &now);
+    fs::write(&sig, "not-json").unwrap();
+
+    apply_registry_freshness_env(&cache, "warn", None);
+
+    let cli = make_registry_update_cli(&index, &sig);
+    let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysOkVerifier).unwrap_err();
+    assert_eq!(err.kind, CliErrorKind::Verification);
+    assert_eq!(
+        err.detail_code.as_deref(),
+        Some("registry_signature_verify_failed")
+    );
+    assert!(err.message.contains("invalid sigstore bundle json"));
+    let text = cli.format_error(&err);
+    assert!(text.contains("hint_code=trust_or_signature_failed"));
+    assert!(!cache.exists());
+}
+
+#[test]
 fn run_typed_registry_update_local_source_index_parse_failure_has_detail_code() {
     let _guard = ENV_LOCK.lock().unwrap();
     let tmp = tempfile::tempdir().unwrap();
@@ -7281,13 +7829,16 @@ fn run_typed_registry_update_strict_overrides_warn_mode() {
 
 #[test]
 fn run_typed_preflight_local_git_success_with_injected_verifier() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-    let spec = format!("file://{}@{}", repo.display(), rev);
-    let cli = Cli::try_parse_from(["preen", "plugin", "preflight", &spec]).unwrap();
-    let result = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier);
-    assert!(result.is_ok());
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{}", repo.display(), rev);
+        let cli = Cli::try_parse_from(["preen", "plugin", "preflight", &spec]).unwrap();
+        let result = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier);
+        assert!(result.is_ok());
+    });
 }
 
 #[test]
@@ -7320,39 +7871,45 @@ fn run_typed_preflight_local_git_rejects_unsupported_action_type() {
 
 #[test]
 fn run_typed_preflight_local_git_verification_failure() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-    let spec = format!("file://{}@{}", repo.display(), rev);
-    let cli = Cli::try_parse_from(["preen", "plugin", "preflight", &spec, "--json"]).unwrap();
-    let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysFailVerifier).unwrap_err();
-    assert_eq!(err.kind, CliErrorKind::Verification);
-    assert_eq!(
-        err.detail_code.as_deref(),
-        Some("preflight_signature_or_trust_failed")
-    );
-    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
-    assert_eq!(parsed["kind"].as_str(), Some("error"));
-    assert_eq!(parsed["data"]["error_kind"].as_str(), Some("verification"));
-    assert_eq!(
-        parsed["data"]["detail_code"].as_str(),
-        Some("preflight_signature_or_trust_failed")
-    );
-    assert_eq!(
-        parsed["data"]["hint_code"].as_str(),
-        Some("trust_or_signature_failed")
-    );
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{}", repo.display(), rev);
+        let cli = Cli::try_parse_from(["preen", "plugin", "preflight", &spec, "--json"]).unwrap();
+        let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysFailVerifier).unwrap_err();
+        assert_eq!(err.kind, CliErrorKind::Verification);
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("preflight_signature_or_trust_failed")
+        );
+        let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+        assert_eq!(parsed["kind"].as_str(), Some("error"));
+        assert_eq!(parsed["data"]["error_kind"].as_str(), Some("verification"));
+        assert_eq!(
+            parsed["data"]["detail_code"].as_str(),
+            Some("preflight_signature_or_trust_failed")
+        );
+        assert_eq!(
+            parsed["data"]["hint_code"].as_str(),
+            Some("trust_or_signature_failed")
+        );
+    });
 }
 
 #[test]
 fn run_typed_preflight_local_git_old_tag_success_with_injected_verifier() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo_with_old_tag(&repo);
-    let spec = format!("file://{}@{}", repo.display(), rev);
-    let cli = Cli::try_parse_from(["preen", "plugin", "preflight", &spec]).unwrap();
-    let result = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier);
-    assert!(result.is_ok());
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo_with_old_tag(&repo);
+        let spec = format!("file://{}@{}", repo.display(), rev);
+        let cli = Cli::try_parse_from(["preen", "plugin", "preflight", &spec]).unwrap();
+        let result = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier);
+        assert!(result.is_ok());
+    });
 }
 
 #[test]
@@ -7443,107 +8000,67 @@ fn run_typed_preflight_all_returns_verification_error_when_any_item_fails() {
 
 #[test]
 fn preflight_all_json_includes_clone_failure_detail_code() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let lock = PluginLockfile {
-        schema_version: PluginLockfile::SCHEMA_V1,
-        plugins: vec![
-            LockedPlugin {
-                pack_id: "ok.pack".to_string(),
-                source: "git".to_string(),
-                url: format!("file://{}", repo.display()),
-                rev,
-                resolved_rev: None,
-                version: "0.1.0".to_string(),
-                manifest_hash: "sha256:deadbeef".to_string(),
-                signature: "sha256:cafebabe".to_string(),
-                trusted_identity:
-                    "https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0"
-                        .to_string(),
-            },
-            LockedPlugin {
-                pack_id: "bad.pack".to_string(),
-                source: "git".to_string(),
-                url: "file:///definitely/missing/repo".to_string(),
-                rev: "deadbeef".to_string(),
-                resolved_rev: None,
-                version: "0.1.0".to_string(),
-                manifest_hash: "sha256:deadbeef".to_string(),
-                signature: "sha256:cafebabe".to_string(),
-                trusted_identity: "https://github.com/Preen-rs/test".to_string(),
-            },
-        ],
-    };
-    save_lockfile_at(&lockfile, &lock).unwrap();
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let lockfile = tmp.path().join("preen-plugins.lock");
+        let lock = PluginLockfile {
+            schema_version: PluginLockfile::SCHEMA_V1,
+            plugins: vec![
+                LockedPlugin {
+                    pack_id: "ok.pack".to_string(),
+                    source: "git".to_string(),
+                    url: format!("file://{}", repo.display()),
+                    rev,
+                    resolved_rev: None,
+                    version: "0.1.0".to_string(),
+                    manifest_hash: "sha256:deadbeef".to_string(),
+                    signature: "sha256:cafebabe".to_string(),
+                    trusted_identity: "https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0".to_string(),
+                },
+                LockedPlugin {
+                    pack_id: "bad.pack".to_string(),
+                    source: "git".to_string(),
+                    url: "file:///definitely/missing/repo".to_string(),
+                    rev: "deadbeef".to_string(),
+                    resolved_rev: None,
+                    version: "0.1.0".to_string(),
+                    manifest_hash: "sha256:deadbeef".to_string(),
+                    signature: "sha256:cafebabe".to_string(),
+                    trusted_identity: "https://github.com/Preen-rs/test".to_string(),
+                },
+            ],
+        };
+        save_lockfile_at(&lockfile, &lock).unwrap();
 
-    let json =
-        plugin_preflight_all_for_test(Some(&lockfile), true, false, &AlwaysOkVerifier).unwrap();
-    let parsed: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.preflight_all");
-    assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
-    assert_eq!(parsed["data"]["failed"].as_u64(), Some(1));
-    let failures = parsed["data"]["failures"].as_array().unwrap();
-    assert_eq!(failures.len(), 1);
-    assert_eq!(
-        failures[0]["detail_code"].as_str(),
-        Some("preflight_source_clone_failed")
-    );
+        let json =
+            plugin_preflight_all_for_test(Some(&lockfile), true, false, &AlwaysOkVerifier).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.preflight_all");
+        assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
+        assert_eq!(parsed["data"]["failed"].as_u64(), Some(1));
+        let failures = parsed["data"]["failures"].as_array().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0]["detail_code"].as_str(),
+            Some("preflight_source_clone_failed")
+        );
+    });
 }
 
 #[test]
 fn preflight_all_json_includes_signature_or_trust_detail_code() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let lock = PluginLockfile {
-        schema_version: PluginLockfile::SCHEMA_V1,
-        plugins: vec![LockedPlugin {
-            pack_id: "ok.pack".to_string(),
-            source: "git".to_string(),
-            url: format!("file://{}", repo.display()),
-            rev,
-            resolved_rev: None,
-            version: "0.1.0".to_string(),
-            manifest_hash: "sha256:deadbeef".to_string(),
-            signature: "sha256:cafebabe".to_string(),
-            trusted_identity:
-                "https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0"
-                    .to_string(),
-        }],
-    };
-    save_lockfile_at(&lockfile, &lock).unwrap();
-
-    let json =
-        plugin_preflight_all_for_test(Some(&lockfile), true, false, &AlwaysFailVerifier).unwrap();
-    let parsed: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.preflight_all");
-    assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
-    assert_eq!(parsed["data"]["failed"].as_u64(), Some(1));
-    let failures = parsed["data"]["failures"].as_array().unwrap();
-    assert_eq!(failures.len(), 1);
-    assert_eq!(
-        failures[0]["detail_code"].as_str(),
-        Some("preflight_signature_or_trust_failed")
-    );
-    let (code, _, priority) =
-        hint_for_detail_code_for_test(failures[0]["detail_code"].as_str().unwrap());
-    assert_eq!(code, "trust_or_signature_failed");
-    assert_eq!(priority, 0);
-}
-
-#[test]
-fn preflight_all_text_failure_first_and_verbose_modes() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-    let lockfile = tmp.path().join("preen-plugins.lock");
-    let lock = PluginLockfile {
-        schema_version: PluginLockfile::SCHEMA_V1,
-        plugins: vec![
-            LockedPlugin {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let lockfile = tmp.path().join("preen-plugins.lock");
+        let lock = PluginLockfile {
+            schema_version: PluginLockfile::SCHEMA_V1,
+            plugins: vec![LockedPlugin {
                 pack_id: "ok.pack".to_string(),
                 source: "git".to_string(),
                 url: format!("file://{}", repo.display()),
@@ -7552,37 +8069,80 @@ fn preflight_all_text_failure_first_and_verbose_modes() {
                 version: "0.1.0".to_string(),
                 manifest_hash: "sha256:deadbeef".to_string(),
                 signature: "sha256:cafebabe".to_string(),
-                trusted_identity:
-                    "https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0"
-                        .to_string(),
-            },
-            LockedPlugin {
-                pack_id: "bad.pack".to_string(),
-                source: "git".to_string(),
-                url: "file:///definitely/missing/repo".to_string(),
-                rev: "deadbeef".to_string(),
-                resolved_rev: None,
-                version: "0.1.0".to_string(),
-                manifest_hash: "sha256:deadbeef".to_string(),
-                signature: "sha256:cafebabe".to_string(),
-                trusted_identity: "https://github.com/Preen-rs/test".to_string(),
-            },
-        ],
-    };
-    save_lockfile_at(&lockfile, &lock).unwrap();
+                trusted_identity: "https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0".to_string(),
+            }],
+        };
+        save_lockfile_at(&lockfile, &lock).unwrap();
 
-    let text =
-        plugin_preflight_all_for_test(Some(&lockfile), false, false, &AlwaysOkVerifier).unwrap();
-    assert!(text.contains("summary: kind=preflight_all"));
-    assert!(text.contains("failure: spec=file:///definitely/missing/repo@deadbeef"));
-    assert!(text.contains("passed_results_hidden: 1"));
-    assert!(!text.contains("summary: kind=preflight overall_passed=true"));
+        let json = plugin_preflight_all_for_test(Some(&lockfile), true, false, &AlwaysFailVerifier)
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["kind"].as_str().unwrap(), "plugin.preflight_all");
+        assert!(!parsed["data"]["overall_passed"].as_bool().unwrap());
+        assert_eq!(parsed["data"]["failed"].as_u64(), Some(1));
+        let failures = parsed["data"]["failures"].as_array().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0]["detail_code"].as_str(),
+            Some("preflight_signature_or_trust_failed")
+        );
+        let (code, _, priority) =
+            hint_for_detail_code_for_test(failures[0]["detail_code"].as_str().unwrap());
+        assert_eq!(code, "trust_or_signature_failed");
+        assert_eq!(priority, 0);
+    });
+}
 
-    let verbose_text =
-        plugin_preflight_all_for_test(Some(&lockfile), false, true, &AlwaysOkVerifier).unwrap();
-    assert!(verbose_text.contains("summary: kind=preflight_all"));
-    assert!(verbose_text.contains("summary: kind=preflight overall_passed=true"));
-    assert!(!verbose_text.contains("passed_results_hidden:"));
+#[test]
+fn preflight_all_text_failure_first_and_verbose_modes() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let lockfile = tmp.path().join("preen-plugins.lock");
+        let lock = PluginLockfile {
+            schema_version: PluginLockfile::SCHEMA_V1,
+            plugins: vec![
+                LockedPlugin {
+                    pack_id: "ok.pack".to_string(),
+                    source: "git".to_string(),
+                    url: format!("file://{}", repo.display()),
+                    rev,
+                    resolved_rev: None,
+                    version: "0.1.0".to_string(),
+                    manifest_hash: "sha256:deadbeef".to_string(),
+                    signature: "sha256:cafebabe".to_string(),
+                    trusted_identity: "https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0".to_string(),
+                },
+                LockedPlugin {
+                    pack_id: "bad.pack".to_string(),
+                    source: "git".to_string(),
+                    url: "file:///definitely/missing/repo".to_string(),
+                    rev: "deadbeef".to_string(),
+                    resolved_rev: None,
+                    version: "0.1.0".to_string(),
+                    manifest_hash: "sha256:deadbeef".to_string(),
+                    signature: "sha256:cafebabe".to_string(),
+                    trusted_identity: "https://github.com/Preen-rs/test".to_string(),
+                },
+            ],
+        };
+        save_lockfile_at(&lockfile, &lock).unwrap();
+
+        let text = plugin_preflight_all_for_test(Some(&lockfile), false, false, &AlwaysOkVerifier)
+            .unwrap();
+        assert!(text.contains("summary: kind=preflight_all"));
+        assert!(text.contains("failure: spec=file:///definitely/missing/repo@deadbeef"));
+        assert!(text.contains("passed_results_hidden: 1"));
+        assert!(!text.contains("summary: kind=preflight overall_passed=true"));
+
+        let verbose_text =
+            plugin_preflight_all_for_test(Some(&lockfile), false, true, &AlwaysOkVerifier).unwrap();
+        assert!(verbose_text.contains("summary: kind=preflight_all"));
+        assert!(verbose_text.contains("summary: kind=preflight overall_passed=true"));
+        assert!(!verbose_text.contains("passed_results_hidden:"));
+    });
 }
 
 #[test]
@@ -7682,39 +8242,226 @@ fn run_typed_test_all_returns_verification_error_when_any_item_fails() {
 
 #[test]
 fn run_typed_test_local_git_spec_success_with_injected_verifier() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-    let spec = format!("file://{}@{}", repo.display(), rev);
-    let cli = Cli::try_parse_from(["preen", "plugin", "test", &spec]).unwrap();
-    let result = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier);
-    assert!(result.is_ok());
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{}", repo.display(), rev);
+        let cli = Cli::try_parse_from(["preen", "plugin", "test", &spec]).unwrap();
+        let result = run_typed_with_verifier_for_test(cli, &AlwaysOkVerifier);
+        assert!(result.is_ok());
+    });
 }
 
 #[test]
 fn run_typed_test_local_git_spec_verification_failure_has_detail_code() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("plugin-repo");
-    let rev = init_preflight_git_repo(&repo);
-    let spec = format!("file://{}@{}", repo.display(), rev);
-    let cli = Cli::try_parse_from(["preen", "plugin", "test", &spec, "--json"]).unwrap();
-    let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysFailVerifier).unwrap_err();
-    assert_eq!(err.kind, CliErrorKind::Verification);
-    assert_eq!(
-        err.detail_code.as_deref(),
-        Some("preflight_signature_or_trust_failed")
-    );
-    let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
-    assert_eq!(parsed["kind"].as_str(), Some("error"));
-    assert_eq!(parsed["data"]["error_kind"].as_str(), Some("verification"));
-    assert_eq!(
-        parsed["data"]["detail_code"].as_str(),
-        Some("preflight_signature_or_trust_failed")
-    );
-    assert_eq!(
-        parsed["data"]["hint_code"].as_str(),
-        Some("trust_or_signature_failed")
-    );
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{}", repo.display(), rev);
+        let cli = Cli::try_parse_from(["preen", "plugin", "test", &spec, "--json"]).unwrap();
+        let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysFailVerifier).unwrap_err();
+        assert_eq!(err.kind, CliErrorKind::Verification);
+        assert_eq!(
+            err.detail_code.as_deref(),
+            Some("preflight_signature_or_trust_failed")
+        );
+        let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+        assert_eq!(parsed["kind"].as_str(), Some("error"));
+        assert_eq!(parsed["data"]["error_kind"].as_str(), Some("verification"));
+        assert_eq!(
+            parsed["data"]["detail_code"].as_str(),
+            Some("preflight_signature_or_trust_failed")
+        );
+        assert_eq!(
+            parsed["data"]["hint_code"].as_str(),
+            Some("trust_or_signature_failed")
+        );
+    });
+}
+
+#[test]
+fn run_typed_preflight_maps_invalid_trust_policy_to_prefixed_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        with_invalid_trust_allowlist(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let repo = tmp.path().join("plugin-repo");
+            let rev = init_preflight_git_repo(&repo);
+            let spec = format!("file://{}@{}", repo.display(), rev);
+            let cli =
+                Cli::try_parse_from(["preen", "plugin", "preflight", &spec, "--json"]).unwrap();
+
+            let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysOkVerifier).unwrap_err();
+            assert_eq!(err.kind, CliErrorKind::Validation);
+            assert_eq!(
+                err.detail_code.as_deref(),
+                Some("preflight_trust_policy_invalid")
+            );
+
+            let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+            assert_eq!(
+                parsed["data"]["detail_code"].as_str(),
+                Some("preflight_trust_policy_invalid")
+            );
+            assert_eq!(
+                parsed["data"]["hint_code"].as_str(),
+                Some("trust_policy_invalid")
+            );
+        });
+    });
+}
+
+#[test]
+fn run_typed_install_maps_invalid_trust_policy_to_prefixed_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        with_invalid_trust_allowlist(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let repo = tmp.path().join("plugin-repo");
+            let rev = init_preflight_git_repo(&repo);
+            let spec = format!("file://{}@{}", repo.display(), rev);
+            let lockfile = tmp.path().join("plugins.lock");
+            let cli = Cli::try_parse_from([
+                "preen",
+                "plugin",
+                "install",
+                &spec,
+                "--lockfile",
+                lockfile.to_str().unwrap(),
+                "--json",
+            ])
+            .unwrap();
+
+            let err = run_typed_with_verifier_for_test(cli.clone(), &AlwaysOkVerifier).unwrap_err();
+            assert_eq!(err.kind, CliErrorKind::Validation);
+            assert_eq!(
+                err.detail_code.as_deref(),
+                Some("install_trust_policy_invalid")
+            );
+
+            let parsed: Value = serde_json::from_str(&cli.format_error(&err)).unwrap();
+            assert_eq!(
+                parsed["data"]["detail_code"].as_str(),
+                Some("install_trust_policy_invalid")
+            );
+            assert_eq!(
+                parsed["data"]["hint_code"].as_str(),
+                Some("trust_policy_invalid")
+            );
+        });
+    });
+}
+
+#[test]
+fn run_typed_verify_maps_invalid_trust_policy_to_prefixed_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{}", repo.display(), rev);
+        let lockfile = tmp.path().join("plugins.lock");
+
+        let install = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "install",
+            &spec,
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(install, &AlwaysOkVerifier).unwrap();
+
+        with_invalid_trust_allowlist(|| {
+            let verify = Cli::try_parse_from([
+                "preen",
+                "plugin",
+                "verify",
+                "test.pack",
+                "--lockfile",
+                lockfile.to_str().unwrap(),
+                "--json",
+            ])
+            .unwrap();
+
+            let err =
+                run_typed_with_verifier_for_test(verify.clone(), &AlwaysOkVerifier).unwrap_err();
+            assert_eq!(err.kind, CliErrorKind::Validation);
+            assert_eq!(
+                err.detail_code.as_deref(),
+                Some("verify_trust_policy_invalid")
+            );
+
+            let parsed: Value = serde_json::from_str(&verify.format_error(&err)).unwrap();
+            assert_eq!(
+                parsed["data"]["detail_code"].as_str(),
+                Some("verify_trust_policy_invalid")
+            );
+            assert_eq!(
+                parsed["data"]["hint_code"].as_str(),
+                Some("trust_policy_invalid")
+            );
+        });
+    });
+}
+
+#[test]
+fn run_typed_test_maps_invalid_trust_policy_to_prefixed_detail_code() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    with_temp_user_env(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("plugin-repo");
+        let rev = init_preflight_git_repo(&repo);
+        let spec = format!("file://{}@{}", repo.display(), rev);
+        let lockfile = tmp.path().join("plugins.lock");
+
+        let install = Cli::try_parse_from([
+            "preen",
+            "plugin",
+            "install",
+            &spec,
+            "--lockfile",
+            lockfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        run_typed_with_verifier_for_test(install, &AlwaysOkVerifier).unwrap();
+
+        with_invalid_trust_allowlist(|| {
+            let test = Cli::try_parse_from([
+                "preen",
+                "plugin",
+                "test",
+                "test.pack",
+                "--lockfile",
+                lockfile.to_str().unwrap(),
+                "--json",
+            ])
+            .unwrap();
+
+            let err =
+                run_typed_with_verifier_for_test(test.clone(), &AlwaysOkVerifier).unwrap_err();
+            assert_eq!(err.kind, CliErrorKind::Validation);
+            assert_eq!(
+                err.detail_code.as_deref(),
+                Some("test_trust_policy_invalid")
+            );
+
+            let parsed: Value = serde_json::from_str(&test.format_error(&err)).unwrap();
+            assert_eq!(
+                parsed["data"]["detail_code"].as_str(),
+                Some("test_trust_policy_invalid")
+            );
+            assert_eq!(
+                parsed["data"]["hint_code"].as_str(),
+                Some("trust_policy_invalid")
+            );
+        });
+    });
 }
 
 #[test]
@@ -8062,7 +8809,7 @@ schema_version = 1
 pack_id = "dup.pack"
 source = "git"
 url = "https://github.com/Preen-rs/test"
-rev = "abc123"
+rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 version = "0.1.0"
 manifest_hash = "sha256:deadbeef"
 signature = "sha256:cafebabe"
@@ -8072,7 +8819,7 @@ trusted_identity = "https://github.com/Preen-rs/test"
 pack_id = "dup.pack"
 source = "git"
 url = "https://github.com/Preen-rs/test2"
-rev = "def456"
+rev = "b2a4a429f1ef8bf7662274b6dc2621f2a03a369f"
 version = "0.1.1"
 manifest_hash = "sha256:deadbeef"
 signature = "sha256:cafebabe"
@@ -8128,7 +8875,7 @@ fn lockfile_roundtrip() {
             pack_id: "test.pack".to_string(),
             source: "git".to_string(),
             url: "https://github.com/Preen-rs/test".to_string(),
-            rev: "abc123".to_string(),
+            rev: "381d2c7b496b0efce4ef8be8f89a74b0ba40c647".to_string(),
             resolved_rev: None,
             version: "0.1.0".to_string(),
             manifest_hash: "sha256:deadbeef".to_string(),
@@ -8163,7 +8910,7 @@ fn verify_lockfile_hashes_ok() {
             pack_id: "test.pack".to_string(),
             source: "git".to_string(),
             url: "https://github.com/Preen-rs/test".to_string(),
-            rev: "abc123".to_string(),
+            rev: "381d2c7b496b0efce4ef8be8f89a74b0ba40c647".to_string(),
             resolved_rev: None,
             version: "0.1.0".to_string(),
             manifest_hash,
@@ -8190,7 +8937,7 @@ fn verify_lockfile_hashes_mismatch() {
             pack_id: "test.pack".to_string(),
             source: "git".to_string(),
             url: "https://github.com/Preen-rs/test".to_string(),
-            rev: "abc123".to_string(),
+            rev: "381d2c7b496b0efce4ef8be8f89a74b0ba40c647".to_string(),
             resolved_rev: None,
             version: "0.1.0".to_string(),
             manifest_hash: "sha256:deadbeef".to_string(),
@@ -8206,7 +8953,10 @@ fn verify_lockfile_hashes_mismatch() {
 #[test]
 fn trust_policy_from_str_ok() {
     let input = r#"
-        allowlist = ["id1", "id2"]
+        allowlist = [
+          "https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0",
+          "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main"
+        ]
         require_signed = true
     "#;
     let policy = trust_policy_from_str(input).unwrap();
@@ -8228,4 +8978,24 @@ fn trust_policy_rejects_require_signed_false() {
     "#;
     let err = trust_policy_from_str(input).unwrap_err();
     assert!(err.contains("require_signed=false"));
+}
+
+#[test]
+fn trust_policy_rejects_empty_allowlist() {
+    let input = r#"
+        allowlist = []
+        require_signed = true
+    "#;
+    let err = trust_policy_from_str(input).unwrap_err();
+    assert!(err.contains("allowlist must contain at least one identity"));
+}
+
+#[test]
+fn trust_policy_rejects_invalid_identity_format() {
+    let input = r#"
+        allowlist = ["not-an-identity"]
+        require_signed = true
+    "#;
+    let err = trust_policy_from_str(input).unwrap_err();
+    assert!(err.contains("invalid sigstore identity format"));
 }

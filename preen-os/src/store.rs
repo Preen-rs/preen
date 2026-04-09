@@ -46,19 +46,27 @@ impl EncryptedStore {
         })
     }
 
+    fn decode_store_key_hex(key_hex: &str) -> Result<Vec<u8>, OsError> {
+        let key = hex::decode(key_hex).map_err(|e| OsError::Store {
+            message: format!("invalid key hex: {e}"),
+        })?;
+        if key.len() != 32 {
+            return Err(OsError::Store {
+                message: format!("invalid key length: expected 32 bytes, got {}", key.len()),
+            });
+        }
+        Ok(key)
+    }
+
     fn load_key(&self) -> Result<Vec<u8>, OsError> {
         if let Ok(key_hex) = env::var("PREEN_STORE_KEY_HEX") {
-            return hex::decode(key_hex).map_err(|e| OsError::Store {
-                message: format!("invalid key hex: {e}"),
-            });
+            return Self::decode_store_key_hex(&key_hex);
         }
         let entry = Entry::new("preen", "store_key").map_err(|e| OsError::Store {
             message: e.to_string(),
         })?;
         if let Ok(existing) = entry.get_password() {
-            return hex::decode(existing).map_err(|e| OsError::Store {
-                message: format!("invalid key hex: {e}"),
-            });
+            return Self::decode_store_key_hex(&existing);
         }
         let mut key = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
@@ -229,8 +237,17 @@ impl EncryptedStore {
         let mut records = Vec::new();
         loop {
             let mut len_buf = [0u8; 4];
-            if file.read_exact(&mut len_buf).is_err() {
-                break;
+            match file.read(&mut len_buf).map_err(|e| OsError::Io {
+                path: self.store_path().to_string_lossy().to_string(),
+                source: e,
+            })? {
+                0 => break,
+                4 => {}
+                _ => {
+                    return Err(OsError::Store {
+                        message: "invalid record header length".to_string(),
+                    });
+                }
             }
             let len = u32::from_le_bytes(len_buf) as usize;
             let mut buf = vec![0u8; len];

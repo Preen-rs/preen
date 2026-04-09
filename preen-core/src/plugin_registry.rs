@@ -4,6 +4,7 @@ use std::str::FromStr;
 use crate::plugin::validate_pack_id;
 
 pub const REGISTRY_SCHEMA_V1: u32 = 1;
+const PINNED_REV_HEX_LEN: usize = 40;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryIndex {
@@ -41,12 +42,36 @@ pub struct ResolvedRegistryPlugin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
     Parse(String),
-    SchemaVersionUnsupported { found: u32, expected: u32 },
-    MissingField { field: String },
-    InvalidPackId { pack_id: String },
-    DuplicatePackId { pack_id: String },
-    PackNotFound { pack_id: String },
-    VersionNotFound { pack_id: String, version: String },
+    SchemaVersionUnsupported {
+        found: u32,
+        expected: u32,
+    },
+    MissingField {
+        field: String,
+    },
+    InvalidPackId {
+        pack_id: String,
+    },
+    InvalidRev {
+        pack_id: String,
+        version: String,
+        rev: String,
+    },
+    DuplicatePackId {
+        pack_id: String,
+    },
+    PackNotFound {
+        pack_id: String,
+    },
+    VersionNotFound {
+        pack_id: String,
+        version: String,
+    },
+}
+
+fn is_pinned_rev(rev: &str) -> bool {
+    let value = rev.trim();
+    value.len() == PINNED_REV_HEX_LEN && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 impl FromStr for RegistryIndex {
@@ -109,6 +134,13 @@ impl RegistryIndex {
                 if version.rev.trim().is_empty() {
                     return Err(RegistryError::MissingField {
                         field: "entries[].versions[].rev".to_string(),
+                    });
+                }
+                if !is_pinned_rev(&version.rev) {
+                    return Err(RegistryError::InvalidRev {
+                        pack_id: entry.pack_id.clone(),
+                        version: version.version.clone(),
+                        rev: version.rev.clone(),
                     });
                 }
             }

@@ -239,6 +239,26 @@ impl OsFileSystemAdapter {
             Ok(path.to_path_buf())
         }
     }
+
+    async fn mark_restored_items(&self, items: &[CleanableItem]) {
+        for item in items {
+            match self.store.load_item(&item.id).await {
+                Ok(Some(mut record)) => {
+                    record.deleted = false;
+                    record.undo_info = None;
+                    if self.store.save_items(&[record]).await.is_err() {
+                        self.metrics.incr("undo.store_update_failed", 1);
+                    }
+                }
+                Ok(None) => {
+                    self.metrics.incr("undo.store_item_missing", 1);
+                }
+                Err(_) => {
+                    self.metrics.incr("undo.store_load_failed", 1);
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -447,10 +467,20 @@ impl FileSystemPort for OsFileSystemAdapter {
         let start = std::time::Instant::now();
         #[cfg(target_os = "macos")]
         {
+            let home = dirs::home_dir().ok_or_else(|| CoreError::Os {
+                message: "missing home dir".to_string(),
+            })?;
+            let expected_trash_dir = home.join(".Trash");
+            let mut restore_pairs = Vec::new();
             for item in items {
                 if let Some(ref trash_path_str) = item.undo_info {
                     let trash_path = PathBuf::from(trash_path_str);
-                    let original_path = &item.path;
+                    let original_path = item.path.clone();
+                    if !trash_path.starts_with(&expected_trash_dir) {
+                        return Err(CoreError::Os {
+                            message: format!("invalid trash path for {}", item.id),
+                        });
+                    }
                     if !trash_path.exists() {
                         self.metrics.incr("undo.not_found", 1);
                         return Err(CoreError::Os {
@@ -458,24 +488,15 @@ impl FileSystemPort for OsFileSystemAdapter {
                         });
                     }
                     if original_path.exists() {
+                        self.metrics.incr("undo.restore_failed", 1);
                         return Err(CoreError::Os {
                             message: format!("target path exists for {}", item.id),
                         });
                     }
-                    let trash_dir = trash_path.parent().ok_or_else(|| CoreError::Os {
+                    trash_path.parent().ok_or_else(|| CoreError::Os {
                         message: "invalid trash path".to_string(),
                     })?;
-                    if trash_dir.file_name().is_none() {
-                        return Err(CoreError::Os {
-                            message: format!("invalid trash path for {}", item.id),
-                        });
-                    }
-                    fs::rename(&trash_path, original_path).map_err(|e| {
-                        self.metrics.incr("undo.restore_failed", 1);
-                        CoreError::Os {
-                            message: e.to_string(),
-                        }
-                    })?;
+                    restore_pairs.push((trash_path, original_path));
                 } else {
                     return Err(CoreError::Os {
                         message: format!(
@@ -485,6 +506,15 @@ impl FileSystemPort for OsFileSystemAdapter {
                     });
                 }
             }
+            for (trash_path, original_path) in restore_pairs {
+                fs::rename(&trash_path, &original_path).map_err(|e| {
+                    self.metrics.incr("undo.restore_failed", 1);
+                    CoreError::Os {
+                        message: e.to_string(),
+                    }
+                })?;
+            }
+            self.mark_restored_items(items).await;
             self.metrics.incr("undo.items", items.len() as u64);
             self.metrics.timing("undo.duration", start.elapsed());
             return Ok(());
@@ -492,46 +522,42 @@ impl FileSystemPort for OsFileSystemAdapter {
 
         #[cfg(all(unix, not(target_os = "macos")))]
         {
+            let mut available = trash::os_limited::list().map_err(|e| CoreError::Os {
+                message: format!("trash list failed: {e}"),
+            })?;
+            let mut restore_items: Vec<TrashItem> = Vec::new();
             for item in items {
                 if let Some(ref undo_info) = item.undo_info {
                     let original_path = Self::decode_linux_undo_original_path(undo_info);
-                    let trash_items = trash::os_limited::list().map_err(|e| CoreError::Os {
-                        message: format!("trash list failed: {e}"),
-                    })?;
-                    let mut candidates: Vec<TrashItem> = trash_items
-                        .into_iter()
-                        .filter(|t| t.original_path == original_path)
+                    let matching_indices: Vec<usize> = available
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, candidate)| {
+                            if candidate.original_path == original_path {
+                                Some(idx)
+                            } else {
+                                None
+                            }
+                        })
                         .collect();
-                    if candidates.is_empty() {
+                    if matching_indices.is_empty() {
                         self.metrics.incr("undo.not_found", 1);
                         return Err(CoreError::Os {
                             message: format!("trash item not found for {}", item.id),
                         });
                     }
-                    if candidates.len() > 1 {
+                    if matching_indices.len() > 1 {
                         self.metrics.incr("undo.ambiguous", 1);
                         return Err(CoreError::Os {
                             message: format!(
                                 "ambiguous trash candidates for {} (count={})",
                                 item.id,
-                                candidates.len()
+                                matching_indices.len()
                             ),
                         });
                     }
-                    let one = if let Some(one) = candidates.pop() {
-                        one
-                    } else {
-                        self.metrics.incr("undo.not_found", 1);
-                        return Err(CoreError::Os {
-                            message: format!("trash item not found for {}", item.id),
-                        });
-                    };
-                    trash::os_limited::restore_all(vec![one]).map_err(|e| {
-                        self.metrics.incr("undo.restore_failed", 1);
-                        CoreError::Os {
-                            message: format!("trash restore failed: {e}"),
-                        }
-                    })?;
+                    let idx = matching_indices[0];
+                    restore_items.push(available.swap_remove(idx));
                 } else {
                     return Err(CoreError::Os {
                         message: format!(
@@ -541,6 +567,13 @@ impl FileSystemPort for OsFileSystemAdapter {
                     });
                 }
             }
+            trash::os_limited::restore_all(restore_items).map_err(|e| {
+                self.metrics.incr("undo.restore_failed", 1);
+                CoreError::Os {
+                    message: format!("trash restore failed: {e}"),
+                }
+            })?;
+            self.mark_restored_items(items).await;
             self.metrics.incr("undo.items", items.len() as u64);
             self.metrics.timing("undo.duration", start.elapsed());
             return Ok(());

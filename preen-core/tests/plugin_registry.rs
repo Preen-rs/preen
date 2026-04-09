@@ -1,5 +1,7 @@
 use preen_core::plugin_registry::{RegistryError, RegistryIndex};
 
+const REV_A: &str = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647";
+
 #[test]
 fn registry_index_parses_and_resolves() {
     let input = r#"
@@ -15,11 +17,11 @@ latest_version = "1.2.0"
 
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 
   [[entries.versions]]
   version = "1.1.0"
-  rev = "def456"
+  rev = "b2a4a429f1ef8bf7662274b6dc2621f2a03a369f"
 "#;
     let index = input.parse::<RegistryIndex>().unwrap();
     let resolved = index.resolve("preen-rs.homebrew", Some("1.2.0")).unwrap();
@@ -27,7 +29,7 @@ latest_version = "1.2.0"
         resolved.url,
         "https://github.com/Preen-rs/preen-rulepack-homebrew"
     );
-    assert_eq!(resolved.rev, "abc123");
+    assert_eq!(resolved.rev, REV_A);
 }
 
 #[test]
@@ -43,7 +45,7 @@ repo_url = "https://example.com/a"
 latest_version = "1.0.0"
   [[entries.versions]]
   version = "1.0.0"
-  rev = "a"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 
 [[entries]]
 pack_id = "dup"
@@ -53,7 +55,7 @@ repo_url = "https://example.com/b"
 latest_version = "1.0.0"
   [[entries.versions]]
   version = "1.0.0"
-  rev = "b"
+  rev = "b2a4a429f1ef8bf7662274b6dc2621f2a03a369f"
 "#;
     let err = input.parse::<RegistryIndex>().unwrap_err();
     assert!(matches!(err, RegistryError::DuplicatePackId { .. }));
@@ -72,7 +74,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 "#;
     let err = input.parse::<RegistryIndex>().unwrap_err();
     assert!(matches!(err, RegistryError::InvalidPackId { .. }));
@@ -91,7 +93,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 "#;
     let err = input.parse::<RegistryIndex>().unwrap_err();
     assert!(matches!(err, RegistryError::InvalidPackId { .. }));
@@ -110,7 +112,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 "#;
     let index = input.parse::<RegistryIndex>().unwrap();
     let err = index
@@ -132,7 +134,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 "#;
     let index = input.parse::<RegistryIndex>().unwrap();
     let err = index
@@ -154,15 +156,15 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.1.0"
-  rev = "def456"
+  rev = "b2a4a429f1ef8bf7662274b6dc2621f2a03a369f"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 "#;
     let index = input.parse::<RegistryIndex>().unwrap();
     let resolved = index.resolve("preen-rs.homebrew", None).unwrap();
     assert_eq!(resolved.version, "1.2.0");
-    assert_eq!(resolved.rev, "abc123");
+    assert_eq!(resolved.rev, REV_A);
 }
 
 #[test]
@@ -178,7 +180,7 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 "#;
     let err = input.parse::<RegistryIndex>().unwrap_err();
     assert!(matches!(
@@ -203,8 +205,27 @@ repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
 latest_version = "1.2.0"
   [[entries.versions]]
   version = "1.2.0"
-  rev = "abc123"
+  rev = "381d2c7b496b0efce4ef8be8f89a74b0ba40c647"
 "#;
     let err = input.parse::<RegistryIndex>().unwrap_err();
     assert!(matches!(err, RegistryError::MissingField { .. }));
+}
+
+#[test]
+fn registry_non_pinned_revision_fails() {
+    let input = r#"
+schema_version = 1
+
+[[entries]]
+pack_id = "preen-rs.homebrew"
+name = "Homebrew"
+description = "Cleanup pack"
+repo_url = "https://github.com/Preen-rs/preen-rulepack-homebrew"
+latest_version = "1.2.0"
+  [[entries.versions]]
+  version = "1.2.0"
+  rev = "v1.2.0"
+"#;
+    let err = input.parse::<RegistryIndex>().unwrap_err();
+    assert!(matches!(err, RegistryError::InvalidRev { .. }));
 }

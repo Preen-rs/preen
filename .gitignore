@@ -119,3 +119,6 @@ $RECYCLE.BIN/
 
 # Local helper clones for template sync (not part of monorepo)
 .template-worktrees/
+
+# Local upstream reference clone (not part of monorepo)
+.references/

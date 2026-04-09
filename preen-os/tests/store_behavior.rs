@@ -112,3 +112,34 @@ async fn invalid_store_magic_fails() {
     let err = store.list_scans(10).await.unwrap_err();
     assert!(err.to_string().contains("invalid store magic"));
 }
+
+#[tokio::test]
+async fn invalid_store_version_fails() {
+    set_test_key();
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("preen.store");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"PREENSTR");
+    bytes.push(99);
+    fs::write(&store_path, bytes).unwrap();
+
+    let store = EncryptedStore::new(tmp.path().to_path_buf());
+    let err = store.list_scans(10).await.unwrap_err();
+    assert!(err.to_string().contains("unsupported store version"));
+}
+
+#[tokio::test]
+async fn invalid_store_truncated_record_header_fails() {
+    set_test_key();
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("preen.store");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"PREENSTR");
+    bytes.push(1);
+    bytes.extend_from_slice(&[0x01, 0x02, 0x03]);
+    fs::write(&store_path, bytes).unwrap();
+
+    let store = EncryptedStore::new(tmp.path().to_path_buf());
+    let err = store.list_scans(10).await.unwrap_err();
+    assert!(err.to_string().contains("invalid record header length"));
+}

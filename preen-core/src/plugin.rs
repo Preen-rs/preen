@@ -8,6 +8,8 @@ use crate::{ItemCategory, rules::ScanStrategy};
 
 pub const MANIFEST_SCHEMA_V1: u32 = 1;
 pub const RULE_SCHEMA_V1: u32 = 1;
+pub const RUNTIME_CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const SUPPORTED_ACTION_API: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackIdValidationError {
@@ -557,7 +559,10 @@ pub fn plugin_failure_hint_from_detail_code(code: &str) -> PluginFailureHint {
             action: "use_format_url_at_tag_or_commit",
             priority: 3,
         },
-        "install_trust_policy_invalid" => PluginFailureHint {
+        "preflight_trust_policy_invalid"
+        | "install_trust_policy_invalid"
+        | "verify_trust_policy_invalid"
+        | "test_trust_policy_invalid" => PluginFailureHint {
             code: "trust_policy_invalid",
             action: "fix_trust_config_and_retry",
             priority: 2,
@@ -1103,8 +1108,13 @@ pub fn verify_with_policy(
     policy: &TrustPolicy,
     input: VerificationInput,
 ) -> Result<VerificationOutcome, VerifyError> {
+    if policy.allowlist.is_empty() {
+        return Err(VerifyError::PolicyUnavailable(
+            "identity allowlist is empty".to_string(),
+        ));
+    }
     let outcome = verifier.verify(input)?;
-    if !policy.allowlist.is_empty() && !policy.is_identity_allowed(&outcome.identity) {
+    if !policy.is_identity_allowed(&outcome.identity) {
         return Err(VerifyError::NotTrusted {
             identity: outcome.identity,
         });

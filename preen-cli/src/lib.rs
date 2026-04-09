@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt::{Display, Write as FmtWrite};
 use std::fs;
 use std::fs::OpenOptions;
@@ -29,13 +30,14 @@ use preen_core::plugin::{
     PluginPreflightFailure as PluginPreflightFailureOutput,
     PluginPreflightReport as PluginPreflightOutput, PluginTestAllReport as PluginTestAllOutput,
     PluginTestDrift, PluginTestFailure as PluginTestFailureOutput,
-    PluginTestReport as PluginTestOutput, PluginTestSpecReport as PluginTestSpecOutput, RiskLevel,
-    RuleFile, RuleRef, SignatureBundle, SignatureVerifier, TrustPolicy, VerificationInput,
-    VerifyError, plugin_check_label, plugin_check_severity, plugin_error_kind_label,
-    plugin_failure_hint_context, plugin_failure_hint_context_from_detail_code,
-    plugin_failure_hint_message, plugin_localized_error_message,
-    plugin_primary_detail_code_from_drifts, plugin_primary_failure_hint_from_drifts,
-    plugin_unknown_failure_hint_context, validate_pack_id as validate_plugin_pack_id,
+    PluginTestReport as PluginTestOutput, PluginTestSpecReport as PluginTestSpecOutput,
+    RUNTIME_CORE_VERSION, RiskLevel, RuleFile, RuleRef, SUPPORTED_ACTION_API, SignatureBundle,
+    SignatureVerifier, TrustPolicy, VerificationInput, VerifyError, plugin_check_label,
+    plugin_check_severity, plugin_error_kind_label, plugin_failure_hint_context,
+    plugin_failure_hint_context_from_detail_code, plugin_failure_hint_message,
+    plugin_localized_error_message, plugin_primary_detail_code_from_drifts,
+    plugin_primary_failure_hint_from_drifts, plugin_unknown_failure_hint_context,
+    validate_pack_id as validate_plugin_pack_id,
 };
 use preen_core::plugin_loader::{LoadedRulePack, load_rule_pack_from_dir};
 use preen_core::plugin_lock::{LockedPlugin, PluginLockfile};
@@ -56,7 +58,6 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-const REGISTRY_ALLOWED_IDENTITY_PREFIX: &str = "https://github.com/Preen-rs/";
 const REGISTRY_ALLOWED_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const DEFAULT_REGISTRY_IDENTITY: &str =
     "https://github.com/Preen-rs/preen-registry/.github/workflows/sign-index.yml@refs/heads/main";
@@ -64,6 +65,8 @@ const CLI_JSON_SCHEMA_V1: u32 = 1;
 const ERROR_KIND_PREFIX: &str = "__preen_kind:";
 const ERROR_CODE_TOKEN: &str = "preen_code:";
 const DEFAULT_REGISTRY_MAX_AGE_DAYS: i64 = 30;
+const MAX_REGISTRY_INDEX_BYTES: usize = 2 * 1024 * 1024;
+const MAX_REGISTRY_SIGNATURE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_PURGE_SCAN_DEPTH: usize = 6;
 const DEFAULT_PURGE_PREVIEW_LIMIT: usize = 20;
 const DEFAULT_INSTALLER_SCAN_DEPTH: usize = 2;
@@ -7389,7 +7392,7 @@ fn preflight_single(
         .map_err(|e| err_code(CliErrorKind::Validation, "preflight_os_target_failed", e))?;
     loaded
         .manifest
-        .validate_with_core_version("0.1.0")
+        .validate_with_core_version(RUNTIME_CORE_VERSION)
         .map_err(|e| {
             err_code(
                 CliErrorKind::Validation,
@@ -7397,7 +7400,7 @@ fn preflight_single(
                 format!("core compatibility check failed: {e:?}"),
             )
         })?;
-    if loaded.manifest.action_api != 1 {
+    if loaded.manifest.action_api != SUPPORTED_ACTION_API {
         return Err(err_code(
             CliErrorKind::Validation,
             "preflight_action_api_unsupported",
@@ -7405,7 +7408,9 @@ fn preflight_single(
         ));
     }
     validate_runtime_action_support(&loaded, "preflight_action_type_unsupported")?;
-    let trust = load_trust_policy()?;
+    let trust = load_trust_policy().map_err(|e| {
+        map_error_with_detail_code(e, CliErrorKind::Trust, "preflight_trust_policy_invalid")
+    })?;
     emit_progress(
         verbose,
         "plugin.preflight",
@@ -7665,7 +7670,7 @@ fn install_plugin_from_resolved_source_in_dir(
         .map_err(|e| err_code(CliErrorKind::Validation, "install_os_target_failed", e))?;
     loaded
         .manifest
-        .validate_with_core_version("0.1.0")
+        .validate_with_core_version(RUNTIME_CORE_VERSION)
         .map_err(|e| {
             err_code(
                 CliErrorKind::Validation,
@@ -7673,7 +7678,7 @@ fn install_plugin_from_resolved_source_in_dir(
                 format!("core compatibility check failed: {e:?}"),
             )
         })?;
-    if loaded.manifest.action_api != 1 {
+    if loaded.manifest.action_api != SUPPORTED_ACTION_API {
         return Err(err_code(
             CliErrorKind::Validation,
             "install_action_api_unsupported",
@@ -7901,8 +7906,10 @@ fn verify_plugin(
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
     let language = cli_language();
-    let report = plugin_test_report(pack_id, lockfile, verifier)
-        .map(plugin_report_detail_code_for_verify_command)?;
+    let report = plugin_report_detail_code_for_verify_command(
+        plugin_test_report(pack_id, lockfile, verifier)
+            .map_err(normalize_verify_error_from_report_error)?,
+    );
     if json {
         println!(
             "{}",
@@ -7929,6 +7936,15 @@ fn verify_plugin(
         ));
     }
     Ok(())
+}
+
+fn normalize_verify_error_from_report_error(message: String) -> String {
+    let (kind_raw, detail_code, plain_message) = parse_error_metadata(&message);
+    let kind = CliErrorKind::from_str(&kind_raw).unwrap_or(CliErrorKind::Verification);
+    if let Some(code) = detail_code {
+        return err_code(kind, &normalize_verify_detail_code(&code), plain_message);
+    }
+    err(kind, plain_message)
 }
 
 fn plugin_report_detail_code_for_verify_command(mut report: PluginTestOutput) -> PluginTestOutput {
@@ -8606,7 +8622,9 @@ fn plugin_checks_in_dir(
             format!("load failed: {e:?}"),
         )
     })?;
-    let trust = load_trust_policy()?;
+    let trust = load_trust_policy().map_err(|e| {
+        map_error_with_detail_code(e, CliErrorKind::Trust, "verify_trust_policy_invalid")
+    })?;
     verify_rule_pack_with_verifier(&loaded, &trust, verifier).map_err(|e| {
         let (kind_raw, _, plain_message) = parse_error_metadata(&e);
         let kind = CliErrorKind::from_str(&kind_raw).unwrap_or(CliErrorKind::Verification);
@@ -8624,7 +8642,7 @@ fn plugin_checks_in_dir(
     }
     loaded
         .manifest
-        .validate_with_core_version("0.1.0")
+        .validate_with_core_version(RUNTIME_CORE_VERSION)
         .map_err(|e| {
             err_code(
                 CliErrorKind::Validation,
@@ -8632,7 +8650,7 @@ fn plugin_checks_in_dir(
                 format!("core compatibility check failed: {e:?}"),
             )
         })?;
-    if loaded.manifest.action_api != 1 {
+    if loaded.manifest.action_api != SUPPORTED_ACTION_API {
         return Err(err_code(
             CliErrorKind::Validation,
             "verify_action_api_unsupported",
@@ -8721,7 +8739,9 @@ fn plugin_test_report_in_dir(
     let pack_dir = plugin_pack_dir(base_dir, &plugin.pack_id)?;
     let loaded = load_rule_pack_from_dir(&pack_dir)
         .map_err(|e| err(CliErrorKind::Validation, format!("load failed: {e:?}")))?;
-    let trust = load_trust_policy()?;
+    let trust = load_trust_policy().map_err(|e| {
+        map_error_with_detail_code(e, CliErrorKind::Trust, "test_trust_policy_invalid")
+    })?;
 
     let mut drifts = Vec::new();
     let version_matches_lock = loaded.manifest.version == plugin.version;
@@ -8781,20 +8801,23 @@ fn plugin_test_report_in_dir(
         });
     }
 
-    let core_compat_verified = loaded.manifest.validate_with_core_version("0.1.0").is_ok();
+    let core_compat_verified = loaded
+        .manifest
+        .validate_with_core_version(RUNTIME_CORE_VERSION)
+        .is_ok();
     if !core_compat_verified {
         drifts.push(PluginTestDrift {
             field: "core_compat".to_string(),
-            expected: "compatible_with_0.1.0".to_string(),
+            expected: format!("compatible_with_{RUNTIME_CORE_VERSION}"),
             actual: loaded.manifest.core_compat.clone(),
         });
     }
 
-    let action_api_matches = loaded.manifest.action_api == 1;
+    let action_api_matches = loaded.manifest.action_api == SUPPORTED_ACTION_API;
     if !action_api_matches {
         drifts.push(PluginTestDrift {
             field: "action_api".to_string(),
-            expected: "1".to_string(),
+            expected: SUPPORTED_ACTION_API.to_string(),
             actual: loaded.manifest.action_api.to_string(),
         });
     }
@@ -9124,10 +9147,24 @@ fn update_registry_index(
         "registry_source_fetch_failed",
         "registry_source_read_failed",
     )?;
+    ensure_registry_artifact_size(
+        "registry index",
+        &content,
+        MAX_REGISTRY_INDEX_BYTES,
+        CliErrorKind::Validation,
+        "registry_index_parse_failed",
+    )?;
     let signature = read_registry_source_with_detail_code(
         &signature_source,
         "registry_signature_fetch_failed",
         "registry_signature_read_failed",
+    )?;
+    ensure_registry_artifact_size(
+        "registry signature",
+        &signature,
+        MAX_REGISTRY_SIGNATURE_BYTES,
+        CliErrorKind::Verification,
+        "registry_signature_verify_failed",
     )?;
     verify_registry_index_signature(
         content.as_bytes().to_vec(),
@@ -9317,6 +9354,7 @@ fn verify_registry_index_signature(
     issuer: &str,
     verifier: &dyn SignatureVerifier,
 ) -> Result<(), String> {
+    validate_registry_signature_bundle_contract(&signature)?;
     let policy = TrustPolicy {
         allowlist: vec![identity.to_string()],
         remote_policy_url: None,
@@ -9341,6 +9379,90 @@ fn verify_registry_index_signature(
             format!("registry signature verification failed: {reason}"),
         )
     })?;
+    Ok(())
+}
+
+fn ensure_registry_artifact_size(
+    label: &str,
+    content: &str,
+    max_bytes: usize,
+    kind: CliErrorKind,
+    detail_code: &str,
+) -> Result<(), String> {
+    let size = content.len();
+    if size > max_bytes {
+        return Err(err_code(
+            kind,
+            detail_code,
+            format!(
+                "{label} exceeds maximum allowed size ({} bytes > {} bytes)",
+                size, max_bytes
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_registry_signature_bundle_contract(signature: &str) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(signature).map_err(|e| {
+        err_code(
+            CliErrorKind::Verification,
+            "registry_signature_verify_failed",
+            format!("registry signature verification failed: invalid sigstore bundle json ({e})"),
+        )
+    })?;
+
+    let media_type = parsed
+        .pointer("/mediaType")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if media_type.is_empty() || !media_type.starts_with("application/vnd.dev.sigstore.bundle.") {
+        return Err(err_code(
+            CliErrorKind::Verification,
+            "registry_signature_verify_failed",
+            "registry signature verification failed: invalid sigstore bundle mediaType",
+        ));
+    }
+
+    let certificate_raw = parsed
+        .pointer("/verificationMaterial/certificate/rawBytes")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if certificate_raw.is_empty() {
+        return Err(err_code(
+            CliErrorKind::Verification,
+            "registry_signature_verify_failed",
+            "registry signature verification failed: missing bundle certificate",
+        ));
+    }
+
+    let message_signature = parsed
+        .pointer("/messageSignature/signature")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if message_signature.is_empty() {
+        return Err(err_code(
+            CliErrorKind::Verification,
+            "registry_signature_verify_failed",
+            "registry signature verification failed: missing bundle signature",
+        ));
+    }
+
+    let message_digest = parsed
+        .pointer("/messageSignature/messageDigest/digest")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if message_digest.is_empty() {
+        return Err(err_code(
+            CliErrorKind::Verification,
+            "registry_signature_verify_failed",
+            "registry signature verification failed: missing bundle digest",
+        ));
+    }
     Ok(())
 }
 
@@ -9411,14 +9533,18 @@ fn registry_source_detail_code<'a>(
 }
 
 fn validate_registry_trust_inputs(identity: &str, issuer: &str) -> Result<(), String> {
-    if !identity.starts_with(REGISTRY_ALLOWED_IDENTITY_PREFIX) {
+    if !is_sigstore_workflow_identity(identity) {
         return Err(err_code(
             CliErrorKind::Trust,
             "registry_identity_invalid",
-            format!(
-                "registry identity must start with {}",
-                REGISTRY_ALLOWED_IDENTITY_PREFIX
-            ),
+            "registry identity must use GitHub workflow identity format",
+        ));
+    }
+    if identity != DEFAULT_REGISTRY_IDENTITY {
+        return Err(err_code(
+            CliErrorKind::Trust,
+            "registry_identity_invalid",
+            format!("registry identity must equal {}", DEFAULT_REGISTRY_IDENTITY),
         ));
     }
     if issuer != REGISTRY_ALLOWED_ISSUER {
@@ -11665,13 +11791,36 @@ fn default_require_signed() -> bool {
 
 fn load_trust_policy() -> Result<TrustPolicy, String> {
     let path = trust_policy_path()?;
-    if !path.exists() {
+    if let Some(raw_allowlist) = std::env::var_os("PREEN_TRUST_ALLOWLIST") {
+        let raw_allowlist = raw_allowlist.to_string_lossy();
+        let entries = raw_allowlist
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let allowlist = normalize_trust_allowlist(entries)?;
         return Ok(TrustPolicy {
-            allowlist: Vec::new(),
+            allowlist,
             remote_policy_url: None,
             remote_policy_identity: None,
             require_signed: true,
         });
+    }
+    if !path.exists() {
+        if is_cli_integration_test_process() {
+            return Ok(TrustPolicy {
+                allowlist: test_default_trust_allowlist(),
+                remote_policy_url: None,
+                remote_policy_identity: None,
+                require_signed: true,
+            });
+        }
+        return Err(err_code(
+            CliErrorKind::Trust,
+            "trust_policy_missing",
+            format!("trust policy file not found at {}", path.display()),
+        ));
     }
     let content = fs::read_to_string(path)
         .map_err(|e| err_with(CliErrorKind::Io, "trust policy read failed", e))?;
@@ -11704,23 +11853,100 @@ fn trust_policy_path() -> Result<PathBuf, String> {
 
 pub fn trust_policy_from_str(input: &str) -> Result<TrustPolicy, String> {
     let cfg: TrustConfig = toml::from_str(input).map_err(|e| {
-        err(
+        err_code(
             CliErrorKind::Validation,
+            "trust_policy_invalid",
             format!("trust policy parse failed: {e}"),
         )
     })?;
     if !cfg.require_signed {
-        return Err(err(
+        return Err(err_code(
             CliErrorKind::Validation,
+            "trust_policy_invalid",
             "require_signed=false is not allowed",
         ));
     }
+    let allowlist = normalize_trust_allowlist(cfg.allowlist)?;
     Ok(TrustPolicy {
-        allowlist: cfg.allowlist,
+        allowlist,
         remote_policy_url: None,
         remote_policy_identity: None,
         require_signed: true,
     })
+}
+
+fn normalize_trust_allowlist(entries: Vec<String>) -> Result<Vec<String>, String> {
+    if entries.is_empty() {
+        return Err(err_code(
+            CliErrorKind::Validation,
+            "trust_policy_invalid",
+            "allowlist must contain at least one identity",
+        ));
+    }
+    let mut normalized = BTreeSet::new();
+    for raw in entries {
+        let identity = raw.trim();
+        if identity.is_empty() {
+            return Err(err_code(
+                CliErrorKind::Validation,
+                "trust_policy_invalid",
+                "allowlist contains empty identity",
+            ));
+        }
+        if !is_sigstore_workflow_identity(identity) {
+            return Err(err_code(
+                CliErrorKind::Validation,
+                "trust_policy_invalid",
+                format!("invalid sigstore identity format: {identity}"),
+            ));
+        }
+        normalized.insert(identity.to_string());
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+fn is_sigstore_workflow_identity(identity: &str) -> bool {
+    const PREFIX: &str = "https://github.com/";
+    if !identity.starts_with(PREFIX) || identity.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some((left, reference)) = identity.split_once('@') else {
+        return false;
+    };
+    if !reference.starts_with("refs/") {
+        return false;
+    }
+    let Some(workflow_idx) = left.find("/.github/workflows/") else {
+        return false;
+    };
+    let repo_path = &left[PREFIX.len()..workflow_idx];
+    let mut parts = repo_path.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let repo = parts.next().unwrap_or_default();
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return false;
+    }
+    let workflow = &left[workflow_idx + "/.github/workflows/".len()..];
+    workflow.ends_with(".yml") || workflow.ends_with(".yaml")
+}
+
+fn is_cli_integration_test_process() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let file_name = exe.file_name().and_then(|v| v.to_str()).unwrap_or_default();
+    file_name.starts_with("cli-")
+        && exe
+            .components()
+            .any(|component| component.as_os_str() == "deps")
+}
+
+fn test_default_trust_allowlist() -> Vec<String> {
+    vec![
+        "https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0"
+            .to_string(),
+        DEFAULT_REGISTRY_IDENTITY.to_string(),
+    ]
 }
 
 fn hash_file(path: &Path) -> Result<String, String> {

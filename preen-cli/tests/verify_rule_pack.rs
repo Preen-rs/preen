@@ -93,7 +93,7 @@ fn unsigned_pack_rejected_when_required() {
 
     let policy = trust_policy_from_str(
         r#"
-        allowlist = []
+        allowlist = ["https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0"]
         require_signed = true
         "#,
     )
@@ -111,7 +111,7 @@ fn unsigned_pack_rejected_even_if_config_requests_not_required() {
 
     let policy_err = trust_policy_from_str(
         r#"
-        allowlist = []
+        allowlist = ["https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0"]
         require_signed = false
         "#,
     )
@@ -120,7 +120,7 @@ fn unsigned_pack_rejected_even_if_config_requests_not_required() {
 
     let policy = trust_policy_from_str(
         r#"
-        allowlist = []
+        allowlist = ["https://github.com/Preen-rs/test/.github/workflows/release.yml@refs/tags/v0.1.0"]
         require_signed = true
         "#,
     )

@@ -356,3 +356,108 @@ async fn os_executor_run_command_non_zero_emits_command_non_zero_detail_code() {
     assert_eq!(events[2].event_kind, "execution_failed");
     assert_eq!(events[2].detail_code.as_deref(), Some("command_non_zero"));
 }
+
+#[tokio::test]
+async fn os_executor_plan_rejected_on_blank_confirmation_emits_confirmation_required() {
+    let rule_id = "confirm-rule";
+    let manifest = sample_manifest(rule_id);
+    let rule = sample_rule(
+        rule_id,
+        ActionSpec {
+            action_type: ActionType::TrashPaths,
+            paths: vec!["/tmp/preen-confirm-target".to_string()],
+            command: Vec::new(),
+            mode: None,
+            timeout_sec: Some(30),
+            allow_globs: false,
+            max_items: Some(100),
+            package_manager: None,
+            project_types: Vec::new(),
+            params: HashMap::new(),
+        },
+        MatchMode::Paths,
+        RiskLevel::High,
+        vec!["/tmp/preen-confirm-target".to_string()],
+    );
+    let sink = RecordingAuditSink::new();
+    let policy = DefaultSafetyPolicy::default();
+    let executor = OsActionExecutor;
+
+    let err = execute_action_with_audit(
+        &manifest,
+        &rule,
+        ExecutionMode::Apply,
+        Some(" "),
+        &policy,
+        &executor,
+        Some(&sink),
+    )
+    .await
+    .expect_err("blank confirmation token should be rejected");
+
+    assert!(matches!(
+        err,
+        RuntimeExecutionError::Plan(
+            preen_core::action_runtime::PlanError::ConfirmationRequired { .. }
+        )
+    ));
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_kind, "plan_rejected");
+    assert_eq!(
+        events[0].detail_code.as_deref(),
+        Some("confirmation_required")
+    );
+    assert!(events[0].requires_confirmation);
+}
+
+#[tokio::test]
+async fn os_executor_plan_rejected_on_relative_path_emits_relative_path_detail_code() {
+    let rule_id = "relative-path-rule";
+    let manifest = sample_manifest(rule_id);
+    let rule = sample_rule(
+        rule_id,
+        ActionSpec {
+            action_type: ActionType::DeletePaths,
+            paths: vec!["relative/path".to_string()],
+            command: Vec::new(),
+            mode: None,
+            timeout_sec: Some(30),
+            allow_globs: false,
+            max_items: Some(100),
+            package_manager: None,
+            project_types: Vec::new(),
+            params: HashMap::new(),
+        },
+        MatchMode::Paths,
+        RiskLevel::Medium,
+        vec!["relative/path".to_string()],
+    );
+    let sink = RecordingAuditSink::new();
+    let policy = DefaultSafetyPolicy::default();
+    let executor = OsActionExecutor;
+
+    let err = execute_action_with_audit(
+        &manifest,
+        &rule,
+        ExecutionMode::Apply,
+        Some("ok"),
+        &policy,
+        &executor,
+        Some(&sink),
+    )
+    .await
+    .expect_err("relative path should be rejected by safety policy");
+
+    assert!(matches!(
+        err,
+        RuntimeExecutionError::Plan(preen_core::action_runtime::PlanError::SafetyRejected(
+            preen_core::action_runtime::SafetyViolation::RelativePath { .. }
+        ))
+    ));
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_kind, "plan_rejected");
+    assert_eq!(events[0].detail_code.as_deref(), Some("relative_path"));
+    assert!(!events[0].requires_confirmation);
+}

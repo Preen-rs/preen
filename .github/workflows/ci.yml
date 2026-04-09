@@ -12,10 +12,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
-    name: Check
+    name: Check (ubuntu-latest)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Setup Rust toolchain
@@ -32,8 +37,15 @@ jobs:
         run: cargo build --release
 
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-latest
+          - macos-14
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Setup Rust toolchain
@@ -42,3 +54,21 @@ jobs:
           rustup default stable
       - name: Run tests
         run: cargo test --workspace --all-targets
+
+  required-checks:
+    name: Required Checks
+    if: always()
+    needs:
+      - check
+      - test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate upstream job results
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          if [ "$CHECK_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ]; then
+            echo "required checks failed: check=$CHECK_RESULT test=$TEST_RESULT"
+            exit 1
+          fi

@@ -181,6 +181,23 @@ fn apply_high_risk_action_requires_confirmation_token() {
 }
 
 #[test]
+fn apply_high_risk_action_rejects_blank_confirmation_token() {
+    let manifest = sample_manifest("rule-1");
+    let rule = sample_rule(
+        "rule-1",
+        ActionType::TrashPaths,
+        vec!["~/Library/Caches/App"],
+        RiskLevel::High,
+    );
+    let policy = DefaultSafetyPolicy::default();
+
+    let err = build_execution_plan(&manifest, &rule, ExecutionMode::Apply, Some("   "), &policy)
+        .expect_err("blank confirmation should fail");
+
+    assert!(matches!(err, PlanError::ConfirmationRequired { .. }));
+}
+
+#[test]
 fn dry_run_allows_high_risk_action_without_confirmation() {
     let manifest = sample_manifest("rule-1");
     let rule = sample_rule(
@@ -345,6 +362,30 @@ fn audit_event_for_plan_rejected_contains_reason_fields() {
 }
 
 #[test]
+fn audit_event_for_plan_rejected_confirmation_required_sets_confirmation_flag() {
+    let manifest = sample_manifest("rule-1");
+    let rule = sample_rule(
+        "rule-1",
+        ActionType::TrashPaths,
+        vec!["~/Library/Caches/App"],
+        RiskLevel::High,
+    );
+    let ctx = ActionAuditContext::from_manifest_rule(&manifest, &rule, ExecutionMode::Apply);
+    let err = PlanError::ConfirmationRequired {
+        rule_id: "rule-1".to_string(),
+    };
+
+    let event = audit_event_for_plan_rejected(ctx, &err);
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["event_kind"].as_str().unwrap(), "plan_rejected");
+    assert_eq!(
+        value["detail_code"].as_str().unwrap(),
+        "confirmation_required"
+    );
+    assert!(value["requires_confirmation"].as_bool().unwrap());
+}
+
+#[test]
 fn audit_event_for_execution_succeeded_and_failed_have_expected_payload() {
     let manifest = sample_manifest("rule-1");
     let rule = sample_rule(
@@ -468,6 +509,45 @@ async fn execute_action_with_audit_emits_plan_rejected_on_policy_failure() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_kind, "plan_rejected");
     assert_eq!(events[0].detail_code.as_deref(), Some("relative_path"));
+}
+
+#[tokio::test]
+async fn execute_action_with_audit_emits_plan_rejected_on_missing_confirmation() {
+    let manifest = sample_manifest("rule-1");
+    let rule = sample_rule(
+        "rule-1",
+        ActionType::TrashPaths,
+        vec!["~/Library/Caches/App"],
+        RiskLevel::High,
+    );
+    let policy = DefaultSafetyPolicy::default();
+    let sink = RecordingAuditSink::new();
+    let executor = MockExecutorOk;
+
+    let err = execute_action_with_audit(
+        &manifest,
+        &rule,
+        ExecutionMode::Apply,
+        Some(" "),
+        &policy,
+        &executor,
+        Some(&sink),
+    )
+    .await
+    .expect_err("plan should require non-empty confirmation token");
+
+    assert!(matches!(
+        err,
+        RuntimeExecutionError::Plan(PlanError::ConfirmationRequired { .. })
+    ));
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_kind, "plan_rejected");
+    assert_eq!(
+        events[0].detail_code.as_deref(),
+        Some("confirmation_required")
+    );
+    assert!(events[0].requires_confirmation);
 }
 
 #[tokio::test]

@@ -189,7 +189,8 @@ pub fn build_execution_plan(
     };
 
     let decision = safety_policy.evaluate(&request)?;
-    if decision.requires_confirmation && confirmation_token.is_none() {
+    let has_confirmation_token = confirmation_token.is_some_and(|token| !token.trim().is_empty());
+    if decision.requires_confirmation && !has_confirmation_token {
         return Err(PlanError::ConfirmationRequired {
             rule_id: rule.id.clone(),
         });
@@ -372,7 +373,12 @@ pub fn audit_event_for_plan_rejected(
     context: ActionAuditContext,
     error: &PlanError,
 ) -> ActionAuditEvent {
-    let mut event = new_audit_event(ActionAuditEventKind::PlanRejected, context, false);
+    let requires_confirmation = matches!(error, PlanError::ConfirmationRequired { .. });
+    let mut event = new_audit_event(
+        ActionAuditEventKind::PlanRejected,
+        context,
+        requires_confirmation,
+    );
     event.detail_code = Some(plan_error_detail_code(error).to_string());
     event.message = Some(error.to_string());
     event

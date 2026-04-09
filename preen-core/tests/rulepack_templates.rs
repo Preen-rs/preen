@@ -33,6 +33,60 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
+fn assert_sequence_in_order(text: &str, sequence: &[&str], label: &str) {
+    let mut cursor = 0usize;
+    for segment in sequence {
+        let Some(relative) = text[cursor..].find(segment) else {
+            panic!("missing expected segment in {label}: {segment}");
+        };
+        cursor += relative + segment.len();
+    }
+}
+
+fn assert_release_workflow_guardrails(workflow: &str, workflow_name: &str) {
+    for expected in [
+        "workflow_dispatch:",
+        "inputs:",
+        "version:",
+        "concurrency:",
+        "group: release-${{ github.repository }}",
+        "Validate version format",
+        "Ensure tag does not exist",
+        "Update manifest version and signing identity",
+        "Validate pack files before signing",
+        "Generate manifest signature artifacts",
+        "Verify generated manifest signature",
+        "Validate pack files after signing",
+        "Commit release state",
+        "Create and push tag",
+        "Create GitHub release",
+        "release-manual.yml@refs/heads/main",
+        "--certificate-identity \"https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-manual.yml@refs/heads/main\"",
+        "--certificate-oidc-issuer \"https://token.actions.githubusercontent.com\"",
+    ] {
+        assert!(
+            workflow.contains(expected),
+            "{workflow_name} is missing expected segment: {expected}"
+        );
+    }
+    assert_sequence_in_order(
+        workflow,
+        &[
+            "Validate version format",
+            "Ensure tag does not exist",
+            "Update manifest version and signing identity",
+            "Validate pack files before signing",
+            "Generate manifest signature artifacts",
+            "Verify generated manifest signature",
+            "Validate pack files after signing",
+            "Commit release state",
+            "Create and push tag",
+            "Create GitHub release",
+        ],
+        workflow_name,
+    );
+}
+
 fn collect_paths(root: &Path, out: &mut Vec<PathBuf>) {
     let entries =
         fs::read_dir(root).unwrap_or_else(|e| panic!("failed to read dir {}: {e}", root.display()));
@@ -103,23 +157,20 @@ fn base_template_has_release_guardrails() {
         .join("workflows")
         .join("release-manual.yml");
     let workflow = read(&workflow_path);
-    for expected in [
-        "workflow_dispatch:",
-        "inputs:",
-        "version:",
-        "Validate version format",
-        "Ensure tag does not exist",
-        "Update manifest version and signing identity",
-        "Generate manifest signature artifacts",
-        "Create and push tag",
-        "Create GitHub release",
-        "release-manual.yml@refs/heads/main",
-    ] {
-        assert!(
-            workflow.contains(expected),
-            "release workflow is missing expected segment: {expected}"
-        );
-    }
+    assert_release_workflow_guardrails(&workflow, "base release workflow");
+}
+
+#[test]
+fn homebrew_template_has_release_guardrails() {
+    let Some(root) = template_repo_path("preen-rulepack-homebrew") else {
+        return;
+    };
+    let workflow_path = root
+        .join(".github")
+        .join("workflows")
+        .join("release-manual.yml");
+    let workflow = read(&workflow_path);
+    assert_release_workflow_guardrails(&workflow, "homebrew release workflow");
 }
 
 #[test]
@@ -228,6 +279,44 @@ fn registry_template_index_parses_and_uses_release_manual_rulepack_identities() 
             }
         }
     }
+}
+
+#[test]
+fn registry_template_sign_workflow_has_bundle_and_strict_identity_checks() {
+    let Some(root) = template_repo_path("preen-registry") else {
+        return;
+    };
+    let workflow_path = root
+        .join(".github")
+        .join("workflows")
+        .join("sign-index.yml");
+    let workflow = read(&workflow_path);
+    for expected in [
+        "concurrency:",
+        "group: sign-index-${{ github.repository }}",
+        "Sign registry index (keyless)",
+        "--bundle registry-index.toml.sig",
+        "Verify just-generated signature",
+        "--certificate-identity \"https://github.com/${GITHUB_REPOSITORY}/.github/workflows/sign-index.yml@refs/heads/main\"",
+        "--certificate-oidc-issuer \"https://token.actions.githubusercontent.com\"",
+        "Commit updated signature",
+    ] {
+        assert!(
+            workflow.contains(expected),
+            "registry sign workflow is missing expected segment: {expected}"
+        );
+    }
+    assert_sequence_in_order(
+        &workflow,
+        &[
+            "Validate index before signing",
+            "Install cosign",
+            "Sign registry index (keyless)",
+            "Verify just-generated signature",
+            "Commit updated signature",
+        ],
+        "registry sign workflow",
+    );
 }
 
 #[test]
