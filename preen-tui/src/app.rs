@@ -203,6 +203,11 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
 }
 
 fn dispatch_plugin_action(state: &mut AppState, worker: &StatusWorker, action: PluginActionKind) {
+    if state.plugin_action_running {
+        state.last_error = Some("plugin action already running".to_string());
+        return;
+    }
+
     if action.requires_spec() {
         let spec = state.plugin_spec.trim().to_string();
         if spec.is_empty() {

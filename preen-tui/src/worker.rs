@@ -4,6 +4,7 @@ use preen_core::dashboard_service::DashboardApplicationService;
 use preen_os::dashboard::SnapshotCollector;
 use preen_os::plugin_command::{PluginCommandOutput, run_plugin_cli_command};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -100,6 +101,7 @@ fn run_worker_loop(
     plugin_runner: PluginCommandRunner,
 ) {
     let mut service = DashboardApplicationService::new(provider);
+    let plugin_action_running = Arc::new(AtomicBool::new(false));
     loop {
         match service.next_snapshot() {
             Ok(snapshot) => {
@@ -120,17 +122,29 @@ fn run_worker_loop(
         match command_rx.recv_timeout(interval) {
             Ok(WorkerCommand::RefreshNow) => continue,
             Ok(WorkerCommand::RunPluginAction { action, spec }) => {
-                let output = plugin_runner(action, spec.as_deref());
-                if event_tx
-                    .send(WorkerEvent::PluginActionResult {
+                if plugin_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "plugin action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_plugin = event_tx.clone();
+                let plugin_runner = Arc::clone(&plugin_runner);
+                let plugin_action_running = Arc::clone(&plugin_action_running);
+                thread::spawn(move || {
+                    let output = plugin_runner(action, spec.as_deref());
+                    plugin_action_running.store(false, Ordering::SeqCst);
+                    let _ = event_tx_for_plugin.send(WorkerEvent::PluginActionResult {
                         action,
                         ok: output.ok,
                         lines: output.lines,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
+                    });
+                });
                 continue;
             }
             Ok(WorkerCommand::Shutdown) => break,
@@ -257,12 +271,20 @@ mod tests {
             Some("preen-rs.homebrew@1.0.7".to_string()),
         );
 
-        let event = event_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("plugin action result");
-        let WorkerEvent::PluginActionResult { action, ok, lines } = event else {
-            panic!("expected plugin action result event");
+        let started = Instant::now();
+        let event = loop {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            match event_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(WorkerEvent::PluginActionResult { action, ok, lines }) => {
+                    break (action, ok, lines);
+                }
+                Ok(WorkerEvent::Snapshot(_)) => {}
+                Ok(WorkerEvent::Error(error)) => panic!("unexpected worker error: {error}"),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => panic!("worker disconnected"),
+            }
         };
+        let (action, ok, lines) = event;
         assert_eq!(action, PluginActionKind::Info);
         assert!(ok);
         assert_eq!(lines, vec!["ok".to_string()]);
@@ -317,6 +339,103 @@ mod tests {
         };
         assert_eq!(snapshot.health_score, 80);
 
+        worker.shutdown();
+    }
+
+    #[test]
+    fn plugin_action_runs_async_without_blocking_snapshot_updates() {
+        let provider = Box::new(TestProvider { seq: 1 });
+        let runner: PluginCommandRunner = Arc::new(|_, _| {
+            std::thread::sleep(Duration::from_millis(300));
+            PluginCommandOutput {
+                ok: true,
+                lines: vec!["done".to_string()],
+            }
+        });
+
+        let (mut worker, event_rx) = StatusWorker::spawn_with_provider_and_runner(
+            Duration::from_millis(50),
+            provider,
+            runner,
+        );
+        let _ = event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("initial snapshot");
+        worker.run_plugin_action(
+            PluginActionKind::Test,
+            Some("preen-rs.homebrew@1.0.7".to_string()),
+        );
+
+        let mut saw_snapshot_before_result = false;
+        let mut saw_plugin_result = false;
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            match event_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(WorkerEvent::Snapshot(_)) => {
+                    if !saw_plugin_result {
+                        saw_snapshot_before_result = true;
+                    }
+                }
+                Ok(WorkerEvent::PluginActionResult { .. }) => {
+                    saw_plugin_result = true;
+                    break;
+                }
+                Ok(WorkerEvent::Error(error)) => panic!("unexpected worker error: {error}"),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        assert!(saw_snapshot_before_result);
+        assert!(saw_plugin_result);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_rejects_concurrent_plugin_actions() {
+        let provider = Box::new(TestProvider { seq: 1 });
+        let runner: PluginCommandRunner = Arc::new(|_, _| {
+            std::thread::sleep(Duration::from_millis(350));
+            PluginCommandOutput {
+                ok: true,
+                lines: vec!["done".to_string()],
+            }
+        });
+
+        let (mut worker, event_rx) =
+            StatusWorker::spawn_with_provider_and_runner(Duration::from_secs(60), provider, runner);
+        let _ = event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("initial snapshot");
+
+        let spec = Some("preen-rs.homebrew@1.0.7".to_string());
+        worker.run_plugin_action(PluginActionKind::Preflight, spec.clone());
+        worker.run_plugin_action(PluginActionKind::Install, spec);
+
+        let mut saw_busy_error = false;
+        let mut saw_any_result = false;
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(3) {
+            match event_rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(WorkerEvent::Error(error)) => {
+                    if error.contains("already running") {
+                        saw_busy_error = true;
+                    }
+                }
+                Ok(WorkerEvent::PluginActionResult { .. }) => {
+                    saw_any_result = true;
+                    if saw_busy_error {
+                        break;
+                    }
+                }
+                Ok(WorkerEvent::Snapshot(_)) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        assert!(saw_busy_error);
+        assert!(saw_any_result);
         worker.shutdown();
     }
 }
