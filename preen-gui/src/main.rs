@@ -1,3 +1,5 @@
+mod dashboard_runtime;
+mod dashboard_status;
 mod plugin_status;
 
 use preen_core::config::AppConfig;
@@ -15,6 +17,17 @@ fn main() {
         detail_code: Some("preflight_signature_or_trust_failed".to_string()),
     };
     println!("Preen GUI is starting up...");
+    match dashboard_runtime::load_view_model() {
+        Ok(view) => {
+            println!(
+                "dashboard view loaded: health={} cpu={:?} mem={:?}",
+                view.header.health_score, view.cpu.total_usage_pct, view.memory.used_pct
+            );
+        }
+        Err(error) => {
+            println!("dashboard_snapshot_error: {error}");
+        }
+    }
     println!("{}", plugin_status::summary_title(&sample));
     for item in plugin_status::failed_checks(&sample) {
         println!("failed_check_default: {item}");

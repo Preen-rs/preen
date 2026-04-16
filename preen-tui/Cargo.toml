@@ -9,3 +9,6 @@ readme = "README.md"
 
 [dependencies]
 preen-core = { path = "../preen-core" }
+preen-os = { path = "../preen-os" }
+crossterm = "0.29"
+ratatui = "0.29"

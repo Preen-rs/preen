@@ -9,3 +9,5 @@ readme = "README.md"
 
 [dependencies]
 preen-core = { path = "../preen-core" }
+preen-os = { path = "../preen-os" }
+chrono = { version = "0.4", features = ["serde"] }

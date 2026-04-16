@@ -4,10 +4,6 @@ use preen_core::plugin::{
     plugin_failure_hint_from_detail_code, plugin_failure_hint_message,
 };
 
-pub fn render_summary_lines(summary: &PluginRunSummary) -> Vec<String> {
-    render_summary_lines_with_language(summary, "en-US")
-}
-
 pub fn render_summary_lines_with_language(
     summary: &PluginRunSummary,
     language: &str,

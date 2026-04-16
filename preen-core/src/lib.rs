@@ -12,9 +12,17 @@ use crate::error::CoreError;
 rust_i18n::i18n!("locales", fallback = "en-US");
 
 pub mod action_runtime;
+pub mod check_list_view;
+pub mod dashboard;
+pub mod dashboard_facade;
+pub mod dashboard_policy;
+pub mod dashboard_provider;
+pub mod dashboard_service;
+pub mod dashboard_view;
 pub mod error;
 pub mod metrics;
 pub mod plugin;
+pub mod plugin_list_view;
 pub mod plugin_loader;
 pub mod plugin_lock;
 pub mod plugin_registry;
