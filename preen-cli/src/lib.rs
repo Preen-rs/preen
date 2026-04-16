@@ -11,6 +11,7 @@ use std::process::Command as ProcessCommand;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -78,6 +79,8 @@ const DEFAULT_OPTIMIZE_TIMEOUT_SEC: u64 = 60;
 const DEFAULT_ANALYZE_MAX_DEPTH: usize = 8;
 const DEFAULT_ANALYZE_TOP_ENTRIES: usize = 20;
 const DEFAULT_STATUS_WATCH_INTERVAL_SEC: u64 = 2;
+const DEFAULT_EXTERNAL_COMMAND_TIMEOUT_SEC: u64 = 180;
+const EXTERNAL_COMMAND_TIMEOUT_ENV: &str = "PREEN_CLI_EXTERNAL_COMMAND_TIMEOUT_SEC";
 const DEFAULT_PURGE_ARTIFACT_NAMES: [&str; 10] = [
     "node_modules",
     "target",
@@ -4166,16 +4169,17 @@ fn execute_update_plan(plan: UpdateExecutionPlan) -> Result<(), String> {
 }
 
 fn execute_update_script_install(nightly: bool) -> Result<(), String> {
-    let script = ProcessCommand::new("curl")
-        .args(["-fsSL", "https://preen.rs/install.sh"])
-        .output()
-        .map_err(|error| {
-            err_code(
-                CliErrorKind::Internal,
-                "update_execute_failed",
-                format!("update script download failed: {error}"),
-            )
-        })?;
+    let mut script_command = ProcessCommand::new("curl");
+    script_command.args(["-fsSL", "https://preen.rs/install.sh"]);
+    let script =
+        run_command_output_with_timeout(script_command, external_command_timeout(), "curl")
+            .map_err(|error| {
+                err_code(
+                    CliErrorKind::Internal,
+                    "update_execute_failed",
+                    format!("update script download failed: {error}"),
+                )
+            })?;
     if !script.status.success() {
         return Err(err_code(
             CliErrorKind::Internal,
@@ -11367,11 +11371,62 @@ fn git_clone_checkout(url: &str, rev: &str, dest: &Path, shallow: bool) -> Resul
     git_resolve_head(dest)
 }
 
+fn external_command_timeout() -> Duration {
+    let seconds = std::env::var(EXTERNAL_COMMAND_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_EXTERNAL_COMMAND_TIMEOUT_SEC);
+    Duration::from_secs(seconds)
+}
+
+fn run_command_output_with_timeout(
+    mut command: ProcessCommand,
+    timeout: Duration,
+    label: &str,
+) -> Result<std::process::Output, String> {
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("{label} execution failed: {e}"))?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| format!("{label} output read failed: {e}"));
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "{label} command timed out after {}s",
+                        timeout.as_secs()
+                    ));
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => {
+                return Err(format!("{label} wait failed: {e}"));
+            }
+        }
+    }
+}
+
 fn run_git(args: &[&str]) -> Result<(), String> {
-    let output = ProcessCommand::new("git")
-        .args(args)
-        .output()
-        .map_err(|e| err_with(CliErrorKind::Internal, "git execution failed", e))?;
+    let mut command = ProcessCommand::new("git");
+    command.args(args);
+    let output = run_command_output_with_timeout(command, external_command_timeout(), "git")
+        .map_err(|e| {
+            err(
+                CliErrorKind::Internal,
+                format!("git command failed: {}: {e}", args.join(" ")),
+            )
+        })?;
     if output.status.success() {
         return Ok(());
     }
@@ -11389,12 +11444,15 @@ fn run_git(args: &[&str]) -> Result<(), String> {
 }
 
 fn run_git_in(repo: &Path, args: &[&str]) -> Result<(), String> {
-    let output = ProcessCommand::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .map_err(|e| err_with(CliErrorKind::Internal, "git execution failed", e))?;
+    let mut command = ProcessCommand::new("git");
+    command.arg("-C").arg(repo).args(args);
+    let output = run_command_output_with_timeout(command, external_command_timeout(), "git")
+        .map_err(|e| {
+            err(
+                CliErrorKind::Internal,
+                format!("git command failed in repo: {}: {e}", args.join(" ")),
+            )
+        })?;
     if output.status.success() {
         return Ok(());
     }
@@ -11537,12 +11595,10 @@ fn detect_clone_failure_stage(message: &str) -> CloneFailureStage {
 }
 
 fn git_resolve_head(path: &Path) -> Result<String, String> {
-    let output = ProcessCommand::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .map_err(|e| err_with(CliErrorKind::Internal, "git rev-parse failed", e))?;
+    let mut command = ProcessCommand::new("git");
+    command.arg("-C").arg(path).args(["rev-parse", "HEAD"]);
+    let output = run_command_output_with_timeout(command, external_command_timeout(), "git")
+        .map_err(|e| err(CliErrorKind::Internal, format!("git rev-parse failed: {e}")))?;
     if !output.status.success() {
         return Err(err(CliErrorKind::Internal, "git rev-parse failed"));
     }
@@ -11829,7 +11885,8 @@ fn run_cosign_verify(
         cmd.arg("--insecure-ignore-tlog");
     }
     cmd.arg(manifest_path);
-    let output = cmd.output().map_err(|e| e.to_string())?;
+    let output = run_command_output_with_timeout(cmd, external_command_timeout(), "cosign verify")
+        .map_err(|e| e.to_string())?;
     if output.status.success() {
         return Ok(());
     }
@@ -11864,7 +11921,8 @@ fn run_cosign_verify_with_bundle(
         cmd.arg("--insecure-ignore-tlog");
     }
     cmd.arg(manifest_path);
-    let output = cmd.output().map_err(|e| e.to_string())?;
+    let output = run_command_output_with_timeout(cmd, external_command_timeout(), "cosign verify")
+        .map_err(|e| e.to_string())?;
     if output.status.success() {
         return Ok(());
     }
