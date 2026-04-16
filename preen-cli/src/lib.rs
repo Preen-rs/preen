@@ -8,6 +8,7 @@ use std::io::IsTerminal;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -4016,7 +4017,7 @@ fn run_update_output(force: bool, nightly: bool, execute: bool) -> Result<Update
                 "already latest; skipped update execution (use --force to reinstall)".to_string(),
             );
         } else {
-            execute_update_command(&suggested_command)?;
+            execute_update_command(&install_source, nightly, &suggested_command)?;
             executed = true;
         }
     } else if force {
@@ -4065,7 +4066,18 @@ fn run_update_output(force: bool, nightly: bool, execute: bool) -> Result<Update
     })
 }
 
-fn execute_update_command(command: &str) -> Result<(), String> {
+enum UpdateExecutionPlan {
+    BrewUpgrade,
+    CargoInstall,
+    ScriptInstall { nightly: bool },
+    SelfUpdate { nightly: bool },
+}
+
+fn execute_update_command(
+    install_source: &str,
+    nightly: bool,
+    command: &str,
+) -> Result<(), String> {
     if let Some(path) = std::env::var_os("PREEN_UPDATE_EXECUTE_CAPTURE_PATH") {
         fs::write(&path, command).map_err(|error| {
             err_code(
@@ -4104,17 +4116,126 @@ fn execute_update_command(command: &str) -> Result<(), String> {
         ));
     }
 
-    let status = ProcessCommand::new("sh")
-        .arg("-lc")
-        .arg(command)
-        .status()
+    let plan = resolve_update_execution_plan(install_source, nightly);
+    execute_update_plan(plan)
+}
+
+fn resolve_update_execution_plan(install_source: &str, nightly: bool) -> UpdateExecutionPlan {
+    match (install_source, nightly) {
+        ("homebrew", false) => UpdateExecutionPlan::BrewUpgrade,
+        ("cargo", false) => UpdateExecutionPlan::CargoInstall,
+        ("script", true) | ("script", false) => UpdateExecutionPlan::ScriptInstall { nightly },
+        ("homebrew", true) | ("cargo", true) => {
+            UpdateExecutionPlan::ScriptInstall { nightly: true }
+        }
+        _ => UpdateExecutionPlan::SelfUpdate { nightly },
+    }
+}
+
+fn execute_update_plan(plan: UpdateExecutionPlan) -> Result<(), String> {
+    match plan {
+        UpdateExecutionPlan::BrewUpgrade => {
+            execute_update_status(ProcessCommand::new("brew").args(["upgrade", "preen"]))
+        }
+        UpdateExecutionPlan::CargoInstall => {
+            execute_update_status(ProcessCommand::new("cargo").args([
+                "install",
+                "preen-cli",
+                "--locked",
+                "--force",
+            ]))
+        }
+        UpdateExecutionPlan::ScriptInstall { nightly } => execute_update_script_install(nightly),
+        UpdateExecutionPlan::SelfUpdate { nightly } => {
+            let current_exe = std::env::current_exe().map_err(|error| {
+                err_code(
+                    CliErrorKind::Internal,
+                    "update_execute_failed",
+                    format!("resolve current executable failed: {error}"),
+                )
+            })?;
+            let mut command = ProcessCommand::new(current_exe);
+            command.arg("update");
+            if nightly {
+                command.arg("--nightly");
+            }
+            command.arg("--force");
+            execute_update_status(&mut command)
+        }
+    }
+}
+
+fn execute_update_script_install(nightly: bool) -> Result<(), String> {
+    let script = ProcessCommand::new("curl")
+        .args(["-fsSL", "https://preen.rs/install.sh"])
+        .output()
         .map_err(|error| {
             err_code(
                 CliErrorKind::Internal,
                 "update_execute_failed",
-                format!("update command launch failed: {error}"),
+                format!("update script download failed: {error}"),
             )
         })?;
+    if !script.status.success() {
+        return Err(err_code(
+            CliErrorKind::Internal,
+            "update_execute_failed",
+            format!(
+                "update script download exited with status {}",
+                script.status
+            ),
+        ));
+    }
+
+    let mut command = ProcessCommand::new("bash");
+    if nightly {
+        command.args(["-s", "--", "--nightly"]);
+    } else {
+        command.arg("-s");
+    }
+    command.stdin(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        err_code(
+            CliErrorKind::Internal,
+            "update_execute_failed",
+            format!("update installer launch failed: {error}"),
+        )
+    })?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(&script.stdout).map_err(|error| {
+            err_code(
+                CliErrorKind::Internal,
+                "update_execute_failed",
+                format!("update installer stdin write failed: {error}"),
+            )
+        })?;
+    }
+    let status = child.wait().map_err(|error| {
+        err_code(
+            CliErrorKind::Internal,
+            "update_execute_failed",
+            format!("update installer wait failed: {error}"),
+        )
+    })?;
+    if !status.success() {
+        return Err(err_code(
+            CliErrorKind::Internal,
+            "update_execute_failed",
+            format!("update installer exited with status {status}"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn execute_update_status(command: &mut ProcessCommand) -> Result<(), String> {
+    let status = command.status().map_err(|error| {
+        err_code(
+            CliErrorKind::Internal,
+            "update_execute_failed",
+            format!("update command launch failed: {error}"),
+        )
+    })?;
     if !status.success() {
         return Err(err_code(
             CliErrorKind::Internal,
