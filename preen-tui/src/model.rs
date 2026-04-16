@@ -221,12 +221,31 @@ impl AppState {
 fn extract_plugin_diagnostics(lines: &[String]) -> Vec<String> {
     let payload = lines.iter().find(|line| line.trim_start().starts_with('{'));
     let Some(payload) = payload else {
-        return Vec::new();
+        return fallback_diagnostics_from_stderr(lines);
     };
     let Ok(summary) = parse_summary_from_cli_json(payload) else {
-        return Vec::new();
+        return fallback_diagnostics_from_stderr(lines);
     };
     render_summary_lines_with_language(&summary, "en-US")
+}
+
+fn fallback_diagnostics_from_stderr(lines: &[String]) -> Vec<String> {
+    let errors = lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("stderr:").map(str::trim))
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        return Vec::new();
+    }
+    let mut diagnostics = vec![
+        "overall_passed: false".to_string(),
+        "detail_code: unstructured_plugin_output".to_string(),
+    ];
+    diagnostics.extend(errors.into_iter().map(|line| format!("stderr: {line}")));
+    diagnostics
 }
 
 #[cfg(test)]
@@ -299,7 +318,10 @@ mod tests {
         assert!(!state.plugin_action_running);
         assert_eq!(state.plugin_last_action, Some(PluginActionKind::Test));
         assert_eq!(state.plugin_last_output, vec!["stderr: fail".to_string()]);
-        assert!(state.plugin_last_diagnostics.is_empty());
+        assert_eq!(
+            state.plugin_last_diagnostics[0],
+            "overall_passed: false".to_string()
+        );
         assert_eq!(state.last_error.as_deref(), Some("runtime failure"));
 
         state.apply_plugin_command_result(PluginActionKind::Test, true, vec!["ok".to_string()]);
@@ -326,6 +348,36 @@ mod tests {
                 .plugin_last_diagnostics
                 .iter()
                 .any(|line| line.contains("check [critical] Signature verified=true"))
+        );
+    }
+
+    #[test]
+    fn fallback_diagnostics_from_stderr_when_json_is_missing() {
+        let mut state = AppState::default();
+        state.apply_plugin_command_result(
+            PluginActionKind::Install,
+            false,
+            vec![
+                "stderr: clone failed".to_string(),
+                "stderr: network unreachable".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            state.plugin_last_diagnostics[0],
+            "overall_passed: false".to_string()
+        );
+        assert!(
+            state
+                .plugin_last_diagnostics
+                .iter()
+                .any(|line| line.contains("detail_code: unstructured_plugin_output"))
+        );
+        assert!(
+            state
+                .plugin_last_diagnostics
+                .iter()
+                .any(|line| line.contains("clone failed"))
         );
     }
 }

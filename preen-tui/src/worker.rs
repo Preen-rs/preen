@@ -164,6 +164,23 @@ mod tests {
         }
     }
 
+    struct FlakyProvider {
+        first_call_failed: bool,
+        next_score: u8,
+    }
+
+    impl DashboardProvider for FlakyProvider {
+        fn next_snapshot(&mut self) -> Result<DashboardSnapshot, String> {
+            if !self.first_call_failed {
+                self.first_call_failed = true;
+                return Err("transient snapshot failure".to_string());
+            }
+            let score = self.next_score;
+            self.next_score = self.next_score.saturating_add(1);
+            Ok(snapshot_with_health(score))
+        }
+    }
+
     fn snapshot_with_health(score: u8) -> DashboardSnapshot {
         DashboardSnapshot {
             schema_version: DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
@@ -271,5 +288,35 @@ mod tests {
             Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {}
             Ok(_) => panic!("unexpected event after shutdown"),
         }
+    }
+
+    #[test]
+    fn worker_recovers_after_transient_snapshot_error() {
+        let provider = Box::new(FlakyProvider {
+            first_call_failed: false,
+            next_score: 80,
+        });
+        let (mut worker, event_rx) =
+            StatusWorker::spawn_with_provider(Duration::from_secs(60), provider);
+
+        let first = event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first worker event");
+        let WorkerEvent::Error(error) = first else {
+            panic!("expected initial transient error");
+        };
+        assert!(error.contains("transient snapshot failure"));
+
+        worker.refresh_now();
+
+        let second = event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("recovered snapshot event");
+        let WorkerEvent::Snapshot(snapshot) = second else {
+            panic!("expected recovered snapshot event");
+        };
+        assert_eq!(snapshot.health_score, 80);
+
+        worker.shutdown();
     }
 }
