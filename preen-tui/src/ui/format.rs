@@ -232,10 +232,7 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 pub(super) fn pretty_host_name(value: &str) -> String {
-    let base = value
-        .trim_end_matches(".local")
-        .replace('-', " ")
-        .replace('_', " ");
+    let base = value.trim_end_matches(".local").replace(['-', '_'], " ");
     truncate_with_ellipsis(base.trim(), 24)
 }
 

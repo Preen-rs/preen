@@ -11,7 +11,7 @@ use std::time::Duration;
 
 #[derive(Debug)]
 pub enum WorkerEvent {
-    Snapshot(DashboardSnapshot),
+    Snapshot(Box<DashboardSnapshot>),
     Error(String),
     PluginActionResult {
         action: PluginActionKind,
@@ -47,11 +47,7 @@ impl StatusWorker {
         interval: Duration,
         provider: Box<dyn DashboardProvider>,
     ) -> (Self, Receiver<WorkerEvent>) {
-        Self::spawn_with_provider_and_runner(
-            interval,
-            provider,
-            Arc::new(|action, spec| run_plugin_cli_command(action, spec)),
-        )
+        Self::spawn_with_provider_and_runner(interval, provider, Arc::new(run_plugin_cli_command))
     }
 
     pub(crate) fn spawn_with_provider_and_runner(
@@ -105,7 +101,10 @@ fn run_worker_loop(
     loop {
         match service.next_snapshot() {
             Ok(snapshot) => {
-                if event_tx.send(WorkerEvent::Snapshot(snapshot)).is_err() {
+                if event_tx
+                    .send(WorkerEvent::Snapshot(Box::new(snapshot)))
+                    .is_err()
+                {
                     break;
                 }
             }

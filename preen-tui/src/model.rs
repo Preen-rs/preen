@@ -280,8 +280,10 @@ mod tests {
 
     #[test]
     fn keybindings_popup_toggle_resets_popup_scroll() {
-        let mut state = AppState::default();
-        state.keybindings_popup_scroll = 12;
+        let mut state = AppState {
+            keybindings_popup_scroll: 12,
+            ..AppState::default()
+        };
         state.toggle_keybindings_popup();
         assert!(state.show_keybindings_popup);
         assert_eq!(state.keybindings_popup_scroll, 0);

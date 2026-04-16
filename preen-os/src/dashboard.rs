@@ -170,17 +170,33 @@ struct CachedPowerDetails {
     cached_at: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum DashboardHealthMode {
+    #[default]
     MoleParity,
     PreenStrict,
 }
 
-impl Default for DashboardHealthMode {
-    fn default() -> Self {
-        Self::MoleParity
-    }
-}
+type PowerMetricsTuple = (
+    Option<f64>,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<f64>,
+    Option<u64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+);
+
+type ThermalMetricsTuple = (
+    Option<f64>,
+    Option<f64>,
+    Option<u64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+);
 
 impl DashboardHealthMode {
     fn from_env() -> Self {
@@ -924,12 +940,11 @@ fn primary_ipv4_from_ifconfig_macos() -> Option<String> {
             current_active = true;
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("inet ") {
-            if let Some(ip) = rest.split_whitespace().next()
-                && !ip.starts_with("127.")
-            {
-                current_ip = Some(ip.to_string());
-            }
+        if let Some(rest) = trimmed.strip_prefix("inet ")
+            && let Some(ip) = rest.split_whitespace().next()
+            && !ip.starts_with("127.")
+        {
+            current_ip = Some(ip.to_string());
         }
     }
 
@@ -1380,19 +1395,7 @@ fn parse_ioreg_numeric_key(line: &str, key: &str) -> Option<f64> {
     extract_first_number(tail)
 }
 
-fn collect_power_metrics(
-    warnings: &mut Vec<String>,
-) -> (
-    Option<f64>,
-    Option<String>,
-    Option<String>,
-    Option<f64>,
-    Option<f64>,
-    Option<u64>,
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-) {
+fn collect_power_metrics(warnings: &mut Vec<String>) -> PowerMetricsTuple {
     if cfg!(target_os = "macos") {
         return collect_power_metrics_macos(warnings);
     }
@@ -1402,19 +1405,7 @@ fn collect_power_metrics(
     (None, None, None, None, None, None, None, None, None)
 }
 
-fn collect_power_metrics_macos(
-    warnings: &mut Vec<String>,
-) -> (
-    Option<f64>,
-    Option<String>,
-    Option<String>,
-    Option<f64>,
-    Option<f64>,
-    Option<u64>,
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-) {
+fn collect_power_metrics_macos(warnings: &mut Vec<String>) -> PowerMetricsTuple {
     let output = ProcessCommand::new("pmset").args(["-g", "batt"]).output();
     let text = match output {
         Ok(value) if value.status.success() => String::from_utf8_lossy(&value.stdout).to_string(),
@@ -1451,10 +1442,10 @@ fn collect_power_metrics_macos(
         if let Some(value) = parts.get(1) {
             status = Some((*value).to_string());
         }
-        if let Some(value) = parts.get(2) {
-            if let Some(parsed) = parse_pmset_time_left(value) {
-                time_left = Some(parsed);
-            }
+        if let Some(value) = parts.get(2)
+            && let Some(parsed) = parse_pmset_time_left(value)
+        {
+            time_left = Some(parsed);
         }
         break;
     }
@@ -1495,19 +1486,7 @@ fn parse_pmset_time_left(value: &str) -> Option<String> {
     None
 }
 
-fn collect_power_metrics_linux(
-    warnings: &mut Vec<String>,
-) -> (
-    Option<f64>,
-    Option<String>,
-    Option<String>,
-    Option<f64>,
-    Option<f64>,
-    Option<u64>,
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-) {
+fn collect_power_metrics_linux(warnings: &mut Vec<String>) -> PowerMetricsTuple {
     let power_root = Path::new("/sys/class/power_supply");
     let entries = match fs::read_dir(power_root) {
         Ok(entries) => entries,
@@ -1556,16 +1535,7 @@ fn collect_power_metrics_linux(
     )
 }
 
-fn collect_macos_thermal_metrics(
-    warnings: &mut Vec<String>,
-) -> (
-    Option<f64>,
-    Option<f64>,
-    Option<u64>,
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-) {
+fn collect_macos_thermal_metrics(warnings: &mut Vec<String>) -> ThermalMetricsTuple {
     let output = ProcessCommand::new("ioreg")
         .args(["-rn", "AppleSmartBattery"])
         .output();
@@ -1701,10 +1671,10 @@ fn collect_macos_fan_speed_rpm() -> Option<u64> {
         }
         if let Some((_, value)) = line.split_once(':')
             && let Some(rpm) = extract_first_number(value)
+            && rpm.is_finite()
+            && rpm >= 0.0
         {
-            if rpm.is_finite() && rpm >= 0.0 {
-                return Some(rpm.round() as u64);
-            }
+            return Some(rpm.round() as u64);
         }
     }
     None

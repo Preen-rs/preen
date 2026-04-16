@@ -37,6 +37,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
         while let Ok(event) = worker_rx.try_recv() {
             match event {
                 WorkerEvent::Snapshot(snapshot) => {
+                    let snapshot = *snapshot;
                     if state.plugin_spec.is_empty()
                         && let Some(plugin) = snapshot.plugins.first()
                     {

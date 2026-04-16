@@ -90,7 +90,7 @@ pub(super) fn build_dashboard_cards(view: &DashboardViewModel) -> Vec<DashboardC
         .map(|value| value.to_string())
         .unwrap_or_else(|| "n/a".to_string());
     let top_cpu_cores = top_cpu_core_rows(&view.cpu.top_cores, 4);
-    let top_process_rows = top_process_rows(&view);
+    let top_process_rows = top_process_rows(view);
     let cpu_temp_suffix = view
         .cpu
         .temperature_c
