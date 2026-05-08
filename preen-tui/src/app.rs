@@ -18,6 +18,9 @@ use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
+const UI_POLL_INTERVAL: Duration = Duration::from_millis(33);
+const MOUSE_WHEEL_SCROLL_LINES: i16 = 3;
+
 pub fn run() -> Result<(), String> {
     let mut terminal = setup_terminal()?;
     let run_result = run_loop(&mut terminal);
@@ -118,7 +121,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
             .draw(|frame| ui::render(frame, &state))
             .map_err(|error| error.to_string())?;
 
-        if event::poll(Duration::from_millis(120)).map_err(|error| error.to_string())? {
+        if event::poll(UI_POLL_INTERVAL).map_err(|error| error.to_string())? {
             let mut terminal_area = None;
             let mut pending_mouse_scrolls = MouseScrollDeltas::default();
             for event in read_event_batch()? {
@@ -638,14 +641,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                                 if let Some(target) =
                                     mouse_scroll_target(&state, area, mouse.column, mouse.row)
                                 {
-                                    pending_mouse_scrolls.add(target, 1);
+                                    pending_mouse_scrolls.add(target, MOUSE_WHEEL_SCROLL_LINES);
                                 }
                             }
                             MouseEventKind::ScrollUp => {
                                 if let Some(target) =
                                     mouse_scroll_target(&state, area, mouse.column, mouse.row)
                                 {
-                                    pending_mouse_scrolls.add(target, -1);
+                                    pending_mouse_scrolls.add(target, -MOUSE_WHEEL_SCROLL_LINES);
                                 }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {

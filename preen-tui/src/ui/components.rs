@@ -4,10 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
-};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::layout;
 use super::{PALETTE_ACCENT, PALETTE_LINE, PALETTE_TEXT, PALETTE_WARN};
@@ -362,10 +359,13 @@ pub(super) fn render_info_popup(frame: &mut Frame<'_>, area: Rect, state: &AppSt
     let content_length = lines.len();
     let max_scroll = lines.len().saturating_sub(viewport_height) as u16;
     let effective_scroll = state.info_popup_scroll.min(max_scroll);
+    let visible_lines = lines
+        .into_iter()
+        .skip(effective_scroll as usize)
+        .take(viewport_height)
+        .collect::<Vec<_>>();
 
-    let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(PALETTE_TEXT))
-        .scroll((effective_scroll, 0));
+    let paragraph = Paragraph::new(visible_lines).style(Style::default().fg(PALETTE_TEXT));
     frame.render_widget(paragraph, content_area);
     if show_scrollbar && inner.width > 1 {
         render_vertical_scrollbar(
@@ -664,28 +664,51 @@ fn render_vertical_scrollbar(
     if viewport_height == 0 || content_length <= viewport_height {
         return;
     }
-    let max_position = content_length.saturating_sub(1);
-    // Ratatui maps `position` against the whole content length. Use the
-    // visible end row so the thumb reaches the bottom on the last page.
-    let visible_end_position = scroll_offset.saturating_add(viewport_height.saturating_sub(1));
-    let mut scrollbar_state = ScrollbarState::new(content_length)
-        .position(visible_end_position.min(max_position))
-        .viewport_content_length(viewport_height.min(content_length));
-    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(None)
-        .end_symbol(None)
-        .thumb_symbol("█")
-        .track_symbol(Some("│"))
-        .thumb_style(Style::default().fg(PALETTE_ACCENT))
-        .track_style(Style::default().fg(PALETTE_LINE));
-    frame.render_stateful_widget(
-        scrollbar,
-        area.inner(Margin {
-            vertical: 0,
-            horizontal: 0,
-        }),
-        &mut scrollbar_state,
-    );
+    let target = vertical_scrollbar_area(area);
+    let Some((thumb_top, thumb_height)) = scrollbar_thumb(
+        target.height as usize,
+        viewport_height,
+        content_length,
+        scroll_offset,
+    ) else {
+        return;
+    };
+    let thumb_bottom = thumb_top.saturating_add(thumb_height);
+    let lines = (0..target.height as usize)
+        .map(|row| {
+            let (symbol, color) = if row >= thumb_top && row < thumb_bottom {
+                ("█", PALETTE_ACCENT)
+            } else {
+                ("│", PALETTE_LINE)
+            };
+            Line::from(Span::styled(symbol, Style::default().fg(color)))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), target);
+}
+
+fn scrollbar_thumb(
+    track_height: usize,
+    viewport_height: usize,
+    content_length: usize,
+    scroll_offset: usize,
+) -> Option<(usize, usize)> {
+    if track_height == 0 || viewport_height == 0 || content_length <= viewport_height {
+        return None;
+    }
+
+    // Keep this custom math: it makes the thumb height proportional and
+    // guarantees the thumb reaches the bottom when the last page is visible.
+    let thumb_height =
+        ((viewport_height * track_height).div_ceil(content_length)).clamp(1, track_height);
+    let max_scroll = content_length.saturating_sub(viewport_height);
+    let max_thumb_top = track_height.saturating_sub(thumb_height);
+    let thumb_top = if max_scroll == 0 {
+        0
+    } else {
+        scroll_offset.min(max_scroll) * max_thumb_top / max_scroll
+    };
+    Some((thumb_top, thumb_height))
 }
 
 fn vertical_scrollbar_area(inner: Rect) -> Rect {
@@ -694,5 +717,30 @@ fn vertical_scrollbar_area(inner: Rect) -> Rect {
         y: inner.y,
         width: inner.width.min(1),
         height: inner.height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scrollbar_thumb;
+
+    #[test]
+    fn scrollbar_thumb_reaches_track_edges() {
+        let track = 20;
+        let viewport = 5;
+        let content = 25;
+        let top = scrollbar_thumb(track, viewport, content, 0).unwrap();
+        let bottom = scrollbar_thumb(track, viewport, content, content - viewport).unwrap();
+
+        assert_eq!(top.0, 0);
+        assert_eq!(top.1, 4);
+        assert_eq!(bottom.0 + bottom.1, track);
+    }
+
+    #[test]
+    fn scrollbar_thumb_is_proportional_for_large_viewports() {
+        let thumb = scrollbar_thumb(24, 18, 36, 0).unwrap();
+
+        assert_eq!(thumb.1, 12);
     }
 }
