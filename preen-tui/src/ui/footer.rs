@@ -1,4 +1,4 @@
-use crate::i18n::TextKey;
+use crate::i18n::{Language, TextKey};
 use crate::model::{ActiveView, AppState};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Margin, Rect};
@@ -59,8 +59,12 @@ pub(super) fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState)
 pub(super) fn render_keybindings_popup(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let popup_area = keybindings_popup_area(area);
     frame.render_widget(Clear, popup_area);
+    let language = state.effective_language();
     let block = Block::default()
-        .title(" Keybindings ")
+        .title(format!(
+            " {} ",
+            l(language, "Keybindings", "Tastenbelegung")
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::LightGreen));
     frame.render_widget(block, popup_area);
@@ -71,10 +75,16 @@ pub(super) fn render_keybindings_popup(frame: &mut Frame<'_>, area: Rect, state:
 
     let mut viewport_height = inner.height as usize;
     let mut content_width = inner.width as usize;
-    let mut lines = wrap_plain_lines(keybindings_popup_lines(state.active_view), content_width);
+    let mut lines = wrap_plain_lines(
+        keybindings_popup_lines(state.active_view, language),
+        content_width,
+    );
     if viewport_height > 0 && lines.len() > viewport_height && content_width > 0 {
         content_width = content_width.saturating_sub(1);
-        lines = wrap_plain_lines(keybindings_popup_lines(state.active_view), content_width);
+        lines = wrap_plain_lines(
+            keybindings_popup_lines(state.active_view, language),
+            content_width,
+        );
     }
     let show_scrollbar = viewport_height > 0 && lines.len() > viewport_height;
     let content_area = if show_scrollbar && inner.width > 1 {
@@ -175,17 +185,36 @@ fn footer_right_plain_text() -> String {
 }
 
 fn footer_context_text(state: &AppState) -> String {
+    let language = state.effective_language();
     if state.show_keybindings_popup {
-        return "Popup: j/k or Up/Down or wheel scroll | Close: ? / Esc".to_string();
+        return l(
+            language,
+            "Popup: j/k or Up/Down or wheel scroll | Close: ? / Esc",
+            "Popup: j/k oder Hoch/Runter oder Mausrad | Schließen: ? / Esc",
+        )
+        .to_string();
     }
     if state.show_info_popup && state.active_view.supports_smart_care_controls() {
-        return "Info: j/k or Up/Down or wheel scroll | Close: i / Esc".to_string();
+        return l(
+            language,
+            "Info: j/k or Up/Down or wheel scroll | Close: i / Esc",
+            "Info: j/k oder Hoch/Runter oder Mausrad | Schließen: i / Esc",
+        )
+        .to_string();
     }
     if state.smart_care_action_running && state.active_view.supports_smart_care_controls() {
-        return format!(
-            "Smart Care: {} running... wait for completion | Keybinding: ?",
-            state.smart_care_action_label.as_deref().unwrap_or("action")
-        );
+        let action = state
+            .smart_care_action_label
+            .as_deref()
+            .unwrap_or(l(language, "action", "Aktion"));
+        return match language {
+            Language::English => {
+                format!("Smart Care: {action} running... wait for completion | Keybinding: ?")
+            }
+            Language::German => {
+                format!("Smart Care: {action} läuft... bitte warten | Tastenbelegung: ?")
+            }
+        };
     }
     if state.plugin_action_running && state.active_view.supports_smart_care_controls() {
         let capability = state
@@ -195,87 +224,207 @@ fn footer_context_text(state: &AppState) -> String {
         let action = state
             .plugin_last_action
             .map(|action| action.label().to_string())
-            .unwrap_or_else(|| "command".to_string());
-        return format!(
-            "{capability} plugin {action} running... wait for completion | Keybinding: ?"
-        );
+            .unwrap_or_else(|| l(language, "command", "Befehl").to_string());
+        return match language {
+            Language::English => {
+                format!(
+                    "{capability} plugin {action} running... wait for completion | Keybinding: ?"
+                )
+            }
+            Language::German => {
+                format!("{capability}-Plugin {action} läuft... bitte warten | Tastenbelegung: ?")
+            }
+        };
     }
     if state.smart_care_review_mode && state.active_view.supports_smart_care_controls() {
-        return "Review: j/k | space | 1/2/3/4 | A all | N none | Shift+X arm | x run | u undo | close: b/v/Esc | ?: keys".to_string();
+        return l(
+            language,
+            "Review: j/k | space | 1/2/3/4 | A all | N none | Shift+X arm | x run | u undo | close: b/v/Esc | ?: keys",
+            "Review: j/k | Leertaste | 1/2/3/4 | A alle | N keine | Shift+X scharf | x ausführen | u rückgängig | schließen: b/v/Esc | ?: Tasten",
+        )
+        .to_string();
     }
     match state.active_view {
-        ActiveView::Dashboard => {
-            "Dashboard: d | SmartCare: m | Plugins: p | Checks: c | Settings: o | Tab menu | q quit | ?: keys"
-                .to_string()
-        }
+        ActiveView::Dashboard => l(
+            language,
+            "Dashboard: d | SmartCare: m | Plugins: p | Checks: c | Settings: o | Tab menu | q quit | ?: keys",
+            "Dashboard: d | SmartCare: m | Plugins: p | Prüfungen: c | Einstellungen: o | Tab Menü | q Beenden | ?: Tasten",
+        )
+        .to_string(),
         ActiveView::Settings => state.tr(TextKey::SettingsFooter).to_string(),
         ActiveView::SmartCare => {
-            let run_hint = if state.smart_care_validate_run_request().is_ok() {
-                "x run"
-            } else {
-                "x blocked"
+            let run_hint = match (language, state.smart_care_validate_run_request().is_ok()) {
+                (Language::English, true) => "x run",
+                (Language::English, false) => "x blocked",
+                (Language::German, true) => "x ausführen",
+                (Language::German, false) => "x blockiert",
             };
-            format!(
-                "SmartCare: h/l select | space/1/2/3/4 toggle | a analyze | v review | n/f/t plugin | Shift+X arm | {run_hint} | u undo | i info | ?: keys"
-            )
-        }
-        ActiveView::Applications => format!(
-            "Applications: a analyze | r reanalyze | j/k move | space select | p paths | u uninstall(selected) | z undo | i info | ?: keys"
-        ),
-        ActiveView::Cleanup | ActiveView::Protection | ActiveView::Performance => format!(
-            "{}: h/l select | space toggle | a analyze | v review | n/f/t plugin | Shift+X arm | {} | u undo | i info | ?: keys",
-            state.active_view.title_for_language(state.effective_language()),
-            if state.smart_care_validate_run_request().is_ok() {
-                "x run"
-            } else {
-                "x blocked"
+            match language {
+                Language::English => format!(
+                    "SmartCare: h/l select | space/1/2/3/4 toggle | a analyze | v review | n/f/t plugin | Shift+X arm | {run_hint} | u undo | i info | ?: keys"
+                ),
+                Language::German => format!(
+                    "SmartCare: h/l wählen | Leertaste/1/2/3/4 umschalten | a Analyse | v Review | n/f/t Plugin | Shift+X scharf | {run_hint} | u rückgängig | i Info | ?: Tasten"
+                ),
             }
-        ),
-        ActiveView::Plugins => {
-            "Plugins: l/s/i/f/t/n | e edit spec | d/m/c switch | q quit | ?: keys".to_string()
         }
-        ActiveView::Checks => "Checks: j/k scroll | d/m/p switch | q quit | ?: keys".to_string(),
+        ActiveView::Applications => l(
+            language,
+            "Applications: a analyze | r reanalyze | j/k move | space select | p paths | u uninstall(selected) | z undo | i info | ?: keys",
+            "Anwendungen: a analysieren | r erneut | j/k bewegen | Leertaste wählen | p Pfade | u deinstallieren | z rückgängig | i Info | ?: Tasten",
+        )
+        .to_string(),
+        ActiveView::Cleanup | ActiveView::Protection | ActiveView::Performance => format!(
+            "{}: {} | {} | a {} | v review | n/f/t plugin | Shift+X {} | {} | u {} | i info | ?: {}",
+            state.active_view.title_for_language(state.effective_language()),
+            l(language, "h/l select", "h/l wählen"),
+            l(language, "space toggle", "Leertaste umschalten"),
+            l(language, "analyze", "Analyse"),
+            l(language, "arm", "scharf"),
+            if state.smart_care_validate_run_request().is_ok() {
+                l(language, "x run", "x ausführen")
+            } else {
+                l(language, "x blocked", "x blockiert")
+            },
+            l(language, "undo", "rückgängig"),
+            l(language, "keys", "Tasten")
+        ),
+        ActiveView::Plugins => l(
+            language,
+            "Plugins: l/s/i/f/t/n | e edit spec | d/m/c switch | q quit | ?: keys",
+            "Plugins: l/s/i/f/t/n | e Spec bearbeiten | d/m/c wechseln | q Beenden | ?: Tasten",
+        )
+        .to_string(),
+        ActiveView::Checks => l(
+            language,
+            "Checks: j/k scroll | d/m/p switch | q quit | ?: keys",
+            "Prüfungen: j/k scrollen | d/m/p wechseln | q Beenden | ?: Tasten",
+        )
+        .to_string(),
         _ => format!(
-            "{} (soon) | d/m/p/c switch | Tab menu | q quit | ?: keys",
-            state.active_view.title_for_language(state.effective_language())
+            "{} ({}) | {} | Tab {} | q {} | ?: {}",
+            state.active_view.title_for_language(language),
+            state.tr(TextKey::Soon),
+            l(language, "d/m/p/c switch", "d/m/p/c wechseln"),
+            l(language, "menu", "Menü"),
+            l(language, "quit", "Beenden"),
+            l(language, "keys", "Tasten")
         ),
     }
 }
 
-fn keybindings_popup_lines(view: ActiveView) -> Vec<Line<'static>> {
+fn keybindings_popup_lines(view: ActiveView, language: Language) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from("Global"),
-        Line::from("  q / Esc      Quit app"),
-        Line::from("  r            Refresh snapshot now"),
-        Line::from("  d / m / p / c Open Dashboard/Smart Care/Plugins/Checks"),
-        Line::from("  o            Open Settings"),
-        Line::from("  Tab          Next menu (full sidebar cycle)"),
-        Line::from("  Shift+Tab    Previous menu (full sidebar cycle)"),
-        Line::from("  Left/Right   Switch menu"),
-        Line::from("  j/k          Scroll main container"),
-        Line::from("  Up/Down      Scroll main container"),
-        Line::from("  Mouse wheel  Scroll active container/popup"),
-        Line::from("  PgUp/PgDn    Fast scroll"),
-        Line::from("  g            Scroll to top"),
-        Line::from("  ?            Open/close this popup"),
+        Line::from(l(language, "Global", "Global")),
+        Line::from(l(
+            language,
+            "  q / Esc      Quit app",
+            "  q / Esc      App beenden",
+        )),
+        Line::from(l(
+            language,
+            "  r            Refresh snapshot now",
+            "  r            Snapshot jetzt aktualisieren",
+        )),
+        Line::from(l(
+            language,
+            "  d / m / p / c Open Dashboard/Smart Care/Plugins/Checks",
+            "  d / m / p / c Dashboard/Smart Care/Plugins/Prüfungen öffnen",
+        )),
+        Line::from(l(
+            language,
+            "  o            Open Settings",
+            "  o            Einstellungen öffnen",
+        )),
+        Line::from(l(
+            language,
+            "  Tab          Next menu (full sidebar cycle)",
+            "  Tab          Nächstes Menü (ganze Seitenleiste)",
+        )),
+        Line::from(l(
+            language,
+            "  Shift+Tab    Previous menu (full sidebar cycle)",
+            "  Shift+Tab    Vorheriges Menü (ganze Seitenleiste)",
+        )),
+        Line::from(l(
+            language,
+            "  Left/Right   Switch menu",
+            "  Links/Rechts Menü wechseln",
+        )),
+        Line::from(l(
+            language,
+            "  j/k          Scroll main container",
+            "  j/k          Hauptbereich scrollen",
+        )),
+        Line::from(l(
+            language,
+            "  Up/Down      Scroll main container",
+            "  Hoch/Runter  Hauptbereich scrollen",
+        )),
+        Line::from(l(
+            language,
+            "  Mouse wheel  Scroll active container/popup",
+            "  Mausrad      Aktiven Bereich/Popup scrollen",
+        )),
+        Line::from(l(
+            language,
+            "  PgUp/PgDn    Fast scroll",
+            "  Bild↑/Bild↓  Schnell scrollen",
+        )),
+        Line::from(l(
+            language,
+            "  g            Scroll to top",
+            "  g            Nach oben scrollen",
+        )),
+        Line::from(l(
+            language,
+            "  ?            Open/close this popup",
+            "  ?            Dieses Popup öffnen/schließen",
+        )),
         Line::from(""),
-        Line::from("Popup Navigation"),
-        Line::from("  j/k or Up/Down  Scroll inside popup"),
-        Line::from("  PgUp/PgDn       Fast scroll inside popup"),
-        Line::from("  Esc or ?        Close popup"),
+        Line::from(l(language, "Popup Navigation", "Popup-Navigation")),
+        Line::from(l(
+            language,
+            "  j/k or Up/Down  Scroll inside popup",
+            "  j/k oder Hoch/Runter Im Popup scrollen",
+        )),
+        Line::from(l(
+            language,
+            "  PgUp/PgDn       Fast scroll inside popup",
+            "  Bild↑/Bild↓      Schnell im Popup scrollen",
+        )),
+        Line::from(l(
+            language,
+            "  Esc or ?        Close popup",
+            "  Esc oder ?       Popup schließen",
+        )),
         Line::from(""),
     ];
 
     match view {
         ActiveView::Dashboard => {
-            lines.push(Line::from("Current menu: Dashboard"));
-            lines.push(Line::from("  Realtime system status and health overview."));
+            lines.push(Line::from(format!(
+                "{}: {}",
+                l(language, "Current menu", "Aktuelles Menü"),
+                view.title_for_language(language)
+            )));
+            lines.push(Line::from(l(
+                language,
+                "  Realtime system status and health overview.",
+                "  Echtzeit-Systemstatus und Zustandsübersicht.",
+            )));
         }
         ActiveView::SmartCare => {
-            lines.push(Line::from("Current menu: Smart Care"));
-            lines.push(Line::from(
+            lines.push(Line::from(format!(
+                "{}: {}",
+                l(language, "Current menu", "Aktuelles Menü"),
+                view.title_for_language(language)
+            )));
+            lines.push(Line::from(l(
+                language,
                 "  Shows capability-pack readiness for Smart Care orchestration.",
-            ));
+                "  Zeigt die Bereitschaft der Capability-Packs für Smart Care.",
+            )));
             lines.push(Line::from(
                 "  1/2/3/4       Toggle Cleanup/Performance/Applications/Protection",
             ));
@@ -316,10 +465,16 @@ fn keybindings_popup_lines(view: ActiveView) -> Vec<Line<'static>> {
         | ActiveView::Protection
         | ActiveView::Performance
         | ActiveView::Applications => {
-            lines.push(Line::from(format!("Current menu: {}", view.title())));
-            lines.push(Line::from(
+            lines.push(Line::from(format!(
+                "{}: {}",
+                l(language, "Current menu", "Aktuelles Menü"),
+                view.title_for_language(language)
+            )));
+            lines.push(Line::from(l(
+                language,
                 "  Shows installed capability plugins and trust readiness.",
-            ));
+                "  Zeigt installierte Capability-Plugins und Trust-Bereitschaft.",
+            )));
             lines.push(Line::from(
                 "  1/2/3/4       Toggle Cleanup/Performance/Applications/Protection",
             ));
@@ -355,8 +510,16 @@ fn keybindings_popup_lines(view: ActiveView) -> Vec<Line<'static>> {
             lines.push(Line::from("  m             Jump to Smart Care dashboard"));
         }
         ActiveView::Plugins => {
-            lines.push(Line::from("Current menu: Plugins"));
-            lines.push(Line::from("  e             Edit plugin spec"));
+            lines.push(Line::from(format!(
+                "{}: {}",
+                l(language, "Current menu", "Aktuelles Menü"),
+                view.title_for_language(language)
+            )));
+            lines.push(Line::from(l(
+                language,
+                "  e             Edit plugin spec",
+                "  e             Plugin-Spec bearbeiten",
+            )));
             lines.push(Line::from("  l             plugin list"));
             lines.push(Line::from("  s             plugin search"));
             lines.push(Line::from("  i             plugin info <spec>"));
@@ -368,32 +531,57 @@ fn keybindings_popup_lines(view: ActiveView) -> Vec<Line<'static>> {
             ));
         }
         ActiveView::Checks => {
-            lines.push(Line::from("Current menu: Checks"));
-            lines.push(Line::from(
+            lines.push(Line::from(format!(
+                "{}: {}",
+                l(language, "Current menu", "Aktuelles Menü"),
+                view.title_for_language(language)
+            )));
+            lines.push(Line::from(l(
+                language,
                 "  Shows detailed checks with severity and messages.",
-            ));
+                "  Zeigt detaillierte Prüfungen mit Schweregrad und Meldungen.",
+            )));
         }
         ActiveView::Settings => {
-            lines.push(Line::from("Current menu: Settings"));
-            lines.push(Line::from("  l             Cycle language preference"));
+            lines.push(Line::from(format!(
+                "{}: {}",
+                l(language, "Current menu", "Aktuelles Menü"),
+                view.title_for_language(language)
+            )));
+            lines.push(Line::from(l(
+                language,
+                "  l             Cycle language preference",
+                "  l             Spracheinstellung wechseln",
+            )));
         }
         _ => {
             lines.push(Line::from(format!(
-                "Current menu: {} (planned)",
-                view.title()
+                "{}: {} ({})",
+                l(language, "Current menu", "Aktuelles Menü"),
+                view.title_for_language(language),
+                l(language, "planned", "geplant")
             )));
-            lines.push(Line::from(
+            lines.push(Line::from(l(
+                language,
                 "  This view is scaffolded; implementation is in roadmap.",
-            ));
+                "  Diese Ansicht ist vorbereitet; Umsetzung ist in der Roadmap.",
+            )));
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("Links"));
+    lines.push(Line::from(l(language, "Links", "Links")));
     lines.push(Line::from("  Donate: https://github.com/sponsors/Preen-rs"));
     lines.push(Line::from(
         "  Ask Question: https://github.com/Preen-rs/preen/issues",
     ));
     lines
+}
+
+fn l(language: Language, en: &'static str, de: &'static str) -> &'static str {
+    match language {
+        Language::English => en,
+        Language::German => de,
+    }
 }
 
 fn layout_footer_outer(root: Rect) -> Option<Rect> {
@@ -508,5 +696,26 @@ mod tests {
 
         let text = footer_context_text(&state);
         assert!(text.contains("Cleanup plugin command running"));
+    }
+
+    #[test]
+    fn footer_and_keybindings_use_german_language() {
+        let state = AppState {
+            active_view: ActiveView::Dashboard,
+            language_preference: crate::i18n::LanguagePreference::German,
+            ..AppState::default()
+        };
+
+        let footer = footer_context_text(&state);
+        assert!(footer.contains("Einstellungen: o"));
+        assert!(footer.contains("q Beenden"));
+
+        let popup = keybindings_popup_lines(ActiveView::Settings, Language::German)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(popup.contains("Tastenbelegung") || popup.contains("Aktuelles Menü"));
+        assert!(popup.contains("Spracheinstellung wechseln"));
     }
 }
