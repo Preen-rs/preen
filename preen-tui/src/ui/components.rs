@@ -411,8 +411,6 @@ pub(super) fn render_busy_overlay(frame: &mut Frame<'_>, area: Rect, state: &App
         Line::from(busy.detail.clone()),
         Line::from(""),
         Line::from(vec![Span::styled(bar, Style::default().fg(PALETTE_ACCENT))]),
-        Line::from(""),
-        Line::from("Working in background. UI will update automatically."),
     ];
     frame.render_widget(
         Paragraph::new(lines)

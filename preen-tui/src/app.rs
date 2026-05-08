@@ -32,6 +32,11 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
     let (mut worker, worker_rx) = StatusWorker::spawn(Duration::from_secs(1));
     worker.refresh_now();
     let mut state = AppState::default();
+    state.begin_busy_view(
+        "Loading dashboard",
+        "Collecting system health, plugins, checks, and runtime metrics",
+        "Dashboard",
+    );
 
     loop {
         while let Ok(event) = worker_rx.try_recv() {
@@ -59,6 +64,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                         smart_care_skipped_pack_ids.into_iter().collect(),
                         smart_care_dev_fallback_pack_ids.into_iter().collect(),
                     );
+                    state.clear_busy_view();
                     state.last_error = None;
                 }
                 WorkerEvent::Error(error) => {
