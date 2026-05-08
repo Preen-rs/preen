@@ -6,10 +6,21 @@ use std::path::{Path, PathBuf};
 const MAX_DISCOVERED_APPS: usize = 400;
 
 pub fn collect_installed_applications() -> Vec<InstalledApplication> {
+    collect_installed_applications_with_options(true)
+}
+
+pub fn collect_installed_application_names() -> Vec<String> {
+    collect_installed_applications_with_options(false)
+        .into_iter()
+        .map(|app| app.identity.display_name)
+        .collect()
+}
+
+fn collect_installed_applications_with_options(include_sizes: bool) -> Vec<InstalledApplication> {
     let mut apps = if cfg!(target_os = "macos") {
-        collect_macos_applications()
+        collect_macos_applications(include_sizes)
     } else if cfg!(target_os = "linux") {
-        collect_linux_applications()
+        collect_linux_applications(include_sizes)
     } else {
         Vec::new()
     };
@@ -25,14 +36,7 @@ pub fn collect_installed_applications() -> Vec<InstalledApplication> {
     apps
 }
 
-pub fn collect_installed_application_names() -> Vec<String> {
-    collect_installed_applications()
-        .into_iter()
-        .map(|app| app.identity.display_name)
-        .collect()
-}
-
-fn collect_macos_applications() -> Vec<InstalledApplication> {
+fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> {
     let mut roots = vec![
         (PathBuf::from("/Applications"), AppSource::Local, false),
         (
@@ -81,7 +85,7 @@ fn collect_macos_applications() -> Vec<InstalledApplication> {
                     .or_else(|| plist.get("CFBundleVersion"))
                     .cloned(),
                 source: source.clone(),
-                estimated_size: calculate_path_size(&path),
+                estimated_size: estimated_path_size(&path, include_sizes),
                 protected,
             });
         }
@@ -89,7 +93,7 @@ fn collect_macos_applications() -> Vec<InstalledApplication> {
     apps
 }
 
-fn collect_linux_applications() -> Vec<InstalledApplication> {
+fn collect_linux_applications(include_sizes: bool) -> Vec<InstalledApplication> {
     let mut dirs = vec![
         (PathBuf::from("/usr/share/applications"), AppSource::System),
         (
@@ -133,7 +137,7 @@ fn collect_linux_applications() -> Vec<InstalledApplication> {
                 path: path.to_string_lossy().to_string(),
                 version: desktop.get("X-Version").cloned(),
                 source: source.clone(),
-                estimated_size: calculate_path_size(&path),
+                estimated_size: estimated_path_size(&path, include_sizes),
                 protected: matches!(source, AppSource::System),
             });
         }
@@ -229,6 +233,14 @@ fn is_truthy(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "true" | "1" | "yes"
     )
+}
+
+fn estimated_path_size(path: &Path, include_size: bool) -> u64 {
+    if include_size {
+        calculate_path_size(path)
+    } else {
+        0
+    }
 }
 
 fn calculate_path_size(path: &Path) -> u64 {
@@ -348,6 +360,17 @@ Name=Docs
         fs::write(resources.join("asset.bin"), [1_u8, 2, 3]).unwrap();
 
         assert_eq!(calculate_path_size(&app_bundle), 8);
+    }
+
+    #[test]
+    fn estimated_path_size_can_skip_expensive_size_walks() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_bundle = dir.path().join("Demo.app");
+        fs::create_dir_all(&app_bundle).unwrap();
+        fs::write(app_bundle.join("Info.plist"), "plist").unwrap();
+
+        assert_eq!(estimated_path_size(&app_bundle, false), 0);
+        assert_eq!(estimated_path_size(&app_bundle, true), 5);
     }
 
     #[cfg(unix)]
