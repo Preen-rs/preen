@@ -430,10 +430,22 @@ impl AppState {
         self.applications_selected_items.contains(app_name)
     }
 
+    pub fn applications_is_protected(&self, app_name: &str) -> bool {
+        self.applications_inventory_metadata
+            .iter()
+            .any(|app| app.identity.display_name == app_name && app.protected)
+    }
+
     pub fn applications_toggle_selected(&mut self) {
         let Some(app_name) = self.applications_selected_app() else {
             return;
         };
+        if self.applications_is_protected(&app_name) {
+            self.applications_selected_items.remove(&app_name);
+            self.applications_last_action_lines =
+                vec![format!("{app_name}: protected system application skipped")];
+            return;
+        }
         if self.applications_selected_items.contains(&app_name) {
             self.applications_selected_items.remove(&app_name);
         } else {
@@ -465,10 +477,13 @@ impl AppState {
         let mut targets = self
             .applications_selected_items
             .iter()
+            .filter(|app_name| !self.applications_is_protected(app_name))
             .cloned()
             .collect::<Vec<_>>();
         if targets.is_empty()
-            && let Some(current) = self.applications_selected_app()
+            && let Some(current) = self
+                .applications_selected_app()
+                .filter(|app_name| !self.applications_is_protected(app_name))
         {
             targets.push(current);
         }
@@ -482,6 +497,14 @@ impl AppState {
     pub fn applications_open_uninstall_confirm(&mut self) -> Result<(), String> {
         let targets = self.applications_uninstall_targets();
         if targets.is_empty() {
+            if let Some(current) = self
+                .applications_selected_app()
+                .filter(|app_name| self.applications_is_protected(app_name))
+            {
+                return Err(format!(
+                    "{current}: protected system application uninstall nemishe"
+                ));
+            }
             return Err("hich applicationi baraye uninstall select nashode".to_string());
         }
         self.applications_pending_uninstall = targets;
@@ -1218,7 +1241,7 @@ fn build_application_uninstall_plan(app_name: &str) -> UninstallPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use preen_core::app_uninstall::{AppIdentity, RelatedPath, RelatedPathKind};
+    use preen_core::app_uninstall::{AppIdentity, AppSource, RelatedPath, RelatedPathKind};
     use preen_core::dashboard::{
         DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION, DashboardMetrics,
         RegistrySummary,
@@ -1333,6 +1356,55 @@ mod tests {
         );
 
         fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn protected_applications_are_not_selectable_or_uninstall_targets() {
+        let mut state = AppState {
+            applications_inventory: vec!["Preview".to_string(), "User App".to_string()],
+            applications_inventory_metadata: vec![
+                InstalledApplication {
+                    identity: AppIdentity::macos("Preview"),
+                    path: "/System/Applications/Preview.app".to_string(),
+                    version: None,
+                    source: AppSource::System,
+                    estimated_size: 0,
+                    protected: true,
+                },
+                InstalledApplication {
+                    identity: AppIdentity::macos("User App"),
+                    path: "/Applications/User App.app".to_string(),
+                    version: None,
+                    source: AppSource::User,
+                    estimated_size: 0,
+                    protected: false,
+                },
+            ],
+            ..AppState::default()
+        };
+
+        state.applications_selected_row = 0;
+        state.applications_toggle_selected();
+
+        assert!(!state.applications_is_selected("Preview"));
+        assert_eq!(state.applications_selected_count(), 0);
+        assert!(
+            state
+                .applications_last_action_lines
+                .iter()
+                .any(|line| line.contains("protected system application skipped"))
+        );
+        assert!(state.applications_open_uninstall_confirm().is_err());
+
+        state.applications_selected_row = 1;
+        state.applications_toggle_selected();
+
+        assert!(state.applications_is_selected("User App"));
+        state.applications_open_uninstall_confirm().unwrap();
+        assert_eq!(
+            state.applications_pending_uninstall_targets(),
+            &["User App".to_string()]
+        );
     }
 
     #[test]
