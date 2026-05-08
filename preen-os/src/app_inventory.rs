@@ -232,13 +232,13 @@ fn is_truthy(value: &str) -> bool {
 }
 
 fn calculate_path_size(path: &Path) -> u64 {
-    let Ok(metadata) = fs::metadata(path) else {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
         return 0;
     };
     if metadata.is_file() {
         return metadata.len();
     }
-    if !metadata.is_dir() {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return 0;
     }
     let Ok(entries) = fs::read_dir(path) else {
@@ -348,5 +348,20 @@ Name=Docs
         fs::write(resources.join("asset.bin"), [1_u8, 2, 3]).unwrap();
 
         assert_eq!(calculate_path_size(&app_bundle), 8);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn calculate_path_size_does_not_follow_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_bundle = dir.path().join("Demo.app");
+        fs::create_dir_all(&app_bundle).unwrap();
+        fs::write(app_bundle.join("Info.plist"), "plist").unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("large.bin"), [0_u8; 32]).unwrap();
+        std::os::unix::fs::symlink(&outside, app_bundle.join("LinkedData")).unwrap();
+
+        assert_eq!(calculate_path_size(&app_bundle), 5);
     }
 }
