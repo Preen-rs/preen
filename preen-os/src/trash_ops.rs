@@ -105,6 +105,7 @@ fn copy_path(source: &Path, destination: &Path) -> Result<(), String> {
                 .map_err(|error| format!("read dir entry failed: {}: {error}", source.display()))?;
             copy_path(&entry.path(), &destination.join(entry.file_name()))?;
         }
+        copy_permissions(&metadata, destination)?;
         Ok(())
     } else if metadata.is_file() {
         fs::copy(source, destination).map(|_| ()).map_err(|error| {
@@ -113,10 +114,16 @@ fn copy_path(source: &Path, destination: &Path) -> Result<(), String> {
                 source.display(),
                 destination.display()
             )
-        })
+        })?;
+        copy_permissions(&metadata, destination)
     } else {
         Err(format!("unsupported file type: {}", source.display()))
     }
+}
+
+fn copy_permissions(metadata: &fs::Metadata, destination: &Path) -> Result<(), String> {
+    fs::set_permissions(destination, metadata.permissions())
+        .map_err(|error| format!("set permissions failed: {}: {error}", destination.display()))
 }
 
 #[cfg(unix)]
@@ -322,6 +329,39 @@ mod tests {
             fs::read_link(destination.join("SharedLink")).unwrap(),
             PathBuf::from("../Shared")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_remove_path_preserves_file_and_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("Demo.app");
+        let executable_dir = source.join("Contents").join("MacOS");
+        fs::create_dir_all(&executable_dir).unwrap();
+        fs::set_permissions(&executable_dir, fs::Permissions::from_mode(0o750)).unwrap();
+        let executable = executable_dir.join("demo");
+        fs::write(&executable, "bin").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let destination = dir.path().join("Trash").join("Demo.app");
+
+        copy_remove_path(&source, &destination).unwrap();
+
+        let copied_dir_mode = fs::metadata(destination.join("Contents").join("MacOS"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let copied_file_mode =
+            fs::metadata(destination.join("Contents").join("MacOS").join("demo"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+
+        assert_eq!(copied_dir_mode, 0o750);
+        assert_eq!(copied_file_mode, 0o755);
     }
 
     #[test]
