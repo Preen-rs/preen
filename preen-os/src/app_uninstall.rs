@@ -246,7 +246,10 @@ fn collect_matching_paths_recursive(
                 calculate_path_size(&path),
             ));
         }
-        if path.is_dir() {
+        let is_real_dir = fs::symlink_metadata(&path)
+            .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_real_dir {
             collect_matching_paths_recursive(
                 &path,
                 match_keys,
@@ -271,13 +274,13 @@ fn dedup_related_paths(paths: Vec<RelatedPath>) -> Vec<RelatedPath> {
 }
 
 fn calculate_path_size(path: &Path) -> u64 {
-    let Ok(metadata) = fs::metadata(path) else {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
         return 0;
     };
     if metadata.is_file() {
         return metadata.len();
     }
-    if !metadata.is_dir() {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return 0;
     }
     let Ok(entries) = fs::read_dir(path) else {
@@ -339,6 +342,28 @@ mod tests {
                 .iter()
                 .any(|path| path.path == cache.display().to_string()
                     && path.kind == RelatedPathKind::Cache)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn related_path_discovery_does_not_follow_symlinked_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        let outside_demo = outside.join("demo");
+        fs::create_dir_all(&outside_demo).unwrap();
+        fs::write(outside_demo.join("state"), "x").unwrap();
+        let config = dir.path().join(".config");
+        fs::create_dir_all(&config).unwrap();
+        std::os::unix::fs::symlink(&outside, config.join("linked-config")).unwrap();
+
+        let identity = AppIdentity::linux("Demo");
+        let paths = discover_related_path_items(&identity, dir.path());
+
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.path == outside_demo.display().to_string())
         );
     }
 
