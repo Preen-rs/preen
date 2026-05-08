@@ -47,6 +47,20 @@ pub fn move_path_to_home_trash(path: &Path) -> Result<TrashMove, String> {
                     trashed_path: candidate,
                 });
             }
+            Err(error) if is_cross_device_error(&error) => {
+                copy_remove_path(path, &candidate).map_err(|copy_error| {
+                    let _ = cleanup_path(&candidate);
+                    format!(
+                        "cross-device move failed: {} -> {}: {copy_error}",
+                        path.display(),
+                        candidate.display()
+                    )
+                })?;
+                return Ok(TrashMove {
+                    original_path: path.to_path_buf(),
+                    trashed_path: candidate,
+                });
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -64,6 +78,80 @@ pub fn move_path_to_home_trash(path: &Path) -> Result<TrashMove, String> {
                 ));
             }
         }
+    }
+}
+
+fn is_cross_device_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(18)
+}
+
+fn copy_remove_path(source: &Path, destination: &Path) -> Result<(), String> {
+    copy_path(source, destination)?;
+    cleanup_path(source)
+}
+
+fn copy_path(source: &Path, destination: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("read metadata failed: {}: {error}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        copy_symlink(source, destination)
+    } else if metadata.is_dir() {
+        fs::create_dir_all(destination)
+            .map_err(|error| format!("create dir failed: {}: {error}", destination.display()))?;
+        let entries = fs::read_dir(source)
+            .map_err(|error| format!("read dir failed: {}: {error}", source.display()))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| format!("read dir entry failed: {}: {error}", source.display()))?;
+            copy_path(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else if metadata.is_file() {
+        fs::copy(source, destination).map(|_| ()).map_err(|error| {
+            format!(
+                "copy file failed: {} -> {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        })
+    } else {
+        Err(format!("unsupported file type: {}", source.display()))
+    }
+}
+
+#[cfg(unix)]
+fn copy_symlink(source: &Path, destination: &Path) -> Result<(), String> {
+    let target = fs::read_link(source)
+        .map_err(|error| format!("read symlink failed: {}: {error}", source.display()))?;
+    std::os::unix::fs::symlink(&target, destination).map_err(|error| {
+        format!(
+            "copy symlink failed: {} -> {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn copy_symlink(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::copy(source, destination).map(|_| ()).map_err(|error| {
+        format!(
+            "copy symlink target failed: {} -> {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })
+}
+
+fn cleanup_path(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("read metadata failed: {}: {error}", path.display()))?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)
+            .map_err(|error| format!("remove dir failed: {}: {error}", path.display()))
+    } else {
+        fs::remove_file(path)
+            .map_err(|error| format!("remove file failed: {}: {error}", path.display()))
     }
 }
 
@@ -176,6 +264,53 @@ mod tests {
         };
 
         assert_eq!(home_trash_files_dir(&home), expected);
+    }
+
+    #[test]
+    fn copy_remove_path_moves_directory_trees() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("Demo.app");
+        let nested = source.join("Contents").join("Resources");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(source.join("Contents").join("Info.plist"), "plist").unwrap();
+        fs::write(nested.join("asset.bin"), "asset").unwrap();
+        let destination = dir.path().join("Trash").join("Demo.app");
+
+        copy_remove_path(&source, &destination).unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("Contents").join("Info.plist")).unwrap(),
+            "plist"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                destination
+                    .join("Contents")
+                    .join("Resources")
+                    .join("asset.bin")
+            )
+            .unwrap(),
+            "asset"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_remove_path_preserves_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("Demo.app");
+        fs::create_dir_all(&source).unwrap();
+        std::os::unix::fs::symlink("../Shared", source.join("SharedLink")).unwrap();
+        let destination = dir.path().join("Trash").join("Demo.app");
+
+        copy_remove_path(&source, &destination).unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_link(destination.join("SharedLink")).unwrap(),
+            PathBuf::from("../Shared")
+        );
     }
 
     #[test]
