@@ -1,7 +1,7 @@
 use crate::{app_inventory, trash_ops};
 use preen_core::app_uninstall::{
-    AppIdentity, AppPlatform, InstalledApplication, RelatedPath, RelatedPathKind, UninstallPlan,
-    path_name_matches_app,
+    AppIdentity, AppPlatform, InstalledApplication, RelatedPath, RelatedPathConfidence,
+    RelatedPathKind, UninstallPlan, path_name_match_confidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -41,6 +41,11 @@ pub struct AppUninstallUndoOutput {
     pub lines: Vec<String>,
     pub restored_apps: Vec<String>,
     pub retry_records: Vec<AppUninstallJournalRecord>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppUninstallOptions {
+    pub excluded_paths: Vec<PathBuf>,
 }
 
 impl AppUninstallJournal {
@@ -121,14 +126,21 @@ pub fn build_uninstall_plan_for_name(app_name: &str) -> UninstallPlan {
         bundle_identifier: None,
         desktop_id: None,
     };
-    let paths = discover_related_path_items(&identity, &home_dir());
+    let paths = discover_related_path_items(&identity, &home_dir(), &[]);
     UninstallPlan::trash(identity, paths)
 }
 
 pub fn build_uninstall_plan_for_application(app: InstalledApplication) -> UninstallPlan {
+    build_uninstall_plan_for_application_with_options(app, &AppUninstallOptions::default())
+}
+
+pub fn build_uninstall_plan_for_application_with_options(
+    app: InstalledApplication,
+    options: &AppUninstallOptions,
+) -> UninstallPlan {
     let mut paths = Vec::new();
     let app_path = PathBuf::from(&app.path);
-    if app_path.exists() {
+    if app_path.exists() && !is_path_excluded(&app_path, &options.excluded_paths) {
         paths.push(RelatedPath {
             path: app.path.clone(),
             kind: match app.identity.platform {
@@ -136,15 +148,28 @@ pub fn build_uninstall_plan_for_application(app: InstalledApplication) -> Uninst
                 AppPlatform::Linux => RelatedPathKind::DesktopEntry,
             },
             estimated_size: calculate_path_size(&app_path),
+            confidence: RelatedPathConfidence::Exact,
         });
     }
-    paths.extend(discover_related_path_items(&app.identity, &home_dir()));
+    paths.extend(discover_related_path_items(
+        &app.identity,
+        &home_dir(),
+        &options.excluded_paths,
+    ));
     UninstallPlan::trash_with_protection(app.identity, dedup_related_paths(paths), app.protected)
 }
 
 pub fn execute_app_uninstall(
     applications: Vec<InstalledApplication>,
     state_dir: Option<&Path>,
+) -> Result<AppUninstallExecutionOutput, String> {
+    execute_app_uninstall_with_options(applications, state_dir, &AppUninstallOptions::default())
+}
+
+pub fn execute_app_uninstall_with_options(
+    applications: Vec<InstalledApplication>,
+    state_dir: Option<&Path>,
+    options: &AppUninstallOptions,
 ) -> Result<AppUninstallExecutionOutput, String> {
     if applications.is_empty() {
         return Err("no application selected for uninstall".to_string());
@@ -156,7 +181,7 @@ pub fn execute_app_uninstall(
 
     for application in applications {
         let app_name = application.identity.display_name.clone();
-        let plan = build_uninstall_plan_for_application(application);
+        let plan = build_uninstall_plan_for_application_with_options(application, options);
         if plan.protected {
             lines.push(format!("{app_name}: protected system application skipped"));
             continue;
@@ -168,6 +193,10 @@ pub fn execute_app_uninstall(
 
         let mut moves = Vec::new();
         for related_path in &plan.paths {
+            if matches!(related_path.confidence, RelatedPathConfidence::Fuzzy) {
+                lines.push(format!("skipped fuzzy match: {}", related_path.path));
+                continue;
+            }
             let path = PathBuf::from(&related_path.path);
             if !path.exists() {
                 continue;
@@ -301,7 +330,11 @@ pub fn undo_app_uninstall_records(
     })
 }
 
-fn discover_related_path_items(identity: &AppIdentity, home: &Path) -> Vec<RelatedPath> {
+fn discover_related_path_items(
+    identity: &AppIdentity,
+    home: &Path,
+    excluded_paths: &[PathBuf],
+) -> Vec<RelatedPath> {
     let app_name = identity.display_name.trim();
     if app_name.is_empty() {
         return Vec::new();
@@ -318,26 +351,28 @@ fn discover_related_path_items(identity: &AppIdentity, home: &Path) -> Vec<Relat
             home.join("Applications"),
         ] {
             let path = root.join(&app_bundle);
-            if path.exists() {
+            if path.exists() && !is_path_excluded(&path, excluded_paths) {
                 paths.insert((
                     path.display().to_string(),
                     RelatedPathKind::ApplicationBundle,
                     calculate_path_size(&path),
+                    RelatedPathConfidence::Exact,
                 ));
             }
         }
     }
 
     for (root, kind) in application_related_roots(identity.platform.clone(), home) {
-        collect_matching_paths_under(&root, &match_keys, 2, kind, &mut paths);
+        collect_matching_paths_under(&root, &match_keys, excluded_paths, 2, kind, &mut paths);
     }
 
     paths
         .into_iter()
-        .map(|(path, kind, estimated_size)| RelatedPath {
+        .map(|(path, kind, estimated_size, confidence)| RelatedPath {
             path,
             kind,
             estimated_size,
+            confidence,
         })
         .collect()
 }
@@ -382,22 +417,24 @@ fn application_related_roots(
 fn collect_matching_paths_under(
     root: &Path,
     match_keys: &[String],
+    excluded_paths: &[PathBuf],
     max_depth: usize,
     kind: RelatedPathKind,
-    out: &mut BTreeSet<(String, RelatedPathKind, u64)>,
+    out: &mut BTreeSet<(String, RelatedPathKind, u64, RelatedPathConfidence)>,
 ) {
-    collect_matching_paths_recursive(root, match_keys, 0, max_depth, kind, out);
+    collect_matching_paths_recursive(root, match_keys, excluded_paths, 0, max_depth, kind, out);
 }
 
 fn collect_matching_paths_recursive(
     root: &Path,
     match_keys: &[String],
+    excluded_paths: &[PathBuf],
     depth: usize,
     max_depth: usize,
     kind: RelatedPathKind,
-    out: &mut BTreeSet<(String, RelatedPathKind, u64)>,
+    out: &mut BTreeSet<(String, RelatedPathKind, u64, RelatedPathConfidence)>,
 ) {
-    if depth > max_depth || !root.exists() {
+    if depth > max_depth || !root.exists() || is_path_excluded(root, excluded_paths) {
         return;
     }
     let entries = match fs::read_dir(root) {
@@ -410,13 +447,17 @@ fn collect_matching_paths_recursive(
             .file_name()
             .and_then(|value| value.to_str())
             .map(|value| value.to_string());
+        if is_path_excluded(&path, excluded_paths) {
+            continue;
+        }
         if let Some(name) = name
-            && path_name_matches_app(&name, match_keys)
+            && let Some(confidence) = path_name_match_confidence(&name, match_keys)
         {
             out.insert((
                 path.display().to_string(),
                 kind.clone(),
                 calculate_path_size(&path),
+                confidence,
             ));
         }
         let is_real_dir = fs::symlink_metadata(&path)
@@ -426,6 +467,7 @@ fn collect_matching_paths_recursive(
             collect_matching_paths_recursive(
                 &path,
                 match_keys,
+                excluded_paths,
                 depth + 1,
                 max_depth,
                 kind.clone(),
@@ -433,6 +475,23 @@ fn collect_matching_paths_recursive(
             );
         }
     }
+}
+
+fn is_path_excluded(path: &Path, excluded_paths: &[PathBuf]) -> bool {
+    excluded_paths
+        .iter()
+        .filter(|excluded| !excluded.as_os_str().is_empty())
+        .any(|excluded| path_starts_with(path, excluded))
+}
+
+fn path_starts_with(path: &Path, prefix: &Path) -> bool {
+    let path = normalize_path_for_compare(path);
+    let prefix = normalize_path_for_compare(prefix);
+    path.starts_with(prefix)
+}
+
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn dedup_related_paths(paths: Vec<RelatedPath>) -> Vec<RelatedPath> {
@@ -548,7 +607,7 @@ mod tests {
         fs::write(cache.join("state"), "x").unwrap();
 
         let identity = AppIdentity::linux("Demo");
-        let paths = discover_related_path_items(&identity, dir.path());
+        let paths = discover_related_path_items(&identity, dir.path(), &[]);
 
         assert!(
             paths
@@ -571,12 +630,55 @@ mod tests {
         std::os::unix::fs::symlink(&outside, config.join("linked-config")).unwrap();
 
         let identity = AppIdentity::linux("Demo");
-        let paths = discover_related_path_items(&identity, dir.path());
+        let paths = discover_related_path_items(&identity, dir.path(), &[]);
 
         assert!(
             !paths
                 .iter()
                 .any(|path| path.path == outside_demo.display().to_string())
+        );
+    }
+
+    #[test]
+    fn related_path_discovery_marks_fuzzy_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let preferences = dir.path().join("Library").join("Preferences");
+        let exact = preferences.join("chrome");
+        let fuzzy = preferences.join("com.google.chrome.plist");
+        fs::create_dir_all(&preferences).unwrap();
+        fs::write(&exact, "exact").unwrap();
+        fs::write(&fuzzy, "fuzzy").unwrap();
+
+        let paths = discover_related_path_items(&AppIdentity::macos("Chrome"), dir.path(), &[]);
+
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.path == exact.display().to_string()
+                    && path.confidence == RelatedPathConfidence::Strong)
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.path == fuzzy.display().to_string()
+                    && path.confidence == RelatedPathConfidence::Fuzzy)
+        );
+    }
+
+    #[test]
+    fn related_path_discovery_respects_excluded_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join(".cache").join("demo");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("state"), "x").unwrap();
+
+        let paths =
+            discover_related_path_items(&AppIdentity::linux("Demo"), dir.path(), &[cache.clone()]);
+
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.path == cache.display().to_string())
         );
     }
 
@@ -617,6 +719,45 @@ mod tests {
     }
 
     #[test]
+    fn execute_app_uninstall_skips_fuzzy_related_paths_by_default() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", dir.path().to_string_lossy().as_ref());
+        let state_dir = dir.path().join("state");
+        let app_path = dir.path().join("Chrome.app");
+        let preferences = dir.path().join("Library").join("Preferences");
+        let fuzzy = preferences.join("com.google.chrome.plist");
+        fs::create_dir_all(&app_path).unwrap();
+        fs::create_dir_all(&preferences).unwrap();
+        fs::write(app_path.join("Info.plist"), "demo").unwrap();
+        fs::write(&fuzzy, "keep").unwrap();
+
+        let output = execute_app_uninstall(
+            vec![InstalledApplication {
+                identity: AppIdentity::macos("Chrome"),
+                path: app_path.to_string_lossy().to_string(),
+                version: None,
+                source: AppSource::User,
+                estimated_size: 0,
+                last_used_at: None,
+                update_status: AppUpdateStatus::NotManaged,
+                protected: false,
+            }],
+            Some(&state_dir),
+        )
+        .unwrap();
+
+        assert!(!app_path.exists());
+        assert!(fuzzy.exists());
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == &format!("skipped fuzzy match: {}", fuzzy.display()))
+        );
+    }
+
+    #[test]
     fn undo_last_app_uninstall_restores_and_clears_journal() {
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state");
@@ -632,6 +773,7 @@ mod tests {
                     path: original_path.display().to_string(),
                     kind: RelatedPathKind::ApplicationBundle,
                     estimated_size: 4,
+                    confidence: RelatedPathConfidence::Exact,
                 }],
             ),
             moves: vec![AppUninstallJournalMove {
@@ -677,11 +819,13 @@ mod tests {
                             path: restored_original.display().to_string(),
                             kind: RelatedPathKind::ApplicationBundle,
                             estimated_size: 8,
+                            confidence: RelatedPathConfidence::Exact,
                         },
                         RelatedPath {
                             path: blocked_original.display().to_string(),
                             kind: RelatedPathKind::ApplicationBundle,
                             estimated_size: 3,
+                            confidence: RelatedPathConfidence::Exact,
                         },
                     ],
                 ),
@@ -728,6 +872,7 @@ mod tests {
                     path: "/Applications/Demo.app".to_string(),
                     kind: RelatedPathKind::ApplicationBundle,
                     estimated_size: 12,
+                    confidence: RelatedPathConfidence::Exact,
                 }],
             ),
             moves: vec![AppUninstallJournalMove {

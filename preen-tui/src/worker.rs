@@ -71,9 +71,11 @@ pub enum WorkerCommand {
     ApplicationsInventoryAnalyze,
     ApplicationsPathsInspect {
         application: InstalledApplication,
+        excluded_paths: Vec<PathBuf>,
     },
     ApplicationsUninstall {
         applications: Vec<InstalledApplication>,
+        excluded_paths: Vec<PathBuf>,
     },
     ApplicationsUndo,
     SmartCareAnalyze {
@@ -149,16 +151,28 @@ impl StatusWorker {
             .send(WorkerCommand::ApplicationsInventoryAnalyze);
     }
 
-    pub fn run_applications_paths_inspect(&self, application: InstalledApplication) {
+    pub fn run_applications_paths_inspect(
+        &self,
+        application: InstalledApplication,
+        excluded_paths: Vec<PathBuf>,
+    ) {
         let _ = self
             .command_tx
-            .send(WorkerCommand::ApplicationsPathsInspect { application });
+            .send(WorkerCommand::ApplicationsPathsInspect {
+                application,
+                excluded_paths,
+            });
     }
 
-    pub fn run_applications_uninstall(&self, applications: Vec<InstalledApplication>) {
-        let _ = self
-            .command_tx
-            .send(WorkerCommand::ApplicationsUninstall { applications });
+    pub fn run_applications_uninstall(
+        &self,
+        applications: Vec<InstalledApplication>,
+        excluded_paths: Vec<PathBuf>,
+    ) {
+        let _ = self.command_tx.send(WorkerCommand::ApplicationsUninstall {
+            applications,
+            excluded_paths,
+        });
     }
 
     pub fn run_applications_undo(&self) {
@@ -300,7 +314,10 @@ fn run_worker_loop(
                 });
                 continue;
             }
-            Ok(WorkerCommand::ApplicationsPathsInspect { application }) => {
+            Ok(WorkerCommand::ApplicationsPathsInspect {
+                application,
+                excluded_paths,
+            }) => {
                 if background_action_running.swap(true, Ordering::SeqCst) {
                     if event_tx
                         .send(WorkerEvent::Error(
@@ -316,15 +333,22 @@ fn run_worker_loop(
                 let background_action_running = Arc::clone(&background_action_running);
                 thread::spawn(move || {
                     let app_name = application.identity.display_name.clone();
-                    let paths = app_uninstall::build_uninstall_plan_for_application(application)
-                        .target_paths();
+                    let options = app_uninstall::AppUninstallOptions { excluded_paths };
+                    let paths = app_uninstall::build_uninstall_plan_for_application_with_options(
+                        application,
+                        &options,
+                    )
+                    .target_paths();
                     background_action_running.store(false, Ordering::SeqCst);
                     let _ = event_tx_for_action
                         .send(WorkerEvent::ApplicationsPathsInspectResult { app_name, paths });
                 });
                 continue;
             }
-            Ok(WorkerCommand::ApplicationsUninstall { applications }) => {
+            Ok(WorkerCommand::ApplicationsUninstall {
+                applications,
+                excluded_paths,
+            }) => {
                 if background_action_running.swap(true, Ordering::SeqCst) {
                     if event_tx
                         .send(WorkerEvent::Error(
@@ -340,8 +364,12 @@ fn run_worker_loop(
                 let background_action_running = Arc::clone(&background_action_running);
                 let state_dir = latest_state_dir.clone();
                 thread::spawn(move || {
-                    let output =
-                        app_uninstall::execute_app_uninstall(applications, state_dir.as_deref());
+                    let options = app_uninstall::AppUninstallOptions { excluded_paths };
+                    let output = app_uninstall::execute_app_uninstall_with_options(
+                        applications,
+                        state_dir.as_deref(),
+                        &options,
+                    );
                     background_action_running.store(false, Ordering::SeqCst);
                     match output {
                         Ok(output) => {

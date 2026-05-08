@@ -96,6 +96,14 @@ pub struct RelatedPath {
     pub path: String,
     pub kind: RelatedPathKind,
     pub estimated_size: u64,
+    pub confidence: RelatedPathConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RelatedPathConfidence {
+    Exact,
+    Strong,
+    Fuzzy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,9 +170,23 @@ fn push_normalized_key(keys: &mut Vec<String>, value: &str) {
 }
 
 pub fn path_name_matches_app(path_name: &str, keys: &[String]) -> bool {
+    path_name_match_confidence(path_name, keys).is_some()
+}
+
+pub fn path_name_match_confidence(
+    path_name: &str,
+    keys: &[String],
+) -> Option<RelatedPathConfidence> {
     let normalized = normalize_app_match_key(path_name);
-    keys.iter()
-        .any(|key| normalized == *key || (key.len() >= 5 && normalized.contains(key)))
+    keys.iter().find_map(|key| {
+        if normalized == *key {
+            Some(RelatedPathConfidence::Strong)
+        } else if key.len() >= 5 && normalized.contains(key) {
+            Some(RelatedPathConfidence::Fuzzy)
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
@@ -201,11 +223,13 @@ mod tests {
                     path: "/tmp/a".to_string(),
                     kind: RelatedPathKind::Cache,
                     estimated_size: 3,
+                    confidence: RelatedPathConfidence::Strong,
                 },
                 RelatedPath {
                     path: "/tmp/b".to_string(),
                     kind: RelatedPathKind::Log,
                     estimated_size: 4,
+                    confidence: RelatedPathConfidence::Strong,
                 },
             ],
         );
@@ -256,5 +280,17 @@ mod tests {
             "com.example.ssh-helper",
             &["ssh".to_string()]
         ));
+    }
+
+    #[test]
+    fn path_name_matching_classifies_fuzzy_matches() {
+        assert_eq!(
+            path_name_match_confidence("Chrome", &["chrome".to_string()]),
+            Some(RelatedPathConfidence::Strong)
+        );
+        assert_eq!(
+            path_name_match_confidence("com.google.Chrome.plist", &["chrome".to_string()]),
+            Some(RelatedPathConfidence::Fuzzy)
+        );
     }
 }

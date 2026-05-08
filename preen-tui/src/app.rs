@@ -830,7 +830,7 @@ fn dispatch_applications_paths_inspect(state: &mut AppState, worker: &StatusWork
     };
     let app_name = application.identity.display_name.clone();
     state.begin_applications_paths_inspect(&app_name);
-    worker.run_applications_paths_inspect(application);
+    worker.run_applications_paths_inspect(application, state.sensitive_folders.clone());
 }
 
 fn dispatch_applications_uninstall(state: &mut AppState, worker: &StatusWorker) {
@@ -846,7 +846,7 @@ fn dispatch_applications_uninstall(state: &mut AppState, worker: &StatusWorker) 
         }
     };
     state.begin_applications_uninstall_action();
-    worker.run_applications_uninstall(applications);
+    worker.run_applications_uninstall(applications, state.sensitive_folders.clone());
 }
 
 fn dispatch_applications_undo(state: &mut AppState, worker: &StatusWorker) {
