@@ -71,6 +71,12 @@ pub fn restore_trashed_path(original_path: &Path, trashed_path: &Path) -> Result
     if !trashed_path.exists() {
         return Err(format!("trash item not found: {}", trashed_path.display()));
     }
+    if original_path.exists() {
+        return Err(format!(
+            "restore target already exists: {}",
+            original_path.display()
+        ));
+    }
     if let Some(parent) = original_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -150,5 +156,21 @@ mod tests {
         restore_trashed_path(&moved.original_path, &moved.trashed_path).unwrap();
         assert!(source.exists());
         assert!(!moved.trashed_path.exists());
+    }
+
+    #[test]
+    fn restore_refuses_to_replace_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("item.txt");
+        let trashed = dir.path().join(".Trash").join("item.txt");
+        fs::create_dir_all(trashed.parent().unwrap()).unwrap();
+        fs::write(&original, "new").unwrap();
+        fs::write(&trashed, "old").unwrap();
+
+        let error = restore_trashed_path(&original, &trashed).unwrap_err();
+
+        assert!(error.contains("restore target already exists"));
+        assert_eq!(fs::read_to_string(&original).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&trashed).unwrap(), "old");
     }
 }
