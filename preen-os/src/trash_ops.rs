@@ -28,7 +28,7 @@ pub fn move_path_to_home_trash(path: &Path) -> Result<TrashMove, String> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| "HOME is not set".to_string())?;
-    let trash_dir = home.join(".Trash");
+    let trash_dir = home_trash_files_dir(&home);
     fs::create_dir_all(&trash_dir).map_err(|error| format!("create trash dir failed: {error}"))?;
     let file_name = path
         .file_name()
@@ -64,6 +64,14 @@ pub fn move_path_to_home_trash(path: &Path) -> Result<TrashMove, String> {
                 ));
             }
         }
+    }
+}
+
+fn home_trash_files_dir(home: &Path) -> PathBuf {
+    if cfg!(target_os = "linux") {
+        home.join(".local/share/Trash/files")
+    } else {
+        home.join(".Trash")
     }
 }
 
@@ -143,7 +151,7 @@ mod tests {
         let _home = EnvVarGuard::set("HOME", dir.path().to_string_lossy().as_ref());
         let source = dir.path().join("item.txt");
         fs::write(&source, "a").unwrap();
-        let trash_dir = dir.path().join(".Trash");
+        let trash_dir = home_trash_files_dir(dir.path());
         fs::create_dir_all(&trash_dir).unwrap();
         fs::write(trash_dir.join("item.txt"), "existing").unwrap();
 
@@ -156,6 +164,18 @@ mod tests {
         restore_trashed_path(&moved.original_path, &moved.trashed_path).unwrap();
         assert!(source.exists());
         assert!(!moved.trashed_path.exists());
+    }
+
+    #[test]
+    fn home_trash_files_dir_uses_platform_convention() {
+        let home = PathBuf::from("/home/demo");
+        let expected = if cfg!(target_os = "linux") {
+            home.join(".local/share/Trash/files")
+        } else {
+            home.join(".Trash")
+        };
+
+        assert_eq!(home_trash_files_dir(&home), expected);
     }
 
     #[test]
