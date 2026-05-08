@@ -92,6 +92,10 @@ pub enum TextKey {
     AnalyzingApplicationsDetail,
     LoadingApplicationPathsTitle,
     LoadingApplicationPathsDetail,
+    UninstallingApplicationsTitle,
+    UninstallingApplicationsDetail,
+    UndoingApplicationsTitle,
+    UndoingApplicationsDetail,
     CollectingSnapshot,
     SnapshotWorkerRunning,
     SettingsTitle,
@@ -139,6 +143,14 @@ pub fn tr(language: Language, key: TextKey) -> &'static str {
             TextKey::LoadingApplicationPathsTitle => "Loading application paths",
             TextKey::LoadingApplicationPathsDetail => {
                 "Finding related files before opening the paths view"
+            }
+            TextKey::UninstallingApplicationsTitle => "Uninstalling applications",
+            TextKey::UninstallingApplicationsDetail => {
+                "Moving selected app files to Trash and writing undo metadata"
+            }
+            TextKey::UndoingApplicationsTitle => "Restoring applications",
+            TextKey::UndoingApplicationsDetail => {
+                "Restoring files from the last application uninstall journal"
             }
             TextKey::CollectingSnapshot => "Collecting realtime snapshot...",
             TextKey::SnapshotWorkerRunning => "State worker is running in background.",
@@ -188,6 +200,14 @@ pub fn tr(language: Language, key: TextKey) -> &'static str {
             TextKey::LoadingApplicationPathsTitle => "Anwendungspfade werden geladen",
             TextKey::LoadingApplicationPathsDetail => {
                 "Zugehörige Dateien werden gesucht, bevor die Pfadansicht geöffnet wird"
+            }
+            TextKey::UninstallingApplicationsTitle => "Anwendungen werden deinstalliert",
+            TextKey::UninstallingApplicationsDetail => {
+                "Ausgewählte App-Dateien werden in den Papierkorb bewegt und Undo-Metadaten werden geschrieben"
+            }
+            TextKey::UndoingApplicationsTitle => "Anwendungen werden wiederhergestellt",
+            TextKey::UndoingApplicationsDetail => {
+                "Dateien aus dem letzten Deinstallations-Journal werden wiederhergestellt"
             }
             TextKey::CollectingSnapshot => "Echtzeit-Snapshot wird gesammelt...",
             TextKey::SnapshotWorkerRunning => "Status-Worker läuft im Hintergrund.",

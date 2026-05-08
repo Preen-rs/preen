@@ -101,6 +101,20 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                 WorkerEvent::ApplicationsPathsInspectResult { app_name, paths } => {
                     state.apply_applications_paths_inspect_result(app_name, paths);
                 }
+                WorkerEvent::ApplicationsUninstallResult {
+                    lines,
+                    removed_apps,
+                } => {
+                    state.apply_applications_uninstall_result(lines, removed_apps);
+                    state.last_error = None;
+                }
+                WorkerEvent::ApplicationsUndoResult {
+                    lines,
+                    restored_apps,
+                } => {
+                    state.apply_applications_undo_result(lines, restored_apps);
+                    state.last_error = None;
+                }
                 WorkerEvent::SmartCareAnalyzeResult { preview, lines } => {
                     state.apply_smart_care_analyze_result(preview, lines);
                     state.last_error = None;
@@ -200,13 +214,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                                     state.applications_cancel_uninstall_confirm();
                                 }
                                 KeyCode::Enter | KeyCode::Char('y') => {
-                                    if let Err(error) =
-                                        state.applications_confirm_uninstall_selected()
-                                    {
-                                        state.last_error = Some(error);
-                                    } else {
-                                        state.last_error = None;
-                                    }
+                                    dispatch_applications_uninstall(&mut state, &worker);
                                 }
                                 _ => {}
                             }
@@ -489,11 +497,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                                 if key.modifiers == KeyModifiers::NONE
                                     && matches!(state.active_view, ActiveView::Applications) =>
                             {
-                                if let Err(error) = state.applications_undo_last_uninstall() {
-                                    state.last_error = Some(error);
-                                } else {
-                                    state.last_error = None;
-                                }
+                                dispatch_applications_undo(&mut state, &worker);
                             }
                             KeyCode::Char('u')
                                 if key.modifiers == KeyModifiers::NONE
@@ -827,6 +831,31 @@ fn dispatch_applications_paths_inspect(state: &mut AppState, worker: &StatusWork
     let app_name = application.identity.display_name.clone();
     state.begin_applications_paths_inspect(&app_name);
     worker.run_applications_paths_inspect(application);
+}
+
+fn dispatch_applications_uninstall(state: &mut AppState, worker: &StatusWorker) {
+    if state.is_busy() || state.smart_care_action_running || state.plugin_action_running {
+        state.last_error = Some("background action already running".to_string());
+        return;
+    }
+    let applications = match state.applications_confirm_uninstall_selected() {
+        Ok(applications) => applications,
+        Err(error) => {
+            state.last_error = Some(error);
+            return;
+        }
+    };
+    state.begin_applications_uninstall_action();
+    worker.run_applications_uninstall(applications);
+}
+
+fn dispatch_applications_undo(state: &mut AppState, worker: &StatusWorker) {
+    if state.is_busy() || state.smart_care_action_running || state.plugin_action_running {
+        state.last_error = Some("background action already running".to_string());
+        return;
+    }
+    state.begin_applications_undo_action();
+    worker.run_applications_undo();
 }
 
 fn default_state_dir() -> Option<PathBuf> {

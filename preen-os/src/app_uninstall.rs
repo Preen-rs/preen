@@ -1,4 +1,4 @@
-use crate::app_inventory;
+use crate::{app_inventory, trash_ops};
 use preen_core::app_uninstall::{
     AppIdentity, AppPlatform, InstalledApplication, RelatedPath, RelatedPathKind, UninstallPlan,
     path_name_matches_app,
@@ -27,6 +27,20 @@ pub struct AppUninstallJournalRecord {
 pub struct AppUninstallJournalMove {
     pub original_path: PathBuf,
     pub trashed_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppUninstallExecutionOutput {
+    pub lines: Vec<String>,
+    pub removed_apps: Vec<String>,
+    pub records: Vec<AppUninstallJournalRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppUninstallUndoOutput {
+    pub lines: Vec<String>,
+    pub restored_apps: Vec<String>,
+    pub retry_records: Vec<AppUninstallJournalRecord>,
 }
 
 impl AppUninstallJournal {
@@ -126,6 +140,165 @@ pub fn build_uninstall_plan_for_application(app: InstalledApplication) -> Uninst
     }
     paths.extend(discover_related_path_items(&app.identity, &home_dir()));
     UninstallPlan::trash_with_protection(app.identity, dedup_related_paths(paths), app.protected)
+}
+
+pub fn execute_app_uninstall(
+    applications: Vec<InstalledApplication>,
+    state_dir: Option<&Path>,
+) -> Result<AppUninstallExecutionOutput, String> {
+    if applications.is_empty() {
+        return Err("no application selected for uninstall".to_string());
+    }
+
+    let mut lines = Vec::new();
+    let mut removed_apps = Vec::new();
+    let mut records = Vec::new();
+
+    for application in applications {
+        let app_name = application.identity.display_name.clone();
+        let plan = build_uninstall_plan_for_application(application);
+        if plan.protected {
+            lines.push(format!("{app_name}: protected system application skipped"));
+            continue;
+        }
+        if plan.paths.is_empty() {
+            lines.push(format!("{app_name}: no related path found"));
+            continue;
+        }
+
+        let mut moves = Vec::new();
+        for related_path in &plan.paths {
+            let path = PathBuf::from(&related_path.path);
+            if !path.exists() {
+                continue;
+            }
+            match trash_ops::move_path_to_home_trash(&path) {
+                Ok(moved) => {
+                    lines.push(format!(
+                        "moved: {} -> {}",
+                        path.display(),
+                        moved.trashed_path.display()
+                    ));
+                    moves.push(AppUninstallJournalMove {
+                        original_path: moved.original_path,
+                        trashed_path: moved.trashed_path,
+                    });
+                }
+                Err(error) => lines.push(format!("failed: {} ({error})", path.display())),
+            }
+        }
+
+        if !moves.is_empty() {
+            removed_apps.push(app_name);
+            records.push(AppUninstallJournalRecord { plan, moves });
+        }
+    }
+
+    if !records.is_empty()
+        && let Some(state_dir) = state_dir
+    {
+        let journal = AppUninstallJournal::new(records.clone());
+        match write_last_app_uninstall_journal(state_dir, &journal) {
+            Ok(path) => lines.push(format!("journal: {}", path.display())),
+            Err(error) => lines.push(format!("journal failed: {error}")),
+        }
+    }
+
+    if lines.is_empty() {
+        return Err("no file was moved; permissions may be missing".to_string());
+    }
+
+    Ok(AppUninstallExecutionOutput {
+        lines,
+        removed_apps,
+        records,
+    })
+}
+
+pub fn undo_last_app_uninstall(state_dir: &Path) -> Result<AppUninstallUndoOutput, String> {
+    let Some(journal) = read_last_app_uninstall_journal(state_dir)? else {
+        return Err("no uninstall is available to undo".to_string());
+    };
+    undo_app_uninstall_records(journal.records, Some(state_dir))
+}
+
+pub fn undo_app_uninstall_records(
+    records: Vec<AppUninstallJournalRecord>,
+    state_dir: Option<&Path>,
+) -> Result<AppUninstallUndoOutput, String> {
+    if records.is_empty() {
+        return Err("no uninstall is available to undo".to_string());
+    }
+
+    let mut lines = Vec::new();
+    let mut restored_apps = Vec::new();
+    let mut retry_records = Vec::new();
+    let mut restore_failed = false;
+
+    for record in records.into_iter().rev() {
+        let mut restored_any = false;
+        let mut failed_moves = Vec::new();
+        let plan = record.plan;
+
+        for item in record.moves.into_iter().rev() {
+            match trash_ops::restore_trashed_path(&item.original_path, &item.trashed_path) {
+                Ok(()) => {
+                    restored_any = true;
+                    lines.push(format!(
+                        "restored: {} -> {}",
+                        item.trashed_path.display(),
+                        item.original_path.display()
+                    ));
+                }
+                Err(error) => {
+                    restore_failed = true;
+                    lines.push(format!("failed: {} ({error})", item.trashed_path.display()));
+                    failed_moves.push(item);
+                }
+            }
+        }
+
+        if restored_any {
+            restored_apps.push(plan.identity.display_name.clone());
+        }
+        if !failed_moves.is_empty() {
+            failed_moves.reverse();
+            retry_records.push(AppUninstallJournalRecord {
+                plan,
+                moves: failed_moves,
+            });
+        }
+    }
+    retry_records.reverse();
+
+    if lines.is_empty() {
+        return Err("undo could not restore any file".to_string());
+    }
+
+    if restore_failed {
+        if let Some(state_dir) = state_dir
+            && !retry_records.is_empty()
+        {
+            let journal = AppUninstallJournal::new(retry_records.clone());
+            match write_last_app_uninstall_journal(state_dir, &journal) {
+                Ok(path) => lines.push(format!("journal kept: {}", path.display())),
+                Err(error) => lines.push(format!("journal keep failed: {error}")),
+            }
+        }
+    } else if !restored_apps.is_empty()
+        && let Some(state_dir) = state_dir
+    {
+        match clear_last_app_uninstall_journal(state_dir) {
+            Ok(()) => lines.push("journal cleared".to_string()),
+            Err(error) => lines.push(format!("journal clear failed: {error}")),
+        }
+    }
+
+    Ok(AppUninstallUndoOutput {
+        lines,
+        restored_apps,
+        retry_records,
+    })
 }
 
 fn discover_related_path_items(identity: &AppIdentity, home: &Path) -> Vec<RelatedPath> {
@@ -302,6 +475,44 @@ fn home_dir() -> PathBuf {
 mod tests {
     use super::*;
     use preen_core::app_uninstall::{AppSource, AppUpdateStatus};
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe {
+                    std::env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
 
     #[test]
     fn planner_keeps_protected_flag_and_application_path() {
@@ -366,6 +577,144 @@ mod tests {
             !paths
                 .iter()
                 .any(|path| path.path == outside_demo.display().to_string())
+        );
+    }
+
+    #[test]
+    fn execute_app_uninstall_moves_paths_and_writes_journal() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", dir.path().to_string_lossy().as_ref());
+        let state_dir = dir.path().join("state");
+        let app_path = dir.path().join("Demo.app");
+        fs::create_dir_all(&app_path).unwrap();
+        fs::write(app_path.join("Info.plist"), "demo").unwrap();
+
+        let output = execute_app_uninstall(
+            vec![InstalledApplication {
+                identity: AppIdentity::macos("Demo"),
+                path: app_path.to_string_lossy().to_string(),
+                version: None,
+                source: AppSource::User,
+                estimated_size: 0,
+                last_used_at: None,
+                update_status: AppUpdateStatus::NotManaged,
+                protected: false,
+            }],
+            Some(&state_dir),
+        )
+        .unwrap();
+
+        assert!(!app_path.exists());
+        assert_eq!(output.removed_apps, vec!["Demo".to_string()]);
+        assert_eq!(output.records.len(), 1);
+        assert!(output.lines.iter().any(|line| line.starts_with("journal:")));
+        assert!(
+            read_last_app_uninstall_journal(&state_dir)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn undo_last_app_uninstall_restores_and_clears_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        let original_path = dir.path().join("Applications").join("Demo.app");
+        let trashed_path = dir.path().join(".Trash").join("Demo.app");
+        fs::create_dir_all(trashed_path.parent().unwrap()).unwrap();
+        fs::write(&trashed_path, "demo").unwrap();
+
+        let journal = AppUninstallJournal::new(vec![AppUninstallJournalRecord {
+            plan: UninstallPlan::trash(
+                AppIdentity::macos("Demo"),
+                vec![RelatedPath {
+                    path: original_path.display().to_string(),
+                    kind: RelatedPathKind::ApplicationBundle,
+                    estimated_size: 4,
+                }],
+            ),
+            moves: vec![AppUninstallJournalMove {
+                original_path: original_path.clone(),
+                trashed_path: trashed_path.clone(),
+            }],
+        }]);
+        write_last_app_uninstall_journal(&state_dir, &journal).unwrap();
+
+        let output = undo_last_app_uninstall(&state_dir).unwrap();
+
+        assert!(original_path.exists());
+        assert!(!trashed_path.exists());
+        assert_eq!(output.restored_apps, vec!["Demo".to_string()]);
+        assert!(output.lines.iter().any(|line| line == "journal cleared"));
+        assert!(
+            read_last_app_uninstall_journal(&state_dir)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn undo_app_uninstall_records_keeps_failed_moves_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        let restored_original = dir.path().join("Applications").join("Restored.app");
+        let restored_trashed = dir.path().join(".Trash").join("Restored.app");
+        let blocked_original = dir.path().join("Applications").join("Blocked.app");
+        let blocked_trashed = dir.path().join(".Trash").join("Blocked.app");
+        fs::create_dir_all(restored_trashed.parent().unwrap()).unwrap();
+        fs::create_dir_all(blocked_original.parent().unwrap()).unwrap();
+        fs::write(&restored_trashed, "restored").unwrap();
+        fs::write(&blocked_original, "new").unwrap();
+        fs::write(&blocked_trashed, "old").unwrap();
+
+        let output = undo_app_uninstall_records(
+            vec![AppUninstallJournalRecord {
+                plan: UninstallPlan::trash(
+                    AppIdentity::macos("Demo"),
+                    vec![
+                        RelatedPath {
+                            path: restored_original.display().to_string(),
+                            kind: RelatedPathKind::ApplicationBundle,
+                            estimated_size: 8,
+                        },
+                        RelatedPath {
+                            path: blocked_original.display().to_string(),
+                            kind: RelatedPathKind::ApplicationBundle,
+                            estimated_size: 3,
+                        },
+                    ],
+                ),
+                moves: vec![
+                    AppUninstallJournalMove {
+                        original_path: restored_original.clone(),
+                        trashed_path: restored_trashed.clone(),
+                    },
+                    AppUninstallJournalMove {
+                        original_path: blocked_original.clone(),
+                        trashed_path: blocked_trashed.clone(),
+                    },
+                ],
+            }],
+            Some(&state_dir),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&restored_original).unwrap(), "restored");
+        assert!(!restored_trashed.exists());
+        assert_eq!(fs::read_to_string(&blocked_original).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&blocked_trashed).unwrap(), "old");
+        assert_eq!(output.retry_records.len(), 1);
+        assert_eq!(output.retry_records[0].moves.len(), 1);
+        assert_eq!(
+            output.retry_records[0].moves[0].original_path,
+            blocked_original
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.starts_with("journal kept:"))
         );
     }
 

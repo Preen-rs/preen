@@ -1,15 +1,13 @@
 use crate::i18n::{Language, LanguagePreference, TextKey, detect_system_language, locale, tr};
 use crate::plugin_status::{parse_summary_from_cli_json, render_summary_lines_with_language};
-use preen_core::app_uninstall::{InstalledApplication, UninstallPlan};
+use preen_core::app_uninstall::InstalledApplication;
 pub use preen_core::dashboard::DashboardSnapshot;
 pub use preen_core::smart_care::{
     SmartCareCapability, SmartCarePluginDescriptor, SmartCarePreview, SmartCareProfile,
     build_preview_from_descriptors,
 };
-use preen_os::app_uninstall;
 pub use preen_os::plugin_command::PluginCommandKind as PluginActionKind;
 use preen_os::smart_care_runtime;
-use preen_os::trash_ops;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -162,12 +160,6 @@ impl ActiveView {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ApplicationUninstallRecord {
-    pub plan: UninstallPlan,
-    pub moved_paths: Vec<(PathBuf, PathBuf)>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusyViewKind {
     Dashboard,
@@ -256,7 +248,6 @@ pub struct AppState {
     pub applications_show_paths_in_info: bool,
     pub applications_uninstall_confirm: bool,
     pub applications_pending_uninstall: Vec<String>,
-    pub applications_last_uninstall: Vec<ApplicationUninstallRecord>,
 }
 
 impl Default for AppState {
@@ -315,7 +306,6 @@ impl Default for AppState {
             applications_show_paths_in_info: false,
             applications_uninstall_confirm: false,
             applications_pending_uninstall: Vec::new(),
-            applications_last_uninstall: Vec::new(),
         }
     }
 }
@@ -420,12 +410,6 @@ impl AppState {
 
     pub fn is_busy(&self) -> bool {
         self.busy_view.is_some()
-    }
-
-    fn applications_state_dir(&self) -> Option<PathBuf> {
-        self.snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.state_dir.clone())
     }
 
     pub fn set_active_view(&mut self, next: ActiveView) {
@@ -594,10 +578,7 @@ impl AppState {
 
     pub fn applications_selected_metadata(&self) -> Option<InstalledApplication> {
         let app_name = self.applications_selected_app()?;
-        self.applications_inventory_metadata
-            .iter()
-            .find(|app| app.identity.display_name == app_name)
-            .cloned()
+        self.applications_metadata_for_name(&app_name)
     }
 
     pub fn applications_is_selected(&self, app_name: &str) -> bool {
@@ -684,6 +665,13 @@ impl AppState {
         &self.applications_pending_uninstall
     }
 
+    fn applications_metadata_for_name(&self, app_name: &str) -> Option<InstalledApplication> {
+        self.applications_inventory_metadata
+            .iter()
+            .find(|app| app.identity.display_name == app_name)
+            .cloned()
+    }
+
     pub fn applications_open_uninstall_confirm(&mut self) -> Result<(), String> {
         let targets = self.applications_uninstall_targets();
         if targets.is_empty() {
@@ -708,184 +696,82 @@ impl AppState {
         self.applications_pending_uninstall.clear();
     }
 
-    pub fn applications_confirm_uninstall_selected(&mut self) -> Result<(), String> {
+    pub fn applications_confirm_uninstall_selected(
+        &mut self,
+    ) -> Result<Vec<InstalledApplication>, String> {
         let targets = if self.applications_pending_uninstall.is_empty() {
             self.applications_uninstall_targets()
         } else {
             std::mem::take(&mut self.applications_pending_uninstall)
         };
         self.applications_uninstall_confirm = false;
-        self.applications_execute_uninstall(targets)
-    }
-
-    fn applications_execute_uninstall(&mut self, targets: Vec<String>) -> Result<(), String> {
         if targets.is_empty() {
             return Err("no application selected for uninstall".to_string());
         }
-        let mut logs = Vec::new();
-        let mut removed_apps = BTreeSet::new();
-        let mut uninstall_records = Vec::new();
+        let mut applications = Vec::new();
         for app_name in targets {
-            let plan = build_application_uninstall_plan(&app_name);
-            if plan.protected {
-                logs.push(format!("{app_name}: protected system application skipped"));
-                continue;
-            }
-            if plan.paths.is_empty() {
-                logs.push(format!("{app_name}: no related path found"));
-                continue;
-            }
-            let mut moved_paths = Vec::new();
-            for related_path in &plan.paths {
-                let path = PathBuf::from(&related_path.path);
-                if !path.exists() {
-                    continue;
-                }
-                match trash_ops::move_path_to_home_trash(&path) {
-                    Ok(moved) => {
-                        logs.push(format!(
-                            "moved: {} -> {}",
-                            path.display(),
-                            moved.trashed_path.display()
-                        ));
-                        moved_paths.push((moved.original_path, moved.trashed_path));
-                    }
-                    Err(error) => logs.push(format!("failed: {} ({error})", path.display())),
-                }
-            }
-            if !moved_paths.is_empty() {
-                removed_apps.insert(app_name.clone());
-                uninstall_records.push(ApplicationUninstallRecord { plan, moved_paths });
-            }
+            let application = self
+                .applications_metadata_for_name(&app_name)
+                .ok_or_else(|| format!("{app_name}: application metadata is unavailable"))?;
+            applications.push(application);
         }
+        Ok(applications)
+    }
 
+    pub fn begin_applications_uninstall_action(&mut self) {
+        self.begin_busy_view(
+            BusyViewKind::Applications,
+            self.tr(TextKey::UninstallingApplicationsTitle),
+            self.tr(TextKey::UninstallingApplicationsDetail),
+            self.tr(TextKey::Applications),
+        );
+        self.last_error = None;
+    }
+
+    pub fn begin_applications_undo_action(&mut self) {
+        self.begin_busy_view(
+            BusyViewKind::Applications,
+            self.tr(TextKey::UndoingApplicationsTitle),
+            self.tr(TextKey::UndoingApplicationsDetail),
+            self.tr(TextKey::Applications),
+        );
+        self.last_error = None;
+    }
+
+    pub fn apply_applications_uninstall_result(
+        &mut self,
+        lines: Vec<String>,
+        removed_apps: Vec<String>,
+    ) {
+        let removed_apps = removed_apps.into_iter().collect::<BTreeSet<_>>();
         if !removed_apps.is_empty() {
             self.applications_inventory
                 .retain(|item| !removed_apps.contains(item));
+            self.applications_inventory_metadata
+                .retain(|app| !removed_apps.contains(&app.identity.display_name));
             self.applications_selected_items
                 .retain(|item| !removed_apps.contains(item));
             self.applications_sync_selection();
         }
-
-        if !uninstall_records.is_empty() {
-            if let Some(state_dir) = self.applications_state_dir() {
-                let journal = app_uninstall_journal_from_records(&uninstall_records);
-                match app_uninstall::write_last_app_uninstall_journal(&state_dir, &journal) {
-                    Ok(path) => logs.push(format!("journal: {}", path.display())),
-                    Err(error) => logs.push(format!("journal failed: {error}")),
-                }
-            }
-            self.applications_last_uninstall = uninstall_records;
-        }
-
-        if logs.is_empty() {
-            return Err("no file was moved; permissions may be missing".to_string());
-        }
-        self.applications_last_action_lines = logs;
-        Ok(())
+        self.applications_last_action_lines = lines;
+        self.clear_busy_view_kind(BusyViewKind::Applications);
     }
 
-    pub fn applications_undo_last_uninstall(&mut self) -> Result<(), String> {
-        let records = if self.applications_last_uninstall.is_empty() {
-            let records = self.applications_load_last_uninstall_from_journal()?;
-            if records.is_empty() {
-                return Err("no uninstall is available to undo".to_string());
-            }
-            records
-        } else {
-            std::mem::take(&mut self.applications_last_uninstall)
-        };
-        if records.is_empty() {
-            return Err("no uninstall is available to undo".to_string());
-        }
-
-        let mut logs = Vec::new();
-        let mut restored_apps = Vec::new();
-        let mut restore_failed = false;
-        let mut failed_records = Vec::new();
-
-        for record in records.into_iter().rev() {
-            let mut restored_any = false;
-            let mut failed_paths = Vec::new();
-            let plan = record.plan;
-            for (original, trashed) in record.moved_paths.into_iter().rev() {
-                match trash_ops::restore_trashed_path(&original, &trashed) {
-                    Ok(()) => {
-                        restored_any = true;
-                        logs.push(format!(
-                            "restored: {} -> {}",
-                            trashed.display(),
-                            original.display()
-                        ));
-                    }
-                    Err(error) => {
-                        restore_failed = true;
-                        logs.push(format!("failed: {} ({error})", trashed.display()));
-                        failed_paths.push((original, trashed));
-                    }
-                }
-            }
-            if restored_any {
-                restored_apps.push(plan.identity.display_name.clone());
-            }
-            if !failed_paths.is_empty() {
-                failed_paths.reverse();
-                failed_records.push(ApplicationUninstallRecord {
-                    plan,
-                    moved_paths: failed_paths,
-                });
+    pub fn apply_applications_undo_result(
+        &mut self,
+        lines: Vec<String>,
+        restored_apps: Vec<String>,
+    ) {
+        for app in restored_apps {
+            if !self.applications_inventory.iter().any(|item| item == &app) {
+                self.applications_inventory.push(app);
             }
         }
-        failed_records.reverse();
-
-        let restored_any_app = !restored_apps.is_empty();
-        if restored_any_app {
-            for app in restored_apps {
-                if !self.applications_inventory.iter().any(|item| item == &app) {
-                    self.applications_inventory.push(app);
-                }
-            }
-            self.applications_inventory.sort();
-            self.applications_inventory.dedup();
-            self.applications_sync_selection();
-        }
-
-        if logs.is_empty() {
-            return Err("undo could not restore any file".to_string());
-        }
-
-        if restore_failed {
-            self.applications_last_uninstall = failed_records.clone();
-            if let Some(state_dir) = self.applications_state_dir()
-                && !failed_records.is_empty()
-            {
-                let journal = app_uninstall_journal_from_records(&failed_records);
-                match app_uninstall::write_last_app_uninstall_journal(&state_dir, &journal) {
-                    Ok(path) => logs.push(format!("journal kept: {}", path.display())),
-                    Err(error) => logs.push(format!("journal keep failed: {error}")),
-                }
-            }
-        } else if restored_any_app && let Some(state_dir) = self.applications_state_dir() {
-            match app_uninstall::clear_last_app_uninstall_journal(&state_dir) {
-                Ok(()) => logs.push("journal cleared".to_string()),
-                Err(error) => logs.push(format!("journal clear failed: {error}")),
-            }
-        }
-
-        self.applications_last_action_lines = logs;
-        Ok(())
-    }
-
-    fn applications_load_last_uninstall_from_journal(
-        &self,
-    ) -> Result<Vec<ApplicationUninstallRecord>, String> {
-        let Some(state_dir) = self.applications_state_dir() else {
-            return Ok(Vec::new());
-        };
-        let Some(journal) = app_uninstall::read_last_app_uninstall_journal(&state_dir)? else {
-            return Ok(Vec::new());
-        };
-        Ok(app_uninstall_records_from_journal(journal))
+        self.applications_inventory.sort();
+        self.applications_inventory.dedup();
+        self.applications_sync_selection();
+        self.applications_last_action_lines = lines;
+        self.clear_busy_view_kind(BusyViewKind::Applications);
     }
 
     pub fn scroll_info_popup_down(&mut self, amount: u16) {
@@ -1414,61 +1300,12 @@ fn clamp_diagnostic_line(line: &str, max_chars: usize) -> String {
     out
 }
 
-fn app_uninstall_journal_from_records(
-    records: &[ApplicationUninstallRecord],
-) -> app_uninstall::AppUninstallJournal {
-    app_uninstall::AppUninstallJournal::new(
-        records
-            .iter()
-            .map(|record| app_uninstall::AppUninstallJournalRecord {
-                plan: record.plan.clone(),
-                moves: record
-                    .moved_paths
-                    .iter()
-                    .map(
-                        |(original_path, trashed_path)| app_uninstall::AppUninstallJournalMove {
-                            original_path: original_path.clone(),
-                            trashed_path: trashed_path.clone(),
-                        },
-                    )
-                    .collect(),
-            })
-            .collect(),
-    )
-}
-
-fn app_uninstall_records_from_journal(
-    journal: app_uninstall::AppUninstallJournal,
-) -> Vec<ApplicationUninstallRecord> {
-    journal
-        .records
-        .into_iter()
-        .map(|record| ApplicationUninstallRecord {
-            plan: record.plan,
-            moved_paths: record
-                .moves
-                .into_iter()
-                .map(|item| (item.original_path, item.trashed_path))
-                .collect(),
-        })
-        .collect()
-}
-
-fn build_application_uninstall_plan(app_name: &str) -> UninstallPlan {
-    app_uninstall::build_uninstall_plan_for_name(app_name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use preen_core::app_uninstall::{
-        AppIdentity, AppSource, AppUpdateStatus, RelatedPath, RelatedPathKind,
-    };
-    use preen_core::dashboard::{
-        DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION, DashboardMetrics,
-        RegistrySummary,
-    };
+    use preen_core::app_uninstall::{AppIdentity, AppSource, AppUpdateStatus};
     use preen_core::smart_care::{SmartCareCapabilitySelection, SmartCareCapabilityStatus};
+    use std::collections::BTreeSet;
     use std::fs;
 
     #[test]
@@ -1563,27 +1400,6 @@ mod tests {
         assert!(!state.is_busy());
     }
 
-    fn snapshot_with_state_dir(state_dir: PathBuf) -> DashboardSnapshot {
-        DashboardSnapshot {
-            schema_version: DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
-            contract: DASHBOARD_SNAPSHOT_CONTRACT.to_string(),
-            collected_at: std::time::SystemTime::now().into(),
-            os: "macos".to_string(),
-            arch: "aarch64".to_string(),
-            state_dir,
-            health_score: 90,
-            overall_passed: true,
-            plugin_count: 0,
-            installed_plugins_on_disk: 0,
-            checks: Vec::new(),
-            warnings: Vec::new(),
-            suggested_actions: Vec::new(),
-            registry: RegistrySummary::default(),
-            metrics: DashboardMetrics::default(),
-            plugins: Vec::new(),
-        }
-    }
-
     fn create_temp_state_dir(prefix: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         let nanos = std::time::SystemTime::now()
@@ -1593,126 +1409,6 @@ mod tests {
         path.push(format!("preen-tui-{prefix}-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         path
-    }
-
-    #[test]
-    fn applications_undo_loads_persisted_journal_and_clears_it() {
-        let temp_dir = create_temp_state_dir("app-uninstall-journal");
-        let state_dir = temp_dir.join("state");
-        let original_path = temp_dir.join("Applications").join("Demo.app");
-        let trashed_path = temp_dir.join(".Trash").join("Demo.app");
-        fs::create_dir_all(trashed_path.parent().unwrap()).unwrap();
-        fs::write(&trashed_path, "demo").unwrap();
-
-        let journal = app_uninstall::AppUninstallJournal::new(vec![
-            app_uninstall::AppUninstallJournalRecord {
-                plan: UninstallPlan::trash(
-                    AppIdentity::macos("Demo"),
-                    vec![RelatedPath {
-                        path: original_path.display().to_string(),
-                        kind: RelatedPathKind::ApplicationBundle,
-                        estimated_size: 4,
-                    }],
-                ),
-                moves: vec![app_uninstall::AppUninstallJournalMove {
-                    original_path: original_path.clone(),
-                    trashed_path: trashed_path.clone(),
-                }],
-            },
-        ]);
-        app_uninstall::write_last_app_uninstall_journal(&state_dir, &journal).unwrap();
-
-        let mut state = AppState {
-            snapshot: Some(snapshot_with_state_dir(state_dir.clone())),
-            ..AppState::default()
-        };
-
-        state.applications_undo_last_uninstall().unwrap();
-
-        assert!(original_path.exists());
-        assert!(!trashed_path.exists());
-        assert_eq!(state.applications_inventory, vec!["Demo".to_string()]);
-        assert!(
-            state
-                .applications_last_action_lines
-                .iter()
-                .any(|line| line == "journal cleared")
-        );
-        assert!(
-            app_uninstall::read_last_app_uninstall_journal(&state_dir)
-                .unwrap()
-                .is_none()
-        );
-
-        fs::remove_dir_all(temp_dir).unwrap();
-    }
-
-    #[test]
-    fn applications_undo_keeps_failed_restore_records_for_retry() {
-        let temp_dir = create_temp_state_dir("app-uninstall-retry");
-        let state_dir = temp_dir.join("state");
-        let restored_original = temp_dir.join("Applications").join("Restored.app");
-        let restored_trashed = temp_dir.join(".Trash").join("Restored.app");
-        let blocked_original = temp_dir.join("Applications").join("Blocked.app");
-        let blocked_trashed = temp_dir.join(".Trash").join("Blocked.app");
-        fs::create_dir_all(restored_trashed.parent().unwrap()).unwrap();
-        fs::create_dir_all(blocked_original.parent().unwrap()).unwrap();
-        fs::write(&restored_trashed, "restored").unwrap();
-        fs::write(&blocked_original, "new").unwrap();
-        fs::write(&blocked_trashed, "old").unwrap();
-
-        let plan = UninstallPlan::trash(
-            AppIdentity::macos("Demo"),
-            vec![
-                RelatedPath {
-                    path: restored_original.display().to_string(),
-                    kind: RelatedPathKind::ApplicationBundle,
-                    estimated_size: 8,
-                },
-                RelatedPath {
-                    path: blocked_original.display().to_string(),
-                    kind: RelatedPathKind::ApplicationBundle,
-                    estimated_size: 3,
-                },
-            ],
-        );
-        let mut state = AppState {
-            snapshot: Some(snapshot_with_state_dir(state_dir.clone())),
-            applications_last_uninstall: vec![ApplicationUninstallRecord {
-                plan,
-                moved_paths: vec![
-                    (restored_original.clone(), restored_trashed.clone()),
-                    (blocked_original.clone(), blocked_trashed.clone()),
-                ],
-            }],
-            ..AppState::default()
-        };
-
-        state.applications_undo_last_uninstall().unwrap();
-
-        assert_eq!(fs::read_to_string(&restored_original).unwrap(), "restored");
-        assert!(!restored_trashed.exists());
-        assert_eq!(fs::read_to_string(&blocked_original).unwrap(), "new");
-        assert_eq!(fs::read_to_string(&blocked_trashed).unwrap(), "old");
-        assert_eq!(state.applications_last_uninstall.len(), 1);
-        assert_eq!(state.applications_last_uninstall[0].moved_paths.len(), 1);
-        assert_eq!(
-            state.applications_last_uninstall[0].moved_paths[0],
-            (blocked_original.clone(), blocked_trashed.clone())
-        );
-        assert!(
-            state
-                .applications_last_action_lines
-                .iter()
-                .any(|line| line.starts_with("journal kept:"))
-        );
-        let journal = app_uninstall::read_last_app_uninstall_journal(&state_dir)
-            .unwrap()
-            .unwrap();
-        assert_eq!(journal.records[0].moves.len(), 1);
-        assert_eq!(journal.records[0].moves[0].original_path, blocked_original);
-
-        fs::remove_dir_all(temp_dir).unwrap();
     }
 
     #[test]
@@ -1766,6 +1462,75 @@ mod tests {
             state.applications_pending_uninstall_targets(),
             &["User App".to_string()]
         );
+    }
+
+    #[test]
+    fn applications_confirm_uninstall_returns_metadata_for_worker() {
+        let mut state = AppState {
+            applications_inventory: vec!["Demo".to_string()],
+            applications_inventory_metadata: vec![InstalledApplication {
+                identity: AppIdentity::macos("Demo"),
+                path: "/Applications/Demo.app".to_string(),
+                version: None,
+                source: AppSource::User,
+                estimated_size: 0,
+                last_used_at: None,
+                update_status: AppUpdateStatus::NotManaged,
+                protected: false,
+            }],
+            ..AppState::default()
+        };
+
+        state.applications_open_uninstall_confirm().unwrap();
+        let applications = state.applications_confirm_uninstall_selected().unwrap();
+
+        assert!(!state.applications_uninstall_confirm);
+        assert_eq!(applications.len(), 1);
+        assert_eq!(applications[0].identity.display_name, "Demo");
+        assert_eq!(applications[0].path, "/Applications/Demo.app");
+    }
+
+    #[test]
+    fn applications_uninstall_result_updates_render_state_only() {
+        let mut state = AppState {
+            applications_inventory: vec!["Demo".to_string(), "Keep".to_string()],
+            applications_inventory_metadata: vec![
+                InstalledApplication {
+                    identity: AppIdentity::macos("Demo"),
+                    path: "/Applications/Demo.app".to_string(),
+                    version: None,
+                    source: AppSource::User,
+                    estimated_size: 0,
+                    last_used_at: None,
+                    update_status: AppUpdateStatus::NotManaged,
+                    protected: false,
+                },
+                InstalledApplication {
+                    identity: AppIdentity::macos("Keep"),
+                    path: "/Applications/Keep.app".to_string(),
+                    version: None,
+                    source: AppSource::User,
+                    estimated_size: 0,
+                    last_used_at: None,
+                    update_status: AppUpdateStatus::NotManaged,
+                    protected: false,
+                },
+            ],
+            applications_selected_items: BTreeSet::from(["Demo".to_string()]),
+            ..AppState::default()
+        };
+        state.begin_applications_uninstall_action();
+
+        state.apply_applications_uninstall_result(
+            vec!["moved: /Applications/Demo.app -> /Users/demo/.Trash/Demo.app".to_string()],
+            vec!["Demo".to_string()],
+        );
+
+        assert_eq!(state.applications_inventory, vec!["Keep".to_string()]);
+        assert_eq!(state.applications_inventory_metadata.len(), 1);
+        assert!(state.applications_selected_items.is_empty());
+        assert!(!state.is_busy());
+        assert_eq!(state.applications_last_action_lines.len(), 1);
     }
 
     #[test]

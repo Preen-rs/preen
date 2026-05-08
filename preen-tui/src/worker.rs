@@ -41,6 +41,14 @@ pub enum WorkerEvent {
         app_name: String,
         paths: Vec<String>,
     },
+    ApplicationsUninstallResult {
+        lines: Vec<String>,
+        removed_apps: Vec<String>,
+    },
+    ApplicationsUndoResult {
+        lines: Vec<String>,
+        restored_apps: Vec<String>,
+    },
     SmartCareAnalyzeResult {
         preview: SmartCarePreview,
         lines: Vec<String>,
@@ -64,6 +72,10 @@ pub enum WorkerCommand {
     ApplicationsPathsInspect {
         application: InstalledApplication,
     },
+    ApplicationsUninstall {
+        applications: Vec<InstalledApplication>,
+    },
+    ApplicationsUndo,
     SmartCareAnalyze {
         profile: SmartCareProfile,
         descriptors: Vec<SmartCarePluginDescriptor>,
@@ -141,6 +153,16 @@ impl StatusWorker {
         let _ = self
             .command_tx
             .send(WorkerCommand::ApplicationsPathsInspect { application });
+    }
+
+    pub fn run_applications_uninstall(&self, applications: Vec<InstalledApplication>) {
+        let _ = self
+            .command_tx
+            .send(WorkerCommand::ApplicationsUninstall { applications });
+    }
+
+    pub fn run_applications_undo(&self) {
+        let _ = self.command_tx.send(WorkerCommand::ApplicationsUndo);
     }
 
     pub fn run_smart_care_analyze(
@@ -299,6 +321,76 @@ fn run_worker_loop(
                     background_action_running.store(false, Ordering::SeqCst);
                     let _ = event_tx_for_action
                         .send(WorkerEvent::ApplicationsPathsInspectResult { app_name, paths });
+                });
+                continue;
+            }
+            Ok(WorkerCommand::ApplicationsUninstall { applications }) => {
+                if background_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "background action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_action = event_tx.clone();
+                let background_action_running = Arc::clone(&background_action_running);
+                let state_dir = latest_state_dir.clone();
+                thread::spawn(move || {
+                    let output =
+                        app_uninstall::execute_app_uninstall(applications, state_dir.as_deref());
+                    background_action_running.store(false, Ordering::SeqCst);
+                    match output {
+                        Ok(output) => {
+                            let _ = event_tx_for_action.send(
+                                WorkerEvent::ApplicationsUninstallResult {
+                                    lines: output.lines,
+                                    removed_apps: output.removed_apps,
+                                },
+                            );
+                        }
+                        Err(error) => {
+                            let _ = event_tx_for_action.send(WorkerEvent::Error(error));
+                        }
+                    }
+                });
+                continue;
+            }
+            Ok(WorkerCommand::ApplicationsUndo) => {
+                if background_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "background action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_action = event_tx.clone();
+                let background_action_running = Arc::clone(&background_action_running);
+                let state_dir = latest_state_dir.clone();
+                thread::spawn(move || {
+                    let output = state_dir
+                        .as_deref()
+                        .ok_or_else(|| "state directory is unavailable".to_string())
+                        .and_then(app_uninstall::undo_last_app_uninstall);
+                    background_action_running.store(false, Ordering::SeqCst);
+                    match output {
+                        Ok(output) => {
+                            let _ = event_tx_for_action.send(WorkerEvent::ApplicationsUndoResult {
+                                lines: output.lines,
+                                restored_apps: output.restored_apps,
+                            });
+                        }
+                        Err(error) => {
+                            let _ = event_tx_for_action.send(WorkerEvent::Error(error));
+                        }
+                    }
                 });
                 continue;
             }
@@ -814,6 +906,8 @@ params = {{}}
                 }
                 Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
                 | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
+                | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
+                | Ok(WorkerEvent::ApplicationsUndoResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -921,6 +1015,8 @@ params = {{}}
                 }
                 Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
                 | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
+                | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
+                | Ok(WorkerEvent::ApplicationsUndoResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -974,6 +1070,8 @@ params = {{}}
                 }
                 Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
                 | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
+                | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
+                | Ok(WorkerEvent::ApplicationsUndoResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -1015,6 +1113,8 @@ params = {{}}
                 Ok(WorkerEvent::Snapshot { .. })
                 | Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
                 | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
+                | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
+                | Ok(WorkerEvent::ApplicationsUndoResult { .. })
                 | Ok(WorkerEvent::PluginActionResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -1065,6 +1165,8 @@ params = {{}}
                 Ok(WorkerEvent::Snapshot { .. })
                 | Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
                 | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
+                | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
+                | Ok(WorkerEvent::ApplicationsUndoResult { .. })
                 | Ok(WorkerEvent::PluginActionResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. }) => {}
                 Ok(WorkerEvent::Error(error)) => panic!("unexpected worker error: {error}"),
