@@ -1218,7 +1218,13 @@ fn build_application_uninstall_plan(app_name: &str) -> UninstallPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use preen_core::app_uninstall::{AppIdentity, RelatedPath, RelatedPathKind};
+    use preen_core::dashboard::{
+        DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION, DashboardMetrics,
+        RegistrySummary,
+    };
     use preen_core::smart_care::{SmartCareCapabilitySelection, SmartCareCapabilityStatus};
+    use std::fs;
 
     #[test]
     fn active_view_cycle_is_stable() {
@@ -1243,6 +1249,90 @@ mod tests {
             assert!(view.supports_smart_care_controls());
             assert!(view.smart_care_capability().is_some());
         }
+    }
+
+    fn snapshot_with_state_dir(state_dir: PathBuf) -> DashboardSnapshot {
+        DashboardSnapshot {
+            schema_version: DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
+            contract: DASHBOARD_SNAPSHOT_CONTRACT.to_string(),
+            collected_at: std::time::SystemTime::now().into(),
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+            state_dir,
+            health_score: 90,
+            overall_passed: true,
+            plugin_count: 0,
+            installed_plugins_on_disk: 0,
+            checks: Vec::new(),
+            warnings: Vec::new(),
+            suggested_actions: Vec::new(),
+            registry: RegistrySummary::default(),
+            metrics: DashboardMetrics::default(),
+            plugins: Vec::new(),
+        }
+    }
+
+    fn create_temp_state_dir(prefix: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        path.push(format!("preen-tui-{prefix}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn applications_undo_loads_persisted_journal_and_clears_it() {
+        let temp_dir = create_temp_state_dir("app-uninstall-journal");
+        let state_dir = temp_dir.join("state");
+        let original_path = temp_dir.join("Applications").join("Demo.app");
+        let trashed_path = temp_dir.join(".Trash").join("Demo.app");
+        fs::create_dir_all(trashed_path.parent().unwrap()).unwrap();
+        fs::write(&trashed_path, "demo").unwrap();
+
+        let journal = app_uninstall::AppUninstallJournal::new(vec![
+            app_uninstall::AppUninstallJournalRecord {
+                plan: UninstallPlan::trash(
+                    AppIdentity::macos("Demo"),
+                    vec![RelatedPath {
+                        path: original_path.display().to_string(),
+                        kind: RelatedPathKind::ApplicationBundle,
+                        estimated_size: 4,
+                    }],
+                ),
+                moves: vec![app_uninstall::AppUninstallJournalMove {
+                    original_path: original_path.clone(),
+                    trashed_path: trashed_path.clone(),
+                }],
+            },
+        ]);
+        app_uninstall::write_last_app_uninstall_journal(&state_dir, &journal).unwrap();
+
+        let mut state = AppState {
+            snapshot: Some(snapshot_with_state_dir(state_dir.clone())),
+            ..AppState::default()
+        };
+
+        state.applications_undo_last_uninstall().unwrap();
+
+        assert!(original_path.exists());
+        assert!(!trashed_path.exists());
+        assert_eq!(state.applications_inventory, vec!["Demo".to_string()]);
+        assert!(
+            state
+                .applications_last_action_lines
+                .iter()
+                .any(|line| line == "journal cleared")
+        );
+        assert!(
+            app_uninstall::read_last_app_uninstall_journal(&state_dir)
+                .unwrap()
+                .is_none()
+        );
+
+        fs::remove_dir_all(temp_dir).unwrap();
     }
 
     #[test]
