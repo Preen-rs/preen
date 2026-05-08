@@ -232,15 +232,22 @@ fn is_truthy(value: &str) -> bool {
 }
 
 fn calculate_path_size(path: &Path) -> u64 {
-    fs::metadata(path)
-        .map(|metadata| {
-            if metadata.is_file() {
-                metadata.len()
-            } else {
-                0
-            }
-        })
-        .unwrap_or(0)
+    let Ok(metadata) = fs::metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| calculate_path_size(&entry.path()))
+        .fold(0_u64, u64::saturating_add)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -329,5 +336,17 @@ Name=Docs
         assert!(!is_visible_application_desktop_entry(&hidden));
         assert!(!is_visible_application_desktop_entry(&no_display));
         assert!(!is_visible_application_desktop_entry(&link));
+    }
+
+    #[test]
+    fn calculates_recursive_directory_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_bundle = dir.path().join("Demo.app");
+        let resources = app_bundle.join("Contents").join("Resources");
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(app_bundle.join("Contents").join("Info.plist"), "plist").unwrap();
+        fs::write(resources.join("asset.bin"), [1_u8, 2, 3]).unwrap();
+
+        assert_eq!(calculate_path_size(&app_bundle), 8);
     }
 }
