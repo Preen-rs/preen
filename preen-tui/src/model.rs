@@ -5,7 +5,6 @@ pub use preen_core::smart_care::{
     SmartCareCapability, SmartCarePluginDescriptor, SmartCarePreview, SmartCareProfile,
     build_preview_from_descriptors,
 };
-use preen_os::app_inventory;
 use preen_os::app_uninstall;
 pub use preen_os::plugin_command::PluginCommandKind as PluginActionKind;
 use preen_os::smart_care_runtime;
@@ -151,11 +150,34 @@ pub struct ApplicationUninstallRecord {
     pub moved_paths: Vec<(PathBuf, PathBuf)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusyViewState {
+    pub title: String,
+    pub detail: String,
+    pub context: String,
+}
+
+impl BusyViewState {
+    pub fn new(
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        context: impl Into<String>,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            detail: detail.into(),
+            context: context.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub active_view: ActiveView,
     pub snapshot: Option<DashboardSnapshot>,
     pub last_error: Option<String>,
+    pub ui_tick: u64,
+    pub busy_view: Option<BusyViewState>,
     pub plugin_spec: String,
     pub plugin_spec_editing: bool,
     pub plugin_last_action: Option<PluginActionKind>,
@@ -208,6 +230,8 @@ impl Default for AppState {
             active_view: ActiveView::Dashboard,
             snapshot: None,
             last_error: None,
+            ui_tick: 0,
+            busy_view: None,
             plugin_spec: String::new(),
             plugin_spec_editing: false,
             plugin_last_action: None,
@@ -257,6 +281,27 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub fn advance_ui_tick(&mut self) {
+        self.ui_tick = self.ui_tick.wrapping_add(1);
+    }
+
+    pub fn begin_busy_view(
+        &mut self,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        context: impl Into<String>,
+    ) {
+        self.busy_view = Some(BusyViewState::new(title, detail, context));
+    }
+
+    pub fn clear_busy_view(&mut self) {
+        self.busy_view = None;
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy_view.is_some()
+    }
+
     fn applications_state_dir(&self) -> Option<PathBuf> {
         self.snapshot
             .as_ref()
@@ -350,9 +395,12 @@ impl AppState {
         snapshot.metrics.installed_applications.clone()
     }
 
-    pub fn applications_run_local_inventory_analyze(&mut self) {
+    pub fn apply_applications_inventory_analyze_result(
+        &mut self,
+        applications: Vec<InstalledApplication>,
+    ) {
         let previous_len = self.applications_inventory.len();
-        self.applications_inventory_metadata = app_inventory::collect_installed_applications();
+        self.applications_inventory_metadata = applications;
         self.applications_inventory = self
             .applications_inventory_metadata
             .iter()
@@ -378,6 +426,7 @@ impl AppState {
             self.applications_inventory_revision, current_len
         )];
         self.main_scroll = 0;
+        self.clear_busy_view();
     }
 
     pub fn applications_sync_selection(&mut self) {
@@ -1292,6 +1341,29 @@ mod tests {
             assert!(view.supports_smart_care_controls());
             assert!(view.smart_care_capability().is_some());
         }
+    }
+
+    #[test]
+    fn busy_view_state_is_reusable_and_tickable() {
+        let mut state = AppState::default();
+
+        state.begin_busy_view(
+            "Analyzing applications",
+            "Scanning metadata",
+            "Applications",
+        );
+        state.advance_ui_tick();
+
+        assert!(state.is_busy());
+        assert_eq!(state.ui_tick, 1);
+        assert_eq!(
+            state.busy_view.as_ref().map(|busy| busy.title.as_str()),
+            Some("Analyzing applications")
+        );
+
+        state.clear_busy_view();
+
+        assert!(!state.is_busy());
     }
 
     fn snapshot_with_state_dir(state_dir: PathBuf) -> DashboardSnapshot {

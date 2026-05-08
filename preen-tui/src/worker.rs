@@ -1,8 +1,17 @@
 use crate::model::{DashboardSnapshot, PluginActionKind};
+use preen_core::app_uninstall::InstalledApplication;
 use preen_core::dashboard_provider::DashboardProvider;
 use preen_core::dashboard_service::DashboardApplicationService;
+use preen_core::smart_care::{SmartCarePluginDescriptor, SmartCarePreview, SmartCareProfile};
+use preen_os::app_inventory;
 use preen_os::dashboard::SnapshotCollector;
 use preen_os::plugin_command::{PluginCommandOutput, run_plugin_cli_command};
+use preen_os::smart_care::resolve_descriptors_with_report_from_state_dir;
+use preen_os::smart_care_runtime::{
+    analyze, execute_from_state_dir, undo_from_state_dir, undo_local_dry_run,
+};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -11,11 +20,31 @@ use std::time::Duration;
 
 #[derive(Debug)]
 pub enum WorkerEvent {
-    Snapshot(Box<DashboardSnapshot>),
+    Snapshot {
+        snapshot: Box<DashboardSnapshot>,
+        smart_care_descriptors: Vec<SmartCarePluginDescriptor>,
+        smart_care_error: Option<String>,
+        smart_care_source_summary: Option<String>,
+        smart_care_skipped_pack_ids: Vec<String>,
+        smart_care_dev_fallback_pack_ids: Vec<String>,
+    },
     Error(String),
     PluginActionResult {
         action: PluginActionKind,
         ok: bool,
+        lines: Vec<String>,
+    },
+    ApplicationsInventoryAnalyzeResult {
+        applications: Vec<InstalledApplication>,
+    },
+    SmartCareAnalyzeResult {
+        preview: SmartCarePreview,
+        lines: Vec<String>,
+    },
+    SmartCareRunResult {
+        lines: Vec<String>,
+    },
+    SmartCareUndoResult {
         lines: Vec<String>,
     },
 }
@@ -26,6 +55,20 @@ pub enum WorkerCommand {
     RunPluginAction {
         action: PluginActionKind,
         spec: Option<String>,
+    },
+    ApplicationsInventoryAnalyze,
+    SmartCareAnalyze {
+        profile: SmartCareProfile,
+        descriptors: Vec<SmartCarePluginDescriptor>,
+    },
+    SmartCareRun {
+        preview: SmartCarePreview,
+        disabled_entry_ids: HashSet<String>,
+        review_confirmed: bool,
+        apply_confirmed: bool,
+    },
+    SmartCareUndo {
+        has_last_run_report: bool,
     },
     Shutdown,
 }
@@ -81,6 +124,44 @@ impl StatusWorker {
             .send(WorkerCommand::RunPluginAction { action, spec });
     }
 
+    pub fn run_applications_inventory_analyze(&self) {
+        let _ = self
+            .command_tx
+            .send(WorkerCommand::ApplicationsInventoryAnalyze);
+    }
+
+    pub fn run_smart_care_analyze(
+        &self,
+        profile: SmartCareProfile,
+        descriptors: Vec<SmartCarePluginDescriptor>,
+    ) {
+        let _ = self.command_tx.send(WorkerCommand::SmartCareAnalyze {
+            profile,
+            descriptors,
+        });
+    }
+
+    pub fn run_smart_care_execute(
+        &self,
+        preview: SmartCarePreview,
+        disabled_entry_ids: HashSet<String>,
+        review_confirmed: bool,
+        apply_confirmed: bool,
+    ) {
+        let _ = self.command_tx.send(WorkerCommand::SmartCareRun {
+            preview,
+            disabled_entry_ids,
+            review_confirmed,
+            apply_confirmed,
+        });
+    }
+
+    pub fn run_smart_care_undo(&self, has_last_run_report: bool) {
+        let _ = self.command_tx.send(WorkerCommand::SmartCareUndo {
+            has_last_run_report,
+        });
+    }
+
     pub fn shutdown(&mut self) {
         let _ = self.command_tx.send(WorkerCommand::Shutdown);
         if let Some(handle) = self.join_handle.take() {
@@ -97,12 +178,28 @@ fn run_worker_loop(
     plugin_runner: PluginCommandRunner,
 ) {
     let mut service = DashboardApplicationService::new(provider);
-    let plugin_action_running = Arc::new(AtomicBool::new(false));
+    let background_action_running = Arc::new(AtomicBool::new(false));
+    let mut latest_state_dir: Option<PathBuf> = None;
     loop {
         match service.next_snapshot() {
             Ok(snapshot) => {
+                latest_state_dir = Some(snapshot.state_dir.clone());
+                let (
+                    descriptors,
+                    smart_care_error,
+                    smart_care_source_summary,
+                    smart_care_skipped_pack_ids,
+                    smart_care_dev_fallback_pack_ids,
+                ) = resolve_smart_care_descriptors(&snapshot);
                 if event_tx
-                    .send(WorkerEvent::Snapshot(Box::new(snapshot)))
+                    .send(WorkerEvent::Snapshot {
+                        snapshot: Box::new(snapshot),
+                        smart_care_descriptors: descriptors,
+                        smart_care_error,
+                        smart_care_source_summary,
+                        smart_care_skipped_pack_ids,
+                        smart_care_dev_fallback_pack_ids,
+                    })
                     .is_err()
                 {
                     break;
@@ -121,10 +218,10 @@ fn run_worker_loop(
         match command_rx.recv_timeout(interval) {
             Ok(WorkerCommand::RefreshNow) => continue,
             Ok(WorkerCommand::RunPluginAction { action, spec }) => {
-                if plugin_action_running.swap(true, Ordering::SeqCst) {
+                if background_action_running.swap(true, Ordering::SeqCst) {
                     if event_tx
                         .send(WorkerEvent::Error(
-                            "plugin action already running".to_string(),
+                            "background action already running".to_string(),
                         ))
                         .is_err()
                     {
@@ -134,13 +231,135 @@ fn run_worker_loop(
                 }
                 let event_tx_for_plugin = event_tx.clone();
                 let plugin_runner = Arc::clone(&plugin_runner);
-                let plugin_action_running = Arc::clone(&plugin_action_running);
+                let background_action_running = Arc::clone(&background_action_running);
                 thread::spawn(move || {
                     let output = plugin_runner(action, spec.as_deref());
-                    plugin_action_running.store(false, Ordering::SeqCst);
+                    background_action_running.store(false, Ordering::SeqCst);
                     let _ = event_tx_for_plugin.send(WorkerEvent::PluginActionResult {
                         action,
                         ok: output.ok,
+                        lines: output.lines,
+                    });
+                });
+                continue;
+            }
+            Ok(WorkerCommand::ApplicationsInventoryAnalyze) => {
+                if background_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "background action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_action = event_tx.clone();
+                let background_action_running = Arc::clone(&background_action_running);
+                thread::spawn(move || {
+                    let applications = app_inventory::collect_installed_applications();
+                    background_action_running.store(false, Ordering::SeqCst);
+                    let _ = event_tx_for_action
+                        .send(WorkerEvent::ApplicationsInventoryAnalyzeResult { applications });
+                });
+                continue;
+            }
+            Ok(WorkerCommand::SmartCareAnalyze {
+                profile,
+                descriptors,
+            }) => {
+                if background_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "background action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_action = event_tx.clone();
+                let background_action_running = Arc::clone(&background_action_running);
+                let state_dir = latest_state_dir.clone();
+                thread::spawn(move || {
+                    let output = analyze(&profile, &descriptors, state_dir.as_deref());
+                    background_action_running.store(false, Ordering::SeqCst);
+                    let _ = event_tx_for_action.send(WorkerEvent::SmartCareAnalyzeResult {
+                        preview: output.preview,
+                        lines: output.lines,
+                    });
+                });
+                continue;
+            }
+            Ok(WorkerCommand::SmartCareRun {
+                preview,
+                disabled_entry_ids,
+                review_confirmed,
+                apply_confirmed,
+            }) => {
+                if background_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "background action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_action = event_tx.clone();
+                let background_action_running = Arc::clone(&background_action_running);
+                let state_dir = latest_state_dir.clone();
+                thread::spawn(move || {
+                    let output = match state_dir {
+                        Some(state_dir) => execute_from_state_dir(
+                            &state_dir,
+                            &preview,
+                            &disabled_entry_ids,
+                            review_confirmed,
+                            apply_confirmed,
+                        ),
+                        None => preen_os::smart_care_runtime::SmartCareExecuteOutput {
+                            lines: vec![
+                                "run: failed".to_string(),
+                                "reason: state directory is unavailable".to_string(),
+                            ],
+                        },
+                    };
+                    background_action_running.store(false, Ordering::SeqCst);
+                    let _ = event_tx_for_action.send(WorkerEvent::SmartCareRunResult {
+                        lines: output.lines,
+                    });
+                });
+                continue;
+            }
+            Ok(WorkerCommand::SmartCareUndo {
+                has_last_run_report,
+            }) => {
+                if background_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "background action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_action = event_tx.clone();
+                let background_action_running = Arc::clone(&background_action_running);
+                let state_dir = latest_state_dir.clone();
+                thread::spawn(move || {
+                    let output = match state_dir {
+                        Some(state_dir) => undo_from_state_dir(&state_dir),
+                        None => undo_local_dry_run(has_last_run_report),
+                    };
+                    background_action_running.store(false, Ordering::SeqCst);
+                    let _ = event_tx_for_action.send(WorkerEvent::SmartCareUndoResult {
                         lines: output.lines,
                     });
                 });
@@ -153,6 +372,51 @@ fn run_worker_loop(
     }
 }
 
+fn resolve_smart_care_descriptors(
+    snapshot: &DashboardSnapshot,
+) -> (
+    Vec<SmartCarePluginDescriptor>,
+    Option<String>,
+    Option<String>,
+    Vec<String>,
+    Vec<String>,
+) {
+    match resolve_descriptors_with_report_from_state_dir(snapshot.state_dir.as_path()) {
+        Ok(report) => {
+            let source_summary =
+                if report.descriptors.is_empty() && report.skipped_plugins.is_empty() {
+                    None
+                } else {
+                    Some(report.source_summary())
+                };
+            let resolver_warning = report.skipped_summary(3);
+            (
+                report.descriptors,
+                resolver_warning,
+                source_summary,
+                report.skipped_plugins,
+                report.dev_fallback_pack_ids,
+            )
+        }
+        Err(error) => {
+            if is_missing_lockfile_error(&error) {
+                return (Vec::new(), None, None, Vec::new(), Vec::new());
+            }
+            (Vec::new(), Some(error), None, Vec::new(), Vec::new())
+        }
+    }
+}
+
+fn is_missing_lockfile_error(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    let read_error = lowered.contains("failed to read lockfile")
+        || lowered.contains("failed to read plugin lockfile");
+    let not_found = lowered.contains("no such file")
+        || lowered.contains("os error 2")
+        || lowered.contains("not found");
+    read_error && not_found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +424,10 @@ mod tests {
         DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION, DashboardMetrics,
         DashboardSnapshot, RegistrySummary,
     };
+    use preen_core::plugin_lock::{LockedPlugin, PluginLockfile};
+    use preen_core::smart_care::SmartCareCapability;
+    use std::fs;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::mpsc::RecvTimeoutError;
@@ -194,6 +462,16 @@ mod tests {
         }
     }
 
+    struct FixedStateProvider {
+        snapshot: DashboardSnapshot,
+    }
+
+    impl DashboardProvider for FixedStateProvider {
+        fn next_snapshot(&mut self) -> Result<DashboardSnapshot, String> {
+            Ok(self.snapshot.clone())
+        }
+    }
+
     fn snapshot_with_health(score: u8) -> DashboardSnapshot {
         DashboardSnapshot {
             schema_version: DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
@@ -215,6 +493,218 @@ mod tests {
         }
     }
 
+    fn snapshot_with_health_and_state_dir(score: u8, state_dir: PathBuf) -> DashboardSnapshot {
+        let mut snapshot = snapshot_with_health(score);
+        snapshot.state_dir = state_dir;
+        snapshot
+    }
+
+    fn create_temp_state_dir(prefix: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        path.push(format!("preen-tui-{prefix}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn create_test_plugin_pack(state_dir: &Path, pack_id: &str) {
+        let pack_dir = state_dir.join("plugins").join(pack_id);
+        fs::create_dir_all(pack_dir.join("rules")).unwrap();
+        fs::write(
+            pack_dir.join("manifest.toml"),
+            format!(
+                r#"
+schema_version = 1
+pack_id = "{pack_id}"
+name = "Test"
+version = "1.0.0"
+description = "Test plugin"
+author = "Preen"
+license = "MIT"
+homepage = ""
+core_compat = ">=0.1.0,<2.0.0"
+action_api = 1
+os_targets = ["Macos", "Linux"]
+capabilities = ["FsRead"]
+
+[[rules]]
+id = "{pack_id}.rule"
+name = "Rule"
+rule_file = "rules/rule-1.toml"
+"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            pack_dir.join("rules/rule-1.toml"),
+            format!(
+                r#"
+schema_version = 1
+id = "{pack_id}.rule"
+name = "Rule"
+category = "Cache"
+risk = "Low"
+enabled = true
+
+[match]
+mode = "Paths"
+paths = ["~/Library/Caches"]
+strategy = "Recursive"
+command = []
+parser = ""
+
+[action]
+action_type = "TrashPaths"
+paths = ["~/Library/Caches"]
+command = []
+mode = "Confirm"
+timeout_sec = 30
+allow_globs = false
+max_items = 100
+package_manager = ""
+project_types = []
+params = {{}}
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_smart_care_descriptors_ignores_missing_lockfile_error() {
+        let temp_path = create_temp_state_dir("missing-lockfile");
+        let snapshot = snapshot_with_health_and_state_dir(80, temp_path.clone());
+        let (descriptors, smart_care_error, source_summary, skipped_pack_ids, fallback_ids) =
+            resolve_smart_care_descriptors(&snapshot);
+
+        assert!(descriptors.is_empty());
+        assert!(smart_care_error.is_none());
+        assert!(source_summary.is_none());
+        assert!(skipped_pack_ids.is_empty());
+        assert!(fallback_ids.is_empty());
+        let _ = fs::remove_dir_all(temp_path);
+    }
+
+    #[test]
+    fn resolve_smart_care_descriptors_scans_plugins_dir_when_lockfile_is_missing() {
+        let temp_path = create_temp_state_dir("plugins-scan-fallback");
+        create_test_plugin_pack(&temp_path, "preen-rs.cleanup.base");
+
+        let snapshot = snapshot_with_health_and_state_dir(82, temp_path.clone());
+        let (descriptors, smart_care_error, source_summary, skipped_pack_ids, fallback_ids) =
+            resolve_smart_care_descriptors(&snapshot);
+
+        assert!(smart_care_error.is_none());
+        assert_eq!(source_summary.as_deref(), Some("plugins-scan (packs=1)"));
+        assert!(skipped_pack_ids.is_empty());
+        assert!(fallback_ids.is_empty());
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].capability, SmartCareCapability::Cleanup);
+
+        let _ = fs::remove_dir_all(temp_path);
+    }
+
+    #[test]
+    fn resolve_smart_care_descriptors_keeps_parse_errors_visible() {
+        let temp_path = create_temp_state_dir("invalid-lockfile");
+        fs::write(temp_path.join("plugins.lock"), "invalid_toml = [").unwrap();
+        let snapshot = snapshot_with_health_and_state_dir(81, temp_path.clone());
+        let (_descriptors, smart_care_error, _source_summary, _skipped_pack_ids, _fallback_ids) =
+            resolve_smart_care_descriptors(&snapshot);
+
+        let error = smart_care_error.expect("parse error should be visible to UI");
+        assert!(error.contains("failed to parse plugin lockfile"));
+        let _ = fs::remove_dir_all(temp_path);
+    }
+
+    #[test]
+    fn resolve_smart_care_descriptors_surfaces_skipped_pack_warning() {
+        let temp_path = create_temp_state_dir("missing-pack-warning");
+        let lockfile = PluginLockfile {
+            schema_version: 1,
+            plugins: vec![LockedPlugin {
+                pack_id: "preen-rs.cleanup.base".to_string(),
+                source: "registry".to_string(),
+                url: "https://example.com/preen-rs.cleanup.base".to_string(),
+                rev: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                resolved_rev: None,
+                version: "1.0.0".to_string(),
+                manifest_hash: "sha256:abc".to_string(),
+                signature: "sha256:def".to_string(),
+                trusted_identity: "https://example.com/workflow".to_string(),
+            }],
+        };
+        fs::write(
+            temp_path.join("plugins.lock"),
+            lockfile.to_string().expect("valid test lockfile"),
+        )
+        .unwrap();
+
+        let snapshot = snapshot_with_health_and_state_dir(81, temp_path.clone());
+        let (descriptors, smart_care_error, source_summary, skipped_pack_ids, fallback_ids) =
+            resolve_smart_care_descriptors(&snapshot);
+
+        assert!(descriptors.is_empty());
+        assert_eq!(
+            source_summary.as_deref(),
+            Some("state-only (packs=0) | skipped=1")
+        );
+        assert_eq!(skipped_pack_ids, vec!["preen-rs.cleanup.base".to_string()]);
+        assert_eq!(fallback_ids, Vec::<String>::new());
+        let warning = smart_care_error.expect("skipped pack warning should be shown");
+        assert!(
+            warning.contains("skipped plugin packs: preen-rs.cleanup.base"),
+            "unexpected warning: {warning}",
+        );
+        let _ = fs::remove_dir_all(temp_path);
+    }
+
+    #[test]
+    fn snapshot_event_uses_plugins_scan_fallback_when_lockfile_is_missing() {
+        let temp_path = create_temp_state_dir("snapshot-plugins-scan-fallback");
+        create_test_plugin_pack(&temp_path, "preen-rs.cleanup.base");
+        let provider = Box::new(FixedStateProvider {
+            snapshot: snapshot_with_health_and_state_dir(84, temp_path.clone()),
+        });
+        let (mut worker, event_rx) =
+            StatusWorker::spawn_with_provider(Duration::from_secs(60), provider);
+
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("snapshot event");
+
+        let WorkerEvent::Snapshot {
+            smart_care_descriptors,
+            smart_care_error,
+            smart_care_source_summary,
+            smart_care_skipped_pack_ids,
+            smart_care_dev_fallback_pack_ids,
+            ..
+        } = event
+        else {
+            panic!("expected snapshot event");
+        };
+
+        assert!(smart_care_error.is_none());
+        assert_eq!(
+            smart_care_source_summary.as_deref(),
+            Some("plugins-scan (packs=1)")
+        );
+        assert!(smart_care_skipped_pack_ids.is_empty());
+        assert!(smart_care_dev_fallback_pack_ids.is_empty());
+        assert_eq!(smart_care_descriptors.len(), 1);
+        assert_eq!(
+            smart_care_descriptors[0].capability,
+            SmartCareCapability::Cleanup
+        );
+
+        worker.shutdown();
+        let _ = fs::remove_dir_all(temp_path);
+    }
+
     #[test]
     fn refresh_now_emits_next_snapshot_immediately() {
         let provider = Box::new(TestProvider { seq: 42 });
@@ -224,7 +714,11 @@ mod tests {
         let first = event_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("first event");
-        let WorkerEvent::Snapshot(first_snapshot) = first else {
+        let WorkerEvent::Snapshot {
+            snapshot: first_snapshot,
+            ..
+        } = first
+        else {
             panic!("expected first snapshot event");
         };
         assert_eq!(first_snapshot.health_score, 42);
@@ -234,7 +728,11 @@ mod tests {
         let second = event_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("second event");
-        let WorkerEvent::Snapshot(second_snapshot) = second else {
+        let WorkerEvent::Snapshot {
+            snapshot: second_snapshot,
+            ..
+        } = second
+        else {
             panic!("expected refreshed snapshot event");
         };
         assert_eq!(second_snapshot.health_score, 43);
@@ -277,7 +775,11 @@ mod tests {
                 Ok(WorkerEvent::PluginActionResult { action, ok, lines }) => {
                     break (action, ok, lines);
                 }
-                Ok(WorkerEvent::Snapshot(_)) => {}
+                Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
+                | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
+                | Ok(WorkerEvent::SmartCareRunResult { .. })
+                | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
+                Ok(WorkerEvent::Snapshot { .. }) => {}
                 Ok(WorkerEvent::Error(error)) => panic!("unexpected worker error: {error}"),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => panic!("worker disconnected"),
@@ -333,7 +835,7 @@ mod tests {
         let second = event_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("recovered snapshot event");
-        let WorkerEvent::Snapshot(snapshot) = second else {
+        let WorkerEvent::Snapshot { snapshot, .. } = second else {
             panic!("expected recovered snapshot event");
         };
         assert_eq!(snapshot.health_score, 80);
@@ -370,7 +872,7 @@ mod tests {
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(2) {
             match event_rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(WorkerEvent::Snapshot(_)) => {
+                Ok(WorkerEvent::Snapshot { .. }) => {
                     if !saw_plugin_result {
                         saw_snapshot_before_result = true;
                     }
@@ -379,6 +881,10 @@ mod tests {
                     saw_plugin_result = true;
                     break;
                 }
+                Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
+                | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
+                | Ok(WorkerEvent::SmartCareRunResult { .. })
+                | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
                 Ok(WorkerEvent::Error(error)) => panic!("unexpected worker error: {error}"),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -427,7 +933,11 @@ mod tests {
                         break;
                     }
                 }
-                Ok(WorkerEvent::Snapshot(_)) => {}
+                Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
+                | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
+                | Ok(WorkerEvent::SmartCareRunResult { .. })
+                | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
+                Ok(WorkerEvent::Snapshot { .. }) => {}
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -435,6 +945,97 @@ mod tests {
 
         assert!(saw_busy_error);
         assert!(saw_any_result);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn smart_care_analyze_command_emits_result_event() {
+        let provider = Box::new(TestProvider { seq: 1 });
+        let (mut worker, event_rx) =
+            StatusWorker::spawn_with_provider(Duration::from_secs(60), provider);
+        let _ = event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("initial snapshot");
+
+        worker.run_smart_care_analyze(
+            preen_core::smart_care::SmartCareProfile::default_profile(),
+            Vec::new(),
+        );
+
+        let started = Instant::now();
+        let mut saw_result = false;
+        while started.elapsed() < Duration::from_secs(2) {
+            match event_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(WorkerEvent::SmartCareAnalyzeResult { preview, lines }) => {
+                    assert!(!preview.overall_ready);
+                    assert!(lines.iter().any(|line| line == "overall: blocked"));
+                    saw_result = true;
+                    break;
+                }
+                Ok(WorkerEvent::Snapshot { .. })
+                | Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
+                | Ok(WorkerEvent::PluginActionResult { .. })
+                | Ok(WorkerEvent::SmartCareRunResult { .. })
+                | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
+                Ok(WorkerEvent::Error(error)) => panic!("unexpected worker error: {error}"),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        assert!(saw_result);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn smart_care_run_and_undo_emit_result_events() {
+        let provider = Box::new(TestProvider { seq: 1 });
+        let (mut worker, event_rx) =
+            StatusWorker::spawn_with_provider(Duration::from_secs(60), provider);
+        let _ = event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("initial snapshot");
+
+        let analyze_output = preen_os::smart_care_runtime::analyze(
+            &preen_core::smart_care::SmartCareProfile::default_profile(),
+            &[],
+            None,
+        );
+        worker.run_smart_care_execute(analyze_output.preview, HashSet::new(), false, false);
+
+        let started = Instant::now();
+        let mut saw_run = false;
+        let mut saw_undo = false;
+        while started.elapsed() < Duration::from_secs(3) {
+            match event_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(WorkerEvent::SmartCareRunResult { lines }) => {
+                    assert!(
+                        lines
+                            .iter()
+                            .any(|line| line == "reason: review is required before run")
+                    );
+                    saw_run = true;
+                    worker.run_smart_care_undo(false);
+                }
+                Ok(WorkerEvent::SmartCareUndoResult { lines }) => {
+                    assert!(lines.iter().any(|line| line == "undo: skipped"));
+                    saw_undo = true;
+                }
+                Ok(WorkerEvent::Snapshot { .. })
+                | Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
+                | Ok(WorkerEvent::PluginActionResult { .. })
+                | Ok(WorkerEvent::SmartCareAnalyzeResult { .. }) => {}
+                Ok(WorkerEvent::Error(error)) => panic!("unexpected worker error: {error}"),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            if saw_run && saw_undo {
+                break;
+            }
+        }
+
+        assert!(saw_run);
+        assert!(saw_undo);
         worker.shutdown();
     }
 }
