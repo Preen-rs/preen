@@ -1,4 +1,4 @@
-use crate::i18n::{TextKey, tr};
+use crate::i18n::{Language, TextKey, tr};
 use crate::model::{ActiveView, AppState};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
@@ -146,10 +146,12 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
     };
 
     let header = Paragraph::new(vec![
-        Line::from("Applications"),
-        Line::from(
+        Line::from(state.tr(TextKey::Applications)),
+        Line::from(localized(
+            state,
             "a analyze | r reanalyze | j/k move | space select | p paths | u uninstall(selected)",
-        ),
+            "a Analyse | r erneut | j/k bewegen | Leertaste wählen | p Pfade | u deinstallieren",
+        )),
         Line::from(""),
     ])
     .style(Style::default().fg(PALETTE_TEXT));
@@ -157,7 +159,11 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
 
     let app_items = state.applications_items();
     let list_items = if app_items.is_empty() {
-        vec![ListItem::new("  no application found")]
+        vec![ListItem::new(localized(
+            state,
+            "  no application found",
+            "  keine Anwendung gefunden",
+        ))]
     } else {
         app_items
             .iter()
@@ -199,7 +205,11 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
     }
 
     let scan_suffix = if state.applications_inventory_revision > 0 {
-        format!(" · scan #{}", state.applications_inventory_revision)
+        format!(
+            " · {} #{}",
+            localized(state, "scan", "Scan"),
+            state.applications_inventory_revision
+        )
     } else {
         String::new()
     };
@@ -208,7 +218,8 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
         .block(
             Block::default()
                 .title(format!(
-                    " Installed applications ({}/{}){} ",
+                    " {} ({}/{}){} ",
+                    localized(state, "Installed applications", "Installierte Anwendungen"),
                     state.applications_selected_count(),
                     app_items.len(),
                     scan_suffix
@@ -223,7 +234,7 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
 
     if show_last_action {
         let logs = {
-            let mut lines = vec![Line::from("Last action")];
+            let mut lines = vec![Line::from(localized(state, "Last action", "Letzte Aktion"))];
             for line in state.applications_last_action_lines.iter().take(4) {
                 lines.push(Line::from(format!("- {line}")));
             }
@@ -456,7 +467,10 @@ pub(super) fn render_applications_uninstall_confirm_popup(
     };
     frame.render_widget(Clear, popup_area);
     let block = Block::default()
-        .title(" Confirm uninstall ")
+        .title(format!(
+            " {} ",
+            localized(state, "Confirm uninstall", "Deinstallation bestätigen")
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(PALETTE_WARN));
     frame.render_widget(block, popup_area);
@@ -467,12 +481,19 @@ pub(super) fn render_applications_uninstall_confirm_popup(
 
     let mut lines = vec![
         Line::from(vec![Span::styled(
-            "Uninstall selected applications?",
+            localized(
+                state,
+                "Uninstall selected applications?",
+                "Ausgewählte Anwendungen deinstallieren?",
+            ),
             Style::default()
                 .fg(PALETTE_WARN)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from(format!("{target_count} app(s) will be moved to Trash.")),
+        Line::from(match state.effective_language() {
+            Language::English => format!("{target_count} app(s) will be moved to Trash."),
+            Language::German => format!("{target_count} App(s) werden in den Papierkorb bewegt."),
+        }),
         Line::from(""),
     ];
     for app in targets.iter().take(8) {
@@ -483,9 +504,15 @@ pub(super) fn render_applications_uninstall_confirm_popup(
     }
 
     let action_line = Line::from(vec![
-        Span::styled("[ Enter / y ] Confirm", Style::default().fg(PALETTE_WARN)),
+        Span::styled(
+            localized(state, "[ Enter / y ] Confirm", "[ Enter / y ] Bestätigen"),
+            Style::default().fg(PALETTE_WARN),
+        ),
         Span::raw("    "),
-        Span::styled("[ Esc / n ] Cancel", Style::default().fg(PALETTE_ACCENT)),
+        Span::styled(
+            localized(state, "[ Esc / n ] Cancel", "[ Esc / n ] Abbrechen"),
+            Style::default().fg(PALETTE_ACCENT),
+        ),
     ]);
     let actions_area = Rect {
         x: inner.x,
@@ -594,6 +621,13 @@ fn sidebar_rows(language: crate::i18n::Language) -> Vec<(Option<ActiveView>, Lis
         }
     }
     rows
+}
+
+fn localized(state: &AppState, en: &'static str, de: &'static str) -> &'static str {
+    match state.effective_language() {
+        Language::English => en,
+        Language::German => de,
+    }
 }
 
 fn sidebar_block(title: &'static str) -> Block<'static> {

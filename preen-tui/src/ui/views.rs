@@ -1,4 +1,4 @@
-use crate::i18n::TextKey;
+use crate::i18n::{Language, TextKey};
 use crate::model::{ActiveView, AppState, DashboardSnapshot, PluginActionKind};
 use preen_core::check_list_view::CheckListView;
 use preen_core::plugin_list_view::PluginListView;
@@ -392,28 +392,47 @@ fn applications_lines(
         .filter(|descriptor| descriptor.enabled && descriptor.trusted_identity.is_some())
         .count();
 
-    let mut lines = vec![Line::from("Applications")];
+    let mut lines = vec![Line::from(state.tr(TextKey::Applications))];
 
     if !state.smart_care_has_analyze_result {
         lines.push(Line::from(""));
-        lines.push(Line::from("[ Analyze Applications ]"));
-        lines.push(Line::from("Press 'a' to analyze and load the app list."));
+        lines.push(Line::from(localized(
+            state,
+            "[ Analyze Applications ]",
+            "[ Anwendungen analysieren ]",
+        )));
+        lines.push(Line::from(localized(
+            state,
+            "Press 'a' to analyze and load the app list.",
+            "Drücke 'a', um die App-Liste zu analysieren und zu laden.",
+        )));
         lines.push(Line::from(""));
         lines.push(Line::from(format!(
-            "Capability: {} | plugins={} | trusted={}",
-            if enabled { "ON" } else { "OFF" },
+            "{}: {} | plugins={} | trusted={}",
+            localized(state, "Capability", "Capability"),
+            if enabled {
+                localized(state, "ON", "AN")
+            } else {
+                localized(state, "OFF", "AUS")
+            },
             descriptors.len(),
             trusted_count
         )));
         if descriptors.is_empty() {
-            lines.push(Line::from("No Applications plugin installed."));
-            lines.push(Line::from(
+            lines.push(Line::from(localized(
+                state,
+                "No Applications plugin installed.",
+                "Kein Anwendungen-Plugin installiert.",
+            )));
+            lines.push(Line::from(localized(
+                state,
                 "Install flow: n install -> f preflight -> t test",
-            ));
+                "Installationsablauf: n installieren -> f Preflight -> t Test",
+            )));
         }
         if let Some(error) = &state.last_error {
             lines.push(Line::from(""));
-            lines.push(Line::from("Error"));
+            lines.push(Line::from(localized(state, "Error", "Fehler")));
             for line in simplify_diagnostic_lines(vec![error.clone()]) {
                 for wrapped in wrap_with_prefix("- ", &line, content_width) {
                     lines.push(Line::from(wrapped));
@@ -423,18 +442,30 @@ fn applications_lines(
         return lines;
     }
 
-    lines.push(Line::from("Analyze done. App list is ready."));
-    lines.push(Line::from(
+    lines.push(Line::from(localized(
+        state,
+        "Analyze done. App list is ready.",
+        "Analyse abgeschlossen. App-Liste ist bereit.",
+    )));
+    lines.push(Line::from(localized(
+        state,
         "Actions: j/k move | space select | p paths | r reanalyze | u uninstall(selected)",
-    ));
+        "Aktionen: j/k bewegen | Leertaste wählen | p Pfade | r erneut | u deinstallieren",
+    )));
     lines.push(Line::from(""));
-    lines.push(Line::from("Applications plugins"));
+    lines.push(Line::from(localized(
+        state,
+        "Applications plugins",
+        "Anwendungen-Plugins",
+    )));
 
     if descriptors.is_empty() {
-        lines.push(Line::from("- none"));
-        lines.push(Line::from(
+        lines.push(Line::from(localized(state, "- none", "- keine")));
+        lines.push(Line::from(localized(
+            state,
             "- start with: n install -> f preflight -> t test",
-        ));
+            "- beginne mit: n installieren -> f Preflight -> t Test",
+        )));
     } else {
         for descriptor in descriptors.iter().take(6) {
             lines.push(Line::from(format!(
@@ -442,32 +473,48 @@ fn applications_lines(
                 descriptor.pack_id,
                 descriptor.version.as_deref().unwrap_or("n/a"),
                 if descriptor.enabled {
-                    "enabled"
+                    localized(state, "enabled", "aktiviert")
                 } else {
-                    "disabled"
+                    localized(state, "disabled", "deaktiviert")
                 },
                 yes_no(descriptor.trusted_identity.is_some())
             )));
         }
         if descriptors.len() > 6 {
-            lines.push(Line::from(format!(
-                "- ... and {} more",
-                descriptors.len().saturating_sub(6)
-            )));
+            let more_count = descriptors.len().saturating_sub(6);
+            lines.push(Line::from(match state.effective_language() {
+                Language::English => format!("- ... and {more_count} more"),
+                Language::German => format!("- ... und {more_count} weitere"),
+            }));
         }
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("Installed applications"));
+    lines.push(Line::from(localized(
+        state,
+        "Installed applications",
+        "Installierte Anwendungen",
+    )));
     let app_items = state.applications_items();
     if app_items.is_empty() {
-        lines.push(Line::from("- no application found"));
-    } else {
-        lines.push(Line::from(format!(
-            "- {} app(s) found | selected={}",
-            app_items.len(),
-            state.applications_selected_count()
+        lines.push(Line::from(localized(
+            state,
+            "- no application found",
+            "- keine Anwendung gefunden",
         )));
+    } else {
+        lines.push(Line::from(match state.effective_language() {
+            Language::English => format!(
+                "- {} app(s) found | selected={}",
+                app_items.len(),
+                state.applications_selected_count()
+            ),
+            Language::German => format!(
+                "- {} App(s) gefunden | ausgewählt={}",
+                app_items.len(),
+                state.applications_selected_count()
+            ),
+        }));
         for (index, app_name) in app_items.iter().enumerate() {
             let marker = if index == state.applications_selected_row {
                 "▶"
@@ -485,7 +532,7 @@ fn applications_lines(
 
     if !state.applications_last_action_lines.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from("Last action"));
+        lines.push(Line::from(localized(state, "Last action", "Letzte Aktion")));
         for item in state.applications_last_action_lines.iter().take(12) {
             for wrapped in wrap_with_prefix("- ", item, content_width) {
                 lines.push(Line::from(wrapped));
@@ -494,21 +541,28 @@ fn applications_lines(
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("Environment"));
+    lines.push(Line::from(localized(state, "Environment", "Umgebung")));
     lines.push(Line::from(format!(
-        "- Host: {}",
+        "- {}: {}",
+        localized(state, "Host", "Host"),
         snapshot.metrics.host_name.as_deref().unwrap_or("n/a")
     )));
-    lines.push(Line::from(format!(
-        "- Installed plugin dirs: {} | lockfile entries: {}",
-        snapshot.installed_plugins_on_disk, snapshot.plugin_count
-    )));
+    lines.push(Line::from(match state.effective_language() {
+        Language::English => format!(
+            "- Installed plugin dirs: {} | lockfile entries: {}",
+            snapshot.installed_plugins_on_disk, snapshot.plugin_count
+        ),
+        Language::German => format!(
+            "- Installierte Plugin-Ordner: {} | Lockfile-Einträge: {}",
+            snapshot.installed_plugins_on_disk, snapshot.plugin_count
+        ),
+    }));
     if let Some(line) = smart_care_plugin_action_brief_line(state) {
         lines.push(Line::from(format!("- {line}")));
     }
     if let Some(error) = &state.last_error {
         lines.push(Line::from(""));
-        lines.push(Line::from("Error"));
+        lines.push(Line::from(localized(state, "Error", "Fehler")));
         for line in simplify_diagnostic_lines(vec![error.clone()]) {
             for wrapped in wrap_with_prefix("- ", &line, content_width) {
                 lines.push(Line::from(wrapped));
@@ -517,6 +571,13 @@ fn applications_lines(
     }
 
     lines
+}
+
+fn localized(state: &AppState, en: &'static str, de: &'static str) -> &'static str {
+    match state.effective_language() {
+        Language::English => en,
+        Language::German => de,
+    }
 }
 
 fn capability_lines(
@@ -1861,9 +1922,10 @@ fn coming_soon_lines(state: &AppState) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_smart_care_review_popup_lines, capability_lines, check_lines, plugin_lines,
-        smart_care_lines,
+        applications_lines, build_smart_care_review_popup_lines, capability_lines, check_lines,
+        plugin_lines, smart_care_lines,
     };
+    use crate::i18n::LanguagePreference;
     use crate::model::{ActiveView, AppState, PluginActionKind};
     use preen_core::dashboard::{
         CheckSeverity, DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
@@ -1931,6 +1993,27 @@ mod tests {
         assert!(text.contains("Structured diagnostics"));
         assert!(text.contains("overall_passed: true"));
         assert!(text.contains("Signature verified=true"));
+    }
+
+    #[test]
+    fn applications_lines_use_german_language() {
+        let snapshot = base_snapshot();
+        let state = AppState {
+            active_view: ActiveView::Applications,
+            language_preference: LanguagePreference::German,
+            ..AppState::default()
+        };
+
+        let lines = applications_lines(&state, &snapshot, 120);
+        let text = lines
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("[ Anwendungen analysieren ]"));
+        assert!(text.contains("Kein Anwendungen-Plugin installiert."));
+        assert!(text.contains("Installationsablauf"));
     }
 
     #[test]
