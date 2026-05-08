@@ -181,13 +181,24 @@ pub fn restore_trashed_path(original_path: &Path, trashed_path: &Path) -> Result
             )
         })?;
     }
-    fs::rename(trashed_path, original_path).map_err(|error| {
-        format!(
+    match fs::rename(trashed_path, original_path) {
+        Ok(()) => Ok(()),
+        Err(error) if is_cross_device_error(&error) => {
+            copy_remove_path(trashed_path, original_path).map_err(|copy_error| {
+                let _ = cleanup_path(original_path);
+                format!(
+                    "cross-device restore failed: {} -> {}: {copy_error}",
+                    trashed_path.display(),
+                    original_path.display()
+                )
+            })
+        }
+        Err(error) => Err(format!(
             "restore failed: {} -> {}: {error}",
             trashed_path.display(),
             original_path.display()
-        )
-    })
+        )),
+    }
 }
 
 #[cfg(test)]
