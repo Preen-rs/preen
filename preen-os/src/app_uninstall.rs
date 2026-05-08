@@ -3,9 +3,90 @@ use preen_core::app_uninstall::{
     AppIdentity, AppPlatform, InstalledApplication, RelatedPath, RelatedPathKind, UninstallPlan,
     path_name_matches_app,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const APP_UNINSTALL_JOURNAL_SCHEMA_VERSION: u32 = 1;
+const APP_UNINSTALL_JOURNAL_FILE: &str = "app-uninstall-last.toml";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppUninstallJournal {
+    pub schema_version: u32,
+    pub records: Vec<AppUninstallJournalRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppUninstallJournalRecord {
+    pub plan: UninstallPlan,
+    pub moves: Vec<AppUninstallJournalMove>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppUninstallJournalMove {
+    pub original_path: PathBuf,
+    pub trashed_path: PathBuf,
+}
+
+impl AppUninstallJournal {
+    pub fn new(records: Vec<AppUninstallJournalRecord>) -> Self {
+        Self {
+            schema_version: APP_UNINSTALL_JOURNAL_SCHEMA_VERSION,
+            records,
+        }
+    }
+}
+
+pub fn app_uninstall_journal_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(APP_UNINSTALL_JOURNAL_FILE)
+}
+
+pub fn write_last_app_uninstall_journal(
+    state_dir: &Path,
+    journal: &AppUninstallJournal,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(state_dir).map_err(|error| {
+        format!(
+            "failed to create state dir {}: {error}",
+            state_dir.display()
+        )
+    })?;
+    let path = app_uninstall_journal_path(state_dir);
+    let content = toml::to_string_pretty(journal)
+        .map_err(|error| format!("failed to encode app uninstall journal: {error}"))?;
+    fs::write(&path, content)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
+pub fn read_last_app_uninstall_journal(
+    state_dir: &Path,
+) -> Result<Option<AppUninstallJournal>, String> {
+    let path = app_uninstall_journal_path(state_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let journal: AppUninstallJournal = toml::from_str(&content)
+        .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
+    if journal.schema_version != APP_UNINSTALL_JOURNAL_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported app uninstall journal schema version: {}",
+            journal.schema_version
+        ));
+    }
+    Ok(Some(journal))
+}
+
+pub fn clear_last_app_uninstall_journal(state_dir: &Path) -> Result<(), String> {
+    let path = app_uninstall_journal_path(state_dir);
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path).map_err(|error| format!("failed to remove {}: {error}", path.display()))
+}
 
 pub fn build_uninstall_plan_for_name(app_name: &str) -> UninstallPlan {
     if let Some(app) = app_inventory::collect_installed_applications()
@@ -259,5 +340,36 @@ mod tests {
                 .any(|path| path.path == cache.display().to_string()
                     && path.kind == RelatedPathKind::Cache)
         );
+    }
+
+    #[test]
+    fn app_uninstall_journal_round_trips_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = AppUninstallJournal::new(vec![AppUninstallJournalRecord {
+            plan: UninstallPlan::trash(
+                AppIdentity::macos("Demo"),
+                vec![RelatedPath {
+                    path: "/Applications/Demo.app".to_string(),
+                    kind: RelatedPathKind::ApplicationBundle,
+                    estimated_size: 12,
+                }],
+            ),
+            moves: vec![AppUninstallJournalMove {
+                original_path: PathBuf::from("/Applications/Demo.app"),
+                trashed_path: dir.path().join("Trash").join("Demo.app"),
+            }],
+        }]);
+
+        let path = write_last_app_uninstall_journal(dir.path(), &journal).unwrap();
+
+        assert_eq!(path, app_uninstall_journal_path(dir.path()));
+        assert_eq!(
+            read_last_app_uninstall_journal(dir.path()).unwrap(),
+            Some(journal)
+        );
+
+        clear_last_app_uninstall_journal(dir.path()).unwrap();
+
+        assert_eq!(read_last_app_uninstall_journal(dir.path()).unwrap(), None);
     }
 }

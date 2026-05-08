@@ -257,6 +257,12 @@ impl Default for AppState {
 }
 
 impl AppState {
+    fn applications_state_dir(&self) -> Option<PathBuf> {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.state_dir.clone())
+    }
+
     pub fn set_active_view(&mut self, next: ActiveView) {
         if self.active_view != next {
             self.active_view = next;
@@ -549,6 +555,13 @@ impl AppState {
         }
 
         if !uninstall_records.is_empty() {
+            if let Some(state_dir) = self.applications_state_dir() {
+                let journal = app_uninstall_journal_from_records(&uninstall_records);
+                match app_uninstall::write_last_app_uninstall_journal(&state_dir, &journal) {
+                    Ok(path) => logs.push(format!("journal: {}", path.display())),
+                    Err(error) => logs.push(format!("journal failed: {error}")),
+                }
+            }
             self.applications_last_uninstall = uninstall_records;
         }
 
@@ -560,13 +573,22 @@ impl AppState {
     }
 
     pub fn applications_undo_last_uninstall(&mut self) -> Result<(), String> {
-        if self.applications_last_uninstall.is_empty() {
+        let records = if self.applications_last_uninstall.is_empty() {
+            let records = self.applications_load_last_uninstall_from_journal()?;
+            if records.is_empty() {
+                return Err("hich uninstalli baraye undo vojod nadarad".to_string());
+            }
+            records
+        } else {
+            std::mem::take(&mut self.applications_last_uninstall)
+        };
+        if records.is_empty() {
             return Err("hich uninstalli baraye undo vojod nadarad".to_string());
         }
 
-        let records = std::mem::take(&mut self.applications_last_uninstall);
         let mut logs = Vec::new();
         let mut restored_apps = Vec::new();
+        let mut restore_failed = false;
 
         for record in records.into_iter().rev() {
             let mut restored_any = false;
@@ -580,7 +602,10 @@ impl AppState {
                             original.display()
                         ));
                     }
-                    Err(error) => logs.push(format!("failed: {} ({error})", trashed.display())),
+                    Err(error) => {
+                        restore_failed = true;
+                        logs.push(format!("failed: {} ({error})", trashed.display()));
+                    }
                 }
             }
             if restored_any {
@@ -588,7 +613,8 @@ impl AppState {
             }
         }
 
-        if !restored_apps.is_empty() {
+        let restored_any_app = !restored_apps.is_empty();
+        if restored_any_app {
             for app in restored_apps {
                 if !self.applications_inventory.iter().any(|item| item == &app) {
                     self.applications_inventory.push(app);
@@ -603,8 +629,30 @@ impl AppState {
             return Err("undo natavanest file ha ra restore konad".to_string());
         }
 
+        if !restore_failed
+            && restored_any_app
+            && let Some(state_dir) = self.applications_state_dir()
+        {
+            match app_uninstall::clear_last_app_uninstall_journal(&state_dir) {
+                Ok(()) => logs.push("journal cleared".to_string()),
+                Err(error) => logs.push(format!("journal clear failed: {error}")),
+            }
+        }
+
         self.applications_last_action_lines = logs;
         Ok(())
+    }
+
+    fn applications_load_last_uninstall_from_journal(
+        &self,
+    ) -> Result<Vec<ApplicationUninstallRecord>, String> {
+        let Some(state_dir) = self.applications_state_dir() else {
+            return Ok(Vec::new());
+        };
+        let Some(journal) = app_uninstall::read_last_app_uninstall_journal(&state_dir)? else {
+            return Ok(Vec::new());
+        };
+        Ok(app_uninstall_records_from_journal(journal))
     }
 
     pub fn scroll_info_popup_down(&mut self, amount: u16) {
@@ -1117,6 +1165,46 @@ fn clamp_diagnostic_line(line: &str, max_chars: usize) -> String {
     }
     out.push('…');
     out
+}
+
+fn app_uninstall_journal_from_records(
+    records: &[ApplicationUninstallRecord],
+) -> app_uninstall::AppUninstallJournal {
+    app_uninstall::AppUninstallJournal::new(
+        records
+            .iter()
+            .map(|record| app_uninstall::AppUninstallJournalRecord {
+                plan: record.plan.clone(),
+                moves: record
+                    .moved_paths
+                    .iter()
+                    .map(
+                        |(original_path, trashed_path)| app_uninstall::AppUninstallJournalMove {
+                            original_path: original_path.clone(),
+                            trashed_path: trashed_path.clone(),
+                        },
+                    )
+                    .collect(),
+            })
+            .collect(),
+    )
+}
+
+fn app_uninstall_records_from_journal(
+    journal: app_uninstall::AppUninstallJournal,
+) -> Vec<ApplicationUninstallRecord> {
+    journal
+        .records
+        .into_iter()
+        .map(|record| ApplicationUninstallRecord {
+            plan: record.plan,
+            moved_paths: record
+                .moves
+                .into_iter()
+                .map(|item| (item.original_path, item.trashed_path))
+                .collect(),
+        })
+        .collect()
 }
 
 fn discover_application_related_paths(app_name: &str) -> Vec<String> {
