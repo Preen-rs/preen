@@ -1,14 +1,12 @@
 use crate::plugin_status::{parse_summary_from_cli_json, render_summary_lines_with_language};
-use preen_core::app_uninstall::{
-    AppIdentity, AppPlatform, InstalledApplication, RelatedPath, RelatedPathKind, UninstallPlan,
-    path_name_matches_app,
-};
+use preen_core::app_uninstall::{InstalledApplication, UninstallPlan};
 pub use preen_core::dashboard::DashboardSnapshot;
 pub use preen_core::smart_care::{
     SmartCareCapability, SmartCarePluginDescriptor, SmartCarePreview, SmartCareProfile,
     build_preview_from_descriptors,
 };
 use preen_os::app_inventory;
+use preen_os::app_uninstall;
 pub use preen_os::plugin_command::PluginCommandKind as PluginActionKind;
 use preen_os::smart_care_runtime;
 use std::collections::{BTreeSet, HashSet};
@@ -1132,215 +1130,11 @@ fn clamp_diagnostic_line(line: &str, max_chars: usize) -> String {
 }
 
 fn discover_application_related_paths(app_name: &str) -> Vec<String> {
-    build_application_uninstall_plan(app_name).target_paths()
+    app_uninstall::build_uninstall_plan_for_name(app_name).target_paths()
 }
 
 fn build_application_uninstall_plan(app_name: &str) -> UninstallPlan {
-    if let Some(app) = find_installed_application(app_name) {
-        let mut paths = Vec::new();
-        let app_path = PathBuf::from(&app.path);
-        if app_path.exists() {
-            paths.push(RelatedPath {
-                path: app.path.clone(),
-                kind: match app.identity.platform {
-                    AppPlatform::Macos => RelatedPathKind::ApplicationBundle,
-                    AppPlatform::Linux => RelatedPathKind::DesktopEntry,
-                },
-                estimated_size: calculate_path_size(&app_path),
-            });
-        }
-        paths.extend(discover_application_related_path_items(&app.identity));
-        return UninstallPlan::trash_with_protection(
-            app.identity,
-            dedup_related_paths(paths),
-            app.protected,
-        );
-    }
-
-    let identity = {
-        let platform = if cfg!(target_os = "linux") {
-            AppPlatform::Linux
-        } else {
-            AppPlatform::Macos
-        };
-        AppIdentity {
-            display_name: app_name.to_string(),
-            platform,
-            bundle_identifier: None,
-            desktop_id: None,
-        }
-    };
-    let paths = discover_application_related_path_items(&identity);
-    UninstallPlan::trash(identity, paths)
-}
-
-fn find_installed_application(app_name: &str) -> Option<InstalledApplication> {
-    app_inventory::collect_installed_applications()
-        .into_iter()
-        .find(|app| app.identity.display_name == app_name)
-}
-
-fn discover_application_related_path_items(identity: &AppIdentity) -> Vec<RelatedPath> {
-    let app_name = identity.display_name.trim();
-    if app_name.trim().is_empty() {
-        return Vec::new();
-    }
-
-    let mut paths = BTreeSet::new();
-    let app_bundle = format!("{app_name}.app");
-    let match_keys = identity.primary_match_keys();
-
-    for root in [
-        PathBuf::from("/Applications"),
-        PathBuf::from("/System/Applications"),
-        home_dir().join("Applications"),
-    ] {
-        let path = root.join(&app_bundle);
-        if path.exists() {
-            paths.insert((
-                path.display().to_string(),
-                RelatedPathKind::ApplicationBundle,
-                calculate_path_size(&path),
-            ));
-        }
-    }
-
-    for (root, kind) in application_related_roots() {
-        collect_matching_paths_under(&root, &match_keys, 2, kind, &mut paths);
-    }
-
-    paths
-        .into_iter()
-        .map(|(path, kind, estimated_size)| RelatedPath {
-            path,
-            kind,
-            estimated_size,
-        })
-        .collect()
-}
-
-fn application_related_roots() -> Vec<(PathBuf, RelatedPathKind)> {
-    if cfg!(target_os = "linux") {
-        return vec![
-            (home_dir().join(".config"), RelatedPathKind::Preference),
-            (home_dir().join(".cache"), RelatedPathKind::Cache),
-            (home_dir().join(".local/share"), RelatedPathKind::Support),
-            (home_dir().join(".local/state"), RelatedPathKind::Support),
-        ];
-    }
-
-    vec![
-        (
-            home_dir().join("Library/Application Support"),
-            RelatedPathKind::Support,
-        ),
-        (home_dir().join("Library/Caches"), RelatedPathKind::Cache),
-        (home_dir().join("Library/Logs"), RelatedPathKind::Log),
-        (
-            home_dir().join("Library/HTTPStorages"),
-            RelatedPathKind::Cache,
-        ),
-        (home_dir().join("Library/WebKit"), RelatedPathKind::Cache),
-        (
-            home_dir().join("Library/Preferences"),
-            RelatedPathKind::Preference,
-        ),
-        (
-            home_dir().join("Library/Containers"),
-            RelatedPathKind::Container,
-        ),
-        (
-            home_dir().join("Library/Group Containers"),
-            RelatedPathKind::Container,
-        ),
-        (
-            home_dir().join("Library/Saved Application State"),
-            RelatedPathKind::Support,
-        ),
-    ]
-}
-
-fn dedup_related_paths(paths: Vec<RelatedPath>) -> Vec<RelatedPath> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for path in paths {
-        if seen.insert(path.path.clone()) {
-            out.push(path);
-        }
-    }
-    out
-}
-
-fn collect_matching_paths_under(
-    root: &Path,
-    match_keys: &[String],
-    max_depth: usize,
-    kind: RelatedPathKind,
-    out: &mut BTreeSet<(String, RelatedPathKind, u64)>,
-) {
-    collect_matching_paths_recursive(root, match_keys, 0, max_depth, kind, out);
-}
-
-fn collect_matching_paths_recursive(
-    root: &Path,
-    match_keys: &[String],
-    depth: usize,
-    max_depth: usize,
-    kind: RelatedPathKind,
-    out: &mut BTreeSet<(String, RelatedPathKind, u64)>,
-) {
-    if depth > max_depth || !root.exists() {
-        return;
-    }
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .map(|value| value.to_string());
-        if let Some(name) = name
-            && path_name_matches_app(&name, match_keys)
-        {
-            out.insert((
-                path.display().to_string(),
-                kind.clone(),
-                calculate_path_size(&path),
-            ));
-        }
-        if path.is_dir() {
-            collect_matching_paths_recursive(
-                &path,
-                match_keys,
-                depth + 1,
-                max_depth,
-                kind.clone(),
-                out,
-            );
-        }
-    }
-}
-
-fn calculate_path_size(path: &Path) -> u64 {
-    let Ok(metadata) = fs::metadata(path) else {
-        return 0;
-    };
-    if metadata.is_file() {
-        return metadata.len();
-    }
-    if !metadata.is_dir() {
-        return 0;
-    }
-    let Ok(entries) = fs::read_dir(path) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| calculate_path_size(&entry.path()))
-        .fold(0_u64, u64::saturating_add)
+    app_uninstall::build_uninstall_plan_for_name(app_name)
 }
 
 fn home_dir() -> PathBuf {

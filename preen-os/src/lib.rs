@@ -22,6 +22,7 @@ use walkdir::{DirEntry, WalkDir};
 
 pub mod action_executor;
 pub mod app_inventory;
+pub mod app_uninstall;
 pub mod dashboard;
 pub mod plugin_command;
 pub mod smart_care;
