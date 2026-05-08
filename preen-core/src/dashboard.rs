@@ -86,6 +86,7 @@ pub struct DashboardMetrics {
     pub disk_write_rate_mbps: Option<f64>,
     pub process_count: Option<u64>,
     pub top_processes: Vec<ProcessMetric>,
+    pub installed_applications: Vec<String>,
     pub network_rx_bytes: Option<u64>,
     pub network_tx_bytes: Option<u64>,
     pub network_rx_rate_mbps: Option<f64>,

@@ -1,3 +1,4 @@
+use crate::i18n::{Language, LanguagePreference, TextKey, detect_system_language, locale, tr};
 use crate::plugin_status::{parse_summary_from_cli_json, render_summary_lines_with_language};
 use preen_core::app_uninstall::{InstalledApplication, UninstallPlan};
 pub use preen_core::dashboard::DashboardSnapshot;
@@ -10,7 +11,10 @@ pub use preen_os::plugin_command::PluginCommandKind as PluginActionKind;
 use preen_os::smart_care_runtime;
 use preen_os::trash_ops;
 use std::collections::{BTreeSet, HashSet};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+const TUI_CONFIG_FILE: &str = "tui.conf";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveView {
@@ -24,6 +28,7 @@ pub enum ActiveView {
     Checks,
     MyTools,
     MyActivity,
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -48,7 +53,9 @@ const MENU_TOOLS_ITEMS: [ActiveView; 3] = [
     ActiveView::MyActivity,
 ];
 
-const MENU_CYCLE_ITEMS: [ActiveView; 10] = [
+const MENU_SETTINGS_ITEMS: [ActiveView; 1] = [ActiveView::Settings];
+
+const MENU_CYCLE_ITEMS: [ActiveView; 11] = [
     ActiveView::Dashboard,
     ActiveView::SmartCare,
     ActiveView::Cleanup,
@@ -59,9 +66,10 @@ const MENU_CYCLE_ITEMS: [ActiveView; 10] = [
     ActiveView::Checks,
     ActiveView::MyTools,
     ActiveView::MyActivity,
+    ActiveView::Settings,
 ];
 
-const MENU_SECTIONS: [MenuSection; 2] = [
+const MENU_SECTIONS: [MenuSection; 3] = [
     MenuSection {
         heading: None,
         items: &MENU_PRIMARY_ITEMS,
@@ -69,6 +77,10 @@ const MENU_SECTIONS: [MenuSection; 2] = [
     MenuSection {
         heading: Some("Tools"),
         items: &MENU_TOOLS_ITEMS,
+    },
+    MenuSection {
+        heading: Some("Settings"),
+        items: &MENU_SETTINGS_ITEMS,
     },
 ];
 
@@ -94,17 +106,22 @@ impl ActiveView {
     }
 
     pub fn title(self) -> &'static str {
+        self.title_for_language(Language::English)
+    }
+
+    pub fn title_for_language(self, language: Language) -> &'static str {
         match self {
-            Self::Dashboard => "Dashboard",
-            Self::SmartCare => "Smart Care",
-            Self::Cleanup => "Cleanup",
-            Self::Protection => "Protection",
-            Self::Performance => "Performance",
-            Self::Applications => "Applications",
-            Self::Plugins => "Plugins",
-            Self::Checks => "Checks",
-            Self::MyTools => "My Tools",
-            Self::MyActivity => "My Activity",
+            Self::Dashboard => tr(language, TextKey::Dashboard),
+            Self::SmartCare => tr(language, TextKey::SmartCare),
+            Self::Cleanup => tr(language, TextKey::Cleanup),
+            Self::Protection => tr(language, TextKey::Protection),
+            Self::Performance => tr(language, TextKey::Performance),
+            Self::Applications => tr(language, TextKey::Applications),
+            Self::Plugins => tr(language, TextKey::Plugins),
+            Self::Checks => tr(language, TextKey::Checks),
+            Self::MyTools => tr(language, TextKey::MyTools),
+            Self::MyActivity => tr(language, TextKey::MyActivity),
+            Self::Settings => tr(language, TextKey::Settings),
         }
     }
 
@@ -119,6 +136,7 @@ impl ActiveView {
                 | Self::Applications
                 | Self::Plugins
                 | Self::Checks
+                | Self::Settings
         )
     }
 
@@ -189,6 +207,11 @@ pub struct AppState {
     pub last_error: Option<String>,
     pub ui_tick: u64,
     pub busy_view: Option<BusyViewState>,
+    pub language_preference: LanguagePreference,
+    pub system_language: Language,
+    pub config_loaded: bool,
+    pub config_status: Option<String>,
+    pub sensitive_folders: Vec<PathBuf>,
     pub plugin_spec: String,
     pub plugin_spec_editing: bool,
     pub plugin_last_action: Option<PluginActionKind>,
@@ -243,6 +266,11 @@ impl Default for AppState {
             last_error: None,
             ui_tick: 0,
             busy_view: None,
+            language_preference: LanguagePreference::System,
+            system_language: detect_system_language(),
+            config_loaded: false,
+            config_status: None,
+            sensitive_folders: Vec::new(),
             plugin_spec: String::new(),
             plugin_spec_editing: false,
             plugin_last_action: None,
@@ -292,6 +320,75 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub fn effective_language(&self) -> Language {
+        match self.language_preference {
+            LanguagePreference::System => self.system_language,
+            LanguagePreference::English => Language::English,
+            LanguagePreference::German => Language::German,
+        }
+    }
+
+    pub fn effective_locale(&self) -> &'static str {
+        locale(self.effective_language())
+    }
+
+    pub fn tr(&self, key: TextKey) -> &'static str {
+        tr(self.effective_language(), key)
+    }
+
+    pub fn cycle_language_preference(&mut self) {
+        self.language_preference = self.language_preference.next();
+        self.config_status = Some(format!(
+            "language: {}",
+            self.language_preference.label(self.system_language)
+        ));
+    }
+
+    pub fn load_config_from_state_dir(&mut self, state_dir: &Path) {
+        self.config_loaded = true;
+        let path = state_dir.join(TUI_CONFIG_FILE);
+        let Ok(raw) = fs::read_to_string(&path) else {
+            return;
+        };
+        self.sensitive_folders.clear();
+        for line in raw.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key.trim() {
+                "language" => {
+                    self.language_preference = LanguagePreference::from_config_value(value);
+                }
+                "sensitive_folder" => {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        self.sensitive_folders.push(PathBuf::from(value));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub fn save_config_to_state_dir(&mut self, state_dir: &Path) -> Result<(), String> {
+        fs::create_dir_all(state_dir)
+            .map_err(|error| format!("failed to create config dir: {error}"))?;
+        let mut lines = vec![format!(
+            "language={}",
+            self.language_preference.as_config_value()
+        )];
+        lines.extend(
+            self.sensitive_folders
+                .iter()
+                .map(|path| format!("sensitive_folder={}", path.display())),
+        );
+        let path = state_dir.join(TUI_CONFIG_FILE);
+        fs::write(&path, format!("{}\n", lines.join("\n")))
+            .map_err(|error| format!("failed to write config: {error}"))?;
+        self.config_status = Some(format!("saved: {}", path.display()));
+        Ok(())
+    }
+
     pub fn advance_ui_tick(&mut self) {
         self.ui_tick = self.ui_tick.wrapping_add(1);
     }
@@ -573,10 +670,10 @@ impl AppState {
                 .filter(|app_name| self.applications_is_protected(app_name))
             {
                 return Err(format!(
-                    "{current}: protected system application uninstall nemishe"
+                    "{current}: protected system application cannot be uninstalled"
                 ));
             }
-            return Err("hich applicationi baraye uninstall select nashode".to_string());
+            return Err("no application selected for uninstall".to_string());
         }
         self.applications_pending_uninstall = targets;
         self.applications_uninstall_confirm = true;
@@ -601,7 +698,7 @@ impl AppState {
 
     fn applications_execute_uninstall(&mut self, targets: Vec<String>) -> Result<(), String> {
         if targets.is_empty() {
-            return Err("hich applicationi baraye uninstall select nashode".to_string());
+            return Err("no application selected for uninstall".to_string());
         }
         let mut logs = Vec::new();
         let mut removed_apps = BTreeSet::new();
@@ -613,7 +710,7 @@ impl AppState {
                 continue;
             }
             if plan.paths.is_empty() {
-                logs.push(format!("{app_name}: path peyda nashod"));
+                logs.push(format!("{app_name}: no related path found"));
                 continue;
             }
             let mut moved_paths = Vec::new();
@@ -660,7 +757,7 @@ impl AppState {
         }
 
         if logs.is_empty() {
-            return Err("hich file jabeja nashod; momkene dastresi nadashte bashi".to_string());
+            return Err("no file was moved; permissions may be missing".to_string());
         }
         self.applications_last_action_lines = logs;
         Ok(())
@@ -670,14 +767,14 @@ impl AppState {
         let records = if self.applications_last_uninstall.is_empty() {
             let records = self.applications_load_last_uninstall_from_journal()?;
             if records.is_empty() {
-                return Err("hich uninstalli baraye undo vojod nadarad".to_string());
+                return Err("no uninstall is available to undo".to_string());
             }
             records
         } else {
             std::mem::take(&mut self.applications_last_uninstall)
         };
         if records.is_empty() {
-            return Err("hich uninstalli baraye undo vojod nadarad".to_string());
+            return Err("no uninstall is available to undo".to_string());
         }
 
         let mut logs = Vec::new();
@@ -732,7 +829,7 @@ impl AppState {
         }
 
         if logs.is_empty() {
-            return Err("undo natavanest file ha ra restore konad".to_string());
+            return Err("undo could not restore any file".to_string());
         }
 
         if restore_failed {
@@ -802,8 +899,8 @@ impl AppState {
         self.begin_busy_view(
             BusyViewKind::PluginAction,
             format!("Running plugin {}", action.label()),
-            "Executing plugin command and collecting diagnostics",
-            "Plugins",
+            self.tr(TextKey::RunningPluginDetail),
+            self.tr(TextKey::Plugins),
         );
     }
 
@@ -815,7 +912,7 @@ impl AppState {
     ) {
         self.plugin_action_running = false;
         self.plugin_last_action = Some(action);
-        self.plugin_last_diagnostics = extract_plugin_diagnostics(&lines);
+        self.plugin_last_diagnostics = extract_plugin_diagnostics(&lines, self.effective_locale());
         self.plugin_last_output = lines;
         self.clear_busy_view_kind(BusyViewKind::PluginAction);
         if ok {
@@ -837,9 +934,9 @@ impl AppState {
         self.smart_care_reopen_review_on_analyze = reopen_review_on_analyze;
         self.begin_busy_view(
             BusyViewKind::SmartCareAction,
-            format!("Running Smart Care {label}"),
-            "Preparing recommendations and applying selected workflow checks",
-            "Smart Care",
+            format!("{} {label}", self.tr(TextKey::RunningSmartCareTitlePrefix)),
+            self.tr(TextKey::RunningSmartCareDetail),
+            self.tr(TextKey::SmartCare),
         );
         true
     }
@@ -971,10 +1068,10 @@ impl AppState {
 
     pub fn smart_care_validate_run_request(&self) -> Result<(), String> {
         if !self.smart_care_has_review_result {
-            return Err("review ro aval ba 'v' anjam bede".to_string());
+            return Err("open review with 'v' first".to_string());
         }
         if !self.smart_care_apply_armed {
-            return Err("baraye apply, aval Shift+X ro bezan".to_string());
+            return Err("press Shift+X before applying".to_string());
         }
         let preview = self.smart_care_current_preview();
         if !preview.overall_ready {
@@ -990,8 +1087,7 @@ impl AppState {
             .count();
         if selected_entries == 0 {
             return Err(
-                "run blocker: hich review entry select nashode; ba space ya 1/2/3/4 entekhab kon"
-                    .to_string(),
+                "run blocker: no review entry selected; use space or 1/2/3/4 to select".to_string(),
             );
         }
         Ok(())
@@ -1244,18 +1340,18 @@ impl AppState {
     }
 }
 
-fn extract_plugin_diagnostics(lines: &[String]) -> Vec<String> {
+fn extract_plugin_diagnostics(lines: &[String], language: &str) -> Vec<String> {
     for line in lines {
         let trimmed = line.trim();
         if trimmed.starts_with('{')
             && let Ok(summary) = parse_summary_from_cli_json(trimmed)
         {
-            return render_summary_lines_with_language(&summary, "en-US");
+            return render_summary_lines_with_language(&summary, language);
         }
         if let Some(idx) = trimmed.find('{') {
             let payload = &trimmed[idx..];
             if let Ok(summary) = parse_summary_from_cli_json(payload) {
-                return render_summary_lines_with_language(&summary, "en-US");
+                return render_summary_lines_with_language(&summary, language);
             }
         }
     }
@@ -1378,6 +1474,47 @@ mod tests {
             assert!(view.supports_smart_care_controls());
             assert!(view.smart_care_capability().is_some());
         }
+    }
+
+    #[test]
+    fn settings_view_is_implemented_and_language_aware() {
+        let mut state = AppState {
+            system_language: Language::German,
+            ..AppState::default()
+        };
+
+        assert!(ActiveView::Settings.is_implemented());
+        assert_eq!(state.effective_locale(), "de-DE");
+        assert_eq!(
+            ActiveView::Settings.title_for_language(state.effective_language()),
+            "Einstellungen"
+        );
+
+        state.cycle_language_preference();
+        assert_eq!(state.language_preference, LanguagePreference::English);
+        assert_eq!(state.effective_locale(), "en-US");
+    }
+
+    #[test]
+    fn tui_config_round_trips_language_and_sensitive_folders() {
+        let temp_dir = create_temp_state_dir("tui-config");
+        let state_dir = temp_dir.join("state");
+        let mut state = AppState {
+            language_preference: LanguagePreference::German,
+            sensitive_folders: vec![PathBuf::from("/Users/demo/Secrets")],
+            ..AppState::default()
+        };
+
+        state.save_config_to_state_dir(&state_dir).unwrap();
+
+        let mut loaded = AppState::default();
+        loaded.load_config_from_state_dir(&state_dir);
+        assert!(loaded.config_loaded);
+        assert_eq!(loaded.language_preference, LanguagePreference::German);
+        assert_eq!(
+            loaded.sensitive_folders,
+            vec![PathBuf::from("/Users/demo/Secrets")]
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ chrono = { version = "0.4.38", features = ["serde", "std"] } # For timestamping 
 tokio = { version = "1", features = ["full"] } # For async runtime and scheduling
 tokio-stream = "0.1" # For async streams
 async-trait = "0.1" # For async traits
-uuid = { version = "1.0", features = ["v4", "fast-rng", "macro-diagnostics"] } # For generating unique IDs
+uuid = { version = "1.0", features = ["v4", "fast-rng", "macro-diagnostics", "serde"] } # For generating unique IDs
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 tempfile = "3.10"

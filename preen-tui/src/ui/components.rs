@@ -1,3 +1,4 @@
+use crate::i18n::{TextKey, tr};
 use crate::model::{ActiveView, AppState};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
@@ -29,7 +30,7 @@ pub(super) fn render_header(frame: &mut Frame<'_>, area: Rect) {
 }
 
 pub(super) fn render_sidebar(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let rows = sidebar_rows();
+    let rows = sidebar_rows(state.effective_language());
 
     let items: Vec<ListItem<'_>> = rows.iter().map(|(_, item)| item.clone()).collect();
     let selected = rows
@@ -39,7 +40,7 @@ pub(super) fn render_sidebar(frame: &mut Frame<'_>, area: Rect, state: &AppState
     let mut list_state = ListState::default();
     list_state.select(Some(selected));
     let list = List::new(items)
-        .block(sidebar_block())
+        .block(sidebar_block(state.tr(TextKey::Menu)))
         .style(Style::default().fg(PALETTE_TEXT))
         .highlight_style(Style::default().bg(PALETTE_ACCENT).fg(Color::Black))
         .highlight_symbol(">> ");
@@ -47,7 +48,7 @@ pub(super) fn render_sidebar(frame: &mut Frame<'_>, area: Rect, state: &AppState
 }
 
 pub(super) fn sidebar_view_at(area: Rect, column: u16, row: u16) -> Option<ActiveView> {
-    let inner = sidebar_block().inner(area);
+    let inner = sidebar_block("Menu").inner(area);
     if column < inner.x
         || column >= inner.x.saturating_add(inner.width)
         || row < inner.y
@@ -56,7 +57,9 @@ pub(super) fn sidebar_view_at(area: Rect, column: u16, row: u16) -> Option<Activ
         return None;
     }
     let index = row.saturating_sub(inner.y) as usize;
-    sidebar_rows().get(index).and_then(|(view, _)| *view)
+    sidebar_rows(crate::i18n::Language::English)
+        .get(index)
+        .and_then(|(view, _)| *view)
 }
 
 pub(super) fn render_main_container(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -68,7 +71,12 @@ pub(super) fn render_main_container(frame: &mut Frame<'_>, area: Rect, state: &A
 
     let (border_color, title_color) = theme::main_container_colors(state);
     let title = Line::from(vec![Span::styled(
-        format!(" {} ", state.active_view.title()),
+        format!(
+            " {} ",
+            state
+                .active_view
+                .title_for_language(state.effective_language())
+        ),
         Style::default()
             .fg(title_color)
             .add_modifier(Modifier::BOLD),
@@ -108,7 +116,12 @@ pub(super) fn render_main_container(frame: &mut Frame<'_>, area: Rect, state: &A
 fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let (border_color, title_color) = theme::main_container_colors(state);
     let title = Line::from(vec![Span::styled(
-        format!(" {} ", state.active_view.title()),
+        format!(
+            " {} ",
+            state
+                .active_view
+                .title_for_language(state.effective_language())
+        ),
         Style::default()
             .fg(title_color)
             .add_modifier(Modifier::BOLD),
@@ -550,22 +563,27 @@ pub(super) fn wrap_plain_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<L
     wrapped
 }
 
-fn sidebar_rows() -> Vec<(Option<ActiveView>, ListItem<'static>)> {
+fn sidebar_rows(language: crate::i18n::Language) -> Vec<(Option<ActiveView>, ListItem<'static>)> {
     let mut rows = Vec::new();
     for (section_index, section) in ActiveView::sections().iter().enumerate() {
         if section_index > 0 {
             rows.push((None, ListItem::new("")));
         }
         if let Some(heading) = section.heading {
+            let heading = match heading {
+                "Tools" => tr(language, TextKey::Tools),
+                "Settings" => tr(language, TextKey::SettingsSection),
+                _ => heading,
+            };
             rows.push((
                 None,
                 ListItem::new(format!(" {heading}")).style(Style::default().fg(PALETTE_LINE)),
             ));
         }
         for view in section.items {
-            let mut label = format!(" {}", view.title());
+            let mut label = format!(" {}", view.title_for_language(language));
             if !view.is_implemented() {
-                label.push_str(" (soon)");
+                label.push_str(&format!(" ({})", tr(language, TextKey::Soon)));
             }
             let base_style = if view.is_implemented() {
                 Style::default().fg(PALETTE_TEXT)
@@ -578,9 +596,9 @@ fn sidebar_rows() -> Vec<(Option<ActiveView>, ListItem<'static>)> {
     rows
 }
 
-fn sidebar_block() -> Block<'static> {
+fn sidebar_block(title: &'static str) -> Block<'static> {
     Block::default()
-        .title(" Menu ")
+        .title(format!(" {title} "))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(PALETTE_LINE))
 }

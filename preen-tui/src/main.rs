@@ -1,4 +1,5 @@
 mod app;
+mod i18n;
 mod model;
 mod plugin_status;
 mod ui;

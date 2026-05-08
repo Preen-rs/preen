@@ -1,3 +1,4 @@
+use crate::i18n::TextKey;
 use crate::model::{ActiveView, AppState, BusyViewKind, PluginActionKind, SmartCareCapability};
 use crate::ui;
 use crate::worker::{StatusWorker, WorkerEvent};
@@ -34,9 +35,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
     let mut state = AppState::default();
     state.begin_busy_view(
         BusyViewKind::Dashboard,
-        "Loading dashboard",
-        "Collecting system health, plugins, checks, and runtime metrics",
-        "Dashboard",
+        state.tr(TextKey::LoadingDashboardTitle),
+        state.tr(TextKey::LoadingDashboardDetail),
+        state.tr(TextKey::Dashboard),
     );
 
     loop {
@@ -55,6 +56,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                         && let Some(plugin) = snapshot.plugins.first()
                     {
                         state.plugin_spec = format!("{}@{}", plugin.pack_id, plugin.version);
+                    }
+                    if !state.config_loaded {
+                        state.load_config_from_state_dir(&snapshot.state_dir);
                     }
                     state.snapshot = Some(snapshot);
                     state.applications_sync_selection();
@@ -285,7 +289,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                                 state.applications_toggle_paths_popup();
                             } else {
                                 state.last_error = Some(
-                                    "aval ba 'a' analyze kon, bad ba 'p' app paths ro bebin"
+                                    "run analyze with 'a' first, then press 'p' to inspect app paths"
                                         .to_string(),
                                 );
                             }
@@ -298,7 +302,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                                 dispatch_applications_inventory_analyze(&mut state, &worker);
                             } else {
                                 state.last_error = Some(
-                                    "aval ba 'a' analyze kon, bad ba 'r' reanalyze kon".to_string(),
+                                    "run analyze with 'a' first, then press 'r' to reanalyze"
+                                        .to_string(),
                                 );
                             }
                         }
@@ -342,6 +347,23 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                         }
                         KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
                             state.set_active_view(ActiveView::Checks)
+                        }
+                        KeyCode::Char('o') if key.modifiers == KeyModifiers::NONE => {
+                            state.set_active_view(ActiveView::Settings)
+                        }
+                        KeyCode::Char('l')
+                            if key.modifiers == KeyModifiers::NONE
+                                && matches!(state.active_view, ActiveView::Settings) =>
+                        {
+                            state.cycle_language_preference();
+                            if let Some(state_dir) = state
+                                .snapshot
+                                .as_ref()
+                                .map(|snapshot| snapshot.state_dir.clone())
+                                && let Err(error) = state.save_config_to_state_dir(&state_dir)
+                            {
+                                state.last_error = Some(error);
+                            }
                         }
                         KeyCode::Char('e')
                             if key.modifiers == KeyModifiers::NONE
@@ -410,7 +432,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                                 && matches!(state.active_view, ActiveView::Applications) =>
                         {
                             state.last_error = Some(
-                                "update flow dar hale hazer tayyar nist; alan uninstall ba 'u' faal ast"
+                                "update flow is not ready yet; uninstall is available with 'u'"
                                     .to_string(),
                             );
                         }
@@ -715,9 +737,9 @@ fn dispatch_applications_inventory_analyze(state: &mut AppState, worker: &Status
     }
     state.begin_busy_view(
         BusyViewKind::Applications,
-        "Analyzing applications",
-        "Scanning installed apps and reading uninstall metadata",
-        "Applications",
+        state.tr(TextKey::AnalyzingApplicationsTitle),
+        state.tr(TextKey::AnalyzingApplicationsDetail),
+        state.tr(TextKey::Applications),
     );
     state.last_error = None;
     worker.run_applications_inventory_analyze();

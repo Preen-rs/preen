@@ -1,9 +1,14 @@
+use crate::i18n::TextKey;
 use crate::model::{ActiveView, AppState};
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+use super::components::wrap_plain_lines;
+use super::layout;
+use super::{PALETTE_ACCENT, PALETTE_LINE};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DONATE_URL: &str = "Donate";
@@ -52,22 +57,51 @@ pub(super) fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState)
 }
 
 pub(super) fn render_keybindings_popup(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let popup_area = centered_rect(80, 72, area);
+    let popup_area = keybindings_popup_area(area);
     frame.render_widget(Clear, popup_area);
     let block = Block::default()
         .title(" Keybindings ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::LightGreen));
+    frame.render_widget(block, popup_area);
+    let inner = popup_area.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
 
-    let lines = keybindings_popup_lines(state.active_view);
-    let viewport_height = popup_area.height.saturating_sub(2) as usize;
+    let mut viewport_height = inner.height as usize;
+    let mut content_width = inner.width as usize;
+    let mut lines = wrap_plain_lines(keybindings_popup_lines(state.active_view), content_width);
+    if viewport_height > 0 && lines.len() > viewport_height && content_width > 0 {
+        content_width = content_width.saturating_sub(1);
+        lines = wrap_plain_lines(keybindings_popup_lines(state.active_view), content_width);
+    }
+    let show_scrollbar = viewport_height > 0 && lines.len() > viewport_height;
+    let content_area = if show_scrollbar && inner.width > 1 {
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width - 1,
+            height: inner.height,
+        }
+    } else {
+        inner
+    };
+    viewport_height = content_area.height as usize;
+    let content_length = lines.len();
     let max_scroll = lines.len().saturating_sub(viewport_height) as u16;
     let effective_scroll = state.keybindings_popup_scroll.min(max_scroll);
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .scroll((effective_scroll, 0))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, popup_area);
+    let paragraph = Paragraph::new(lines).scroll((effective_scroll, 0));
+    frame.render_widget(paragraph, content_area);
+    if show_scrollbar && inner.width > 1 {
+        render_popup_vertical_scrollbar(
+            frame,
+            popup_scrollbar_area(inner),
+            viewport_height,
+            content_length,
+            effective_scroll as usize,
+        );
+    }
 }
 
 pub fn footer_link_at(root: Rect, column: u16, row: u16) -> Option<FooterLinkTarget> {
@@ -107,6 +141,10 @@ pub(super) fn footer_height() -> u16 {
     FOOTER_HEIGHT
 }
 
+pub(super) fn keybindings_popup_area(area: Rect) -> Rect {
+    layout::keybindings_popup_area(area)
+}
+
 fn footer_right_line() -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -138,24 +176,68 @@ fn footer_right_plain_text() -> String {
 
 fn footer_context_text(state: &AppState) -> String {
     if state.show_keybindings_popup {
-        return "Popup: j/k or Up/Down scroll | Close: ? / Esc".to_string();
+        return "Popup: j/k or Up/Down or wheel scroll | Close: ? / Esc".to_string();
+    }
+    if state.show_info_popup && state.active_view.supports_smart_care_controls() {
+        return "Info: j/k or Up/Down or wheel scroll | Close: i / Esc".to_string();
+    }
+    if state.smart_care_action_running && state.active_view.supports_smart_care_controls() {
+        return format!(
+            "Smart Care: {} running... wait for completion | Keybinding: ?",
+            state.smart_care_action_label.as_deref().unwrap_or("action")
+        );
+    }
+    if state.plugin_action_running && state.active_view.supports_smart_care_controls() {
+        let capability = state
+            .smart_care_selected_capability()
+            .map(|capability| capability.title())
+            .unwrap_or("Smart Care");
+        let action = state
+            .plugin_last_action
+            .map(|action| action.label().to_string())
+            .unwrap_or_else(|| "command".to_string());
+        return format!(
+            "{capability} plugin {action} running... wait for completion | Keybinding: ?"
+        );
+    }
+    if state.smart_care_review_mode && state.active_view.supports_smart_care_controls() {
+        return "Review: j/k | space | 1/2/3/4 | A all | N none | Shift+X arm | x run | u undo | close: b/v/Esc | ?: keys".to_string();
     }
     match state.active_view {
         ActiveView::Dashboard => {
-            "Dashboard: d | Plugins: p | Checks: c | Menu: Tab/Shift+Tab | Quit: q | Keybinding: ?"
+            "Dashboard: d | SmartCare: m | Plugins: p | Checks: c | Settings: o | Tab menu | q quit | ?: keys"
                 .to_string()
         }
+        ActiveView::Settings => state.tr(TextKey::SettingsFooter).to_string(),
+        ActiveView::SmartCare => {
+            let run_hint = if state.smart_care_validate_run_request().is_ok() {
+                "x run"
+            } else {
+                "x blocked"
+            };
+            format!(
+                "SmartCare: h/l select | space/1/2/3/4 toggle | a analyze | v review | n/f/t plugin | Shift+X arm | {run_hint} | u undo | i info | ?: keys"
+            )
+        }
+        ActiveView::Applications => format!(
+            "Applications: a analyze | r reanalyze | j/k move | space select | p paths | u uninstall(selected) | z undo | i info | ?: keys"
+        ),
+        ActiveView::Cleanup | ActiveView::Protection | ActiveView::Performance => format!(
+            "{}: h/l select | space toggle | a analyze | v review | n/f/t plugin | Shift+X arm | {} | u undo | i info | ?: keys",
+            state.active_view.title_for_language(state.effective_language()),
+            if state.smart_care_validate_run_request().is_ok() {
+                "x run"
+            } else {
+                "x blocked"
+            }
+        ),
         ActiveView::Plugins => {
-            "Plugins: p | Edit spec: e | Run: l/s/i/f/t/n | Dashboard: d | Checks: c | Keybinding: ?"
-                .to_string()
+            "Plugins: l/s/i/f/t/n | e edit spec | d/m/c switch | q quit | ?: keys".to_string()
         }
-        ActiveView::Checks => {
-            "Checks: c | Scroll: j/k PgUp/PgDn | Dashboard: d | Plugins: p | Keybinding: ?"
-                .to_string()
-        }
+        ActiveView::Checks => "Checks: j/k scroll | d/m/p switch | q quit | ?: keys".to_string(),
         _ => format!(
-            "{} (soon) | Dashboard: d | Plugins: p | Checks: c | Menu: Tab/Shift+Tab | Keybinding: ?",
-            state.active_view.title()
+            "{} (soon) | d/m/p/c switch | Tab menu | q quit | ?: keys",
+            state.active_view.title_for_language(state.effective_language())
         ),
     }
 }
@@ -165,12 +247,14 @@ fn keybindings_popup_lines(view: ActiveView) -> Vec<Line<'static>> {
         Line::from("Global"),
         Line::from("  q / Esc      Quit app"),
         Line::from("  r            Refresh snapshot now"),
-        Line::from("  d / p / c    Open Dashboard/Plugins/Checks"),
+        Line::from("  d / m / p / c Open Dashboard/Smart Care/Plugins/Checks"),
+        Line::from("  o            Open Settings"),
         Line::from("  Tab          Next menu (full sidebar cycle)"),
         Line::from("  Shift+Tab    Previous menu (full sidebar cycle)"),
         Line::from("  Left/Right   Switch menu"),
         Line::from("  j/k          Scroll main container"),
         Line::from("  Up/Down      Scroll main container"),
+        Line::from("  Mouse wheel  Scroll active container/popup"),
         Line::from("  PgUp/PgDn    Fast scroll"),
         Line::from("  g            Scroll to top"),
         Line::from("  ?            Open/close this popup"),
@@ -186,6 +270,89 @@ fn keybindings_popup_lines(view: ActiveView) -> Vec<Line<'static>> {
         ActiveView::Dashboard => {
             lines.push(Line::from("Current menu: Dashboard"));
             lines.push(Line::from("  Realtime system status and health overview."));
+        }
+        ActiveView::SmartCare => {
+            lines.push(Line::from("Current menu: Smart Care"));
+            lines.push(Line::from(
+                "  Shows capability-pack readiness for Smart Care orchestration.",
+            ));
+            lines.push(Line::from(
+                "  1/2/3/4       Toggle Cleanup/Performance/Applications/Protection",
+            ));
+            lines.push(Line::from(
+                "  h/l           Select next/previous capability card",
+            ));
+            lines.push(Line::from(
+                "  space         Toggle selected capability card",
+            ));
+            lines.push(Line::from("  a             Run local analyze preview"));
+            lines.push(Line::from(
+                "  v             Open review popup (only after analyze)",
+            ));
+            lines.push(Line::from(
+                "  n / f / t     Install / Preflight / Test selected capability plugin",
+            ));
+            lines.push(Line::from("  b             Close review mode"));
+            lines.push(Line::from("  j/k           Move in review entries"));
+            lines.push(Line::from("  space         Toggle selected review entry"));
+            lines.push(Line::from(
+                "  1/2/3/4       Toggle Cleanup/Performance/Applications/Protection entries",
+            ));
+            lines.push(Line::from(
+                "  A / N         Select all / Unselect all entries",
+            ));
+            lines.push(Line::from("  Shift+X       Arm apply execution"));
+            lines.push(Line::from(
+                "  x             Run apply execution (after review + arm)",
+            ));
+            lines.push(Line::from(
+                "  u             Undo last Smart Care run (journal-based)",
+            ));
+            lines.push(Line::from(
+                "  0             Reset Smart Care profile to defaults",
+            ));
+        }
+        ActiveView::Cleanup
+        | ActiveView::Protection
+        | ActiveView::Performance
+        | ActiveView::Applications => {
+            lines.push(Line::from(format!("Current menu: {}", view.title())));
+            lines.push(Line::from(
+                "  Shows installed capability plugins and trust readiness.",
+            ));
+            lines.push(Line::from(
+                "  1/2/3/4       Toggle Cleanup/Performance/Applications/Protection",
+            ));
+            lines.push(Line::from(
+                "  h/l           Select next/previous capability card",
+            ));
+            lines.push(Line::from(
+                "  space         Toggle selected capability card",
+            ));
+            lines.push(Line::from("  a             Run local analyze preview"));
+            lines.push(Line::from(
+                "  v             Open review popup (only after analyze)",
+            ));
+            lines.push(Line::from(
+                "  n / f / t     Install / Preflight / Test active capability plugin",
+            ));
+            lines.push(Line::from("  b             Close review mode"));
+            lines.push(Line::from("  j/k           Move in review entries"));
+            lines.push(Line::from("  space         Toggle selected review entry"));
+            lines.push(Line::from(
+                "  1/2/3/4       Toggle Cleanup/Performance/Applications/Protection entries",
+            ));
+            lines.push(Line::from(
+                "  A / N         Select all / Unselect all entries",
+            ));
+            lines.push(Line::from("  Shift+X       Arm apply execution"));
+            lines.push(Line::from(
+                "  x             Run apply execution (after review + arm)",
+            ));
+            lines.push(Line::from(
+                "  u             Undo last Smart Care run (journal-based)",
+            ));
+            lines.push(Line::from("  m             Jump to Smart Care dashboard"));
         }
         ActiveView::Plugins => {
             lines.push(Line::from("Current menu: Plugins"));
@@ -206,6 +373,10 @@ fn keybindings_popup_lines(view: ActiveView) -> Vec<Line<'static>> {
                 "  Shows detailed checks with severity and messages.",
             ));
         }
+        ActiveView::Settings => {
+            lines.push(Line::from("Current menu: Settings"));
+            lines.push(Line::from("  l             Cycle language preference"));
+        }
         _ => {
             lines.push(Line::from(format!(
                 "Current menu: {} (planned)",
@@ -225,26 +396,6 @@ fn keybindings_popup_lines(view: ActiveView) -> Vec<Line<'static>> {
     lines
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1]);
-    horizontal[1]
-}
-
 fn layout_footer_outer(root: Rect) -> Option<Rect> {
     if root.height < FOOTER_HEIGHT {
         return None;
@@ -260,6 +411,60 @@ fn layout_footer_outer(root: Rect) -> Option<Rect> {
     })
 }
 
+fn render_popup_vertical_scrollbar(
+    frame: &mut Frame<'_>,
+    track: Rect,
+    viewport_height: usize,
+    content_length: usize,
+    position: usize,
+) {
+    if track.width == 0
+        || track.height == 0
+        || viewport_height == 0
+        || content_length <= viewport_height
+    {
+        return;
+    }
+
+    let track_height = track.height as usize;
+    let max_scroll = content_length.saturating_sub(viewport_height);
+    let thumb_height =
+        ((viewport_height * track_height).div_ceil(content_length)).clamp(1, track_height);
+    let max_thumb_offset = track_height.saturating_sub(thumb_height);
+    let thumb_offset = if max_scroll == 0 {
+        0
+    } else {
+        position.min(max_scroll) * max_thumb_offset / max_scroll
+    };
+    for row in 0..track_height {
+        let is_thumb = row >= thumb_offset && row < thumb_offset + thumb_height;
+        let symbol = if is_thumb { "█" } else { "│" };
+        let style = if is_thumb {
+            Style::default().fg(PALETTE_ACCENT)
+        } else {
+            Style::default().fg(PALETTE_LINE)
+        };
+        frame.render_widget(
+            Paragraph::new(symbol).style(style),
+            Rect {
+                x: track.x,
+                y: track.y.saturating_add(row as u16),
+                width: 1,
+                height: 1,
+            },
+        );
+    }
+}
+
+fn popup_scrollbar_area(inner: Rect) -> Rect {
+    Rect {
+        x: inner.x.saturating_add(inner.width.saturating_sub(1)),
+        y: inner.y,
+        width: 1,
+        height: inner.height,
+    }
+}
+
 fn footer_content_row(row: Rect) -> Rect {
     let total_pad = FOOTER_LEFT_PADDING.saturating_add(FOOTER_RIGHT_PADDING);
     if row.width <= total_pad {
@@ -270,5 +475,38 @@ fn footer_content_row(row: Rect) -> Rect {
         y: row.y,
         width: row.width.saturating_sub(total_pad),
         height: row.height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::PluginActionKind;
+
+    #[test]
+    fn smart_care_plugin_running_context_includes_capability_and_action() {
+        let mut state = AppState {
+            active_view: ActiveView::SmartCare,
+            plugin_action_running: true,
+            ..AppState::default()
+        };
+        state.plugin_last_action = Some(PluginActionKind::Preflight);
+        state.smart_care_selected_card = 0;
+
+        let text = footer_context_text(&state);
+        assert!(text.contains("Cleanup plugin preflight running"));
+    }
+
+    #[test]
+    fn smart_care_plugin_running_context_falls_back_when_no_action_present() {
+        let state = AppState {
+            active_view: ActiveView::SmartCare,
+            plugin_action_running: true,
+            plugin_last_action: None,
+            ..AppState::default()
+        };
+
+        let text = footer_context_text(&state);
+        assert!(text.contains("Cleanup plugin command running"));
     }
 }
