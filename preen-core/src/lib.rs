@@ -12,6 +12,7 @@ use crate::error::CoreError;
 rust_i18n::i18n!("locales", fallback = "en-US");
 
 pub mod action_runtime;
+pub mod app_uninstall;
 pub mod check_list_view;
 pub mod dashboard;
 pub mod dashboard_facade;
@@ -26,6 +27,7 @@ pub mod plugin_list_view;
 pub mod plugin_loader;
 pub mod plugin_lock;
 pub mod plugin_registry;
+pub mod smart_care;
 pub mod store;
 
 pub const UNDO_CODE_AMBIGUOUS: &str = "undo_ambiguous";

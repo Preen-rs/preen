@@ -1,6 +1,19 @@
 use crate::plugin_status::{parse_summary_from_cli_json, render_summary_lines_with_language};
+use preen_core::app_uninstall::{
+    AppIdentity, AppPlatform, InstalledApplication, RelatedPath, RelatedPathKind, UninstallPlan,
+    path_name_matches_app,
+};
 pub use preen_core::dashboard::DashboardSnapshot;
+pub use preen_core::smart_care::{
+    SmartCareCapability, SmartCarePluginDescriptor, SmartCarePreview, SmartCareProfile,
+    build_preview_from_descriptors,
+};
+use preen_os::app_inventory;
 pub use preen_os::plugin_command::PluginCommandKind as PluginActionKind;
+use preen_os::smart_care_runtime;
+use std::collections::{BTreeSet, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveView {
@@ -99,8 +112,45 @@ impl ActiveView {
     }
 
     pub fn is_implemented(self) -> bool {
-        matches!(self, Self::Dashboard | Self::Plugins | Self::Checks)
+        matches!(
+            self,
+            Self::Dashboard
+                | Self::SmartCare
+                | Self::Cleanup
+                | Self::Protection
+                | Self::Performance
+                | Self::Applications
+                | Self::Plugins
+                | Self::Checks
+        )
     }
+
+    pub const fn smart_care_capability(self) -> Option<SmartCareCapability> {
+        match self {
+            Self::Cleanup => Some(SmartCareCapability::Cleanup),
+            Self::Protection => Some(SmartCareCapability::Protection),
+            Self::Performance => Some(SmartCareCapability::Performance),
+            Self::Applications => Some(SmartCareCapability::Applications),
+            _ => None,
+        }
+    }
+
+    pub const fn supports_smart_care_controls(self) -> bool {
+        matches!(
+            self,
+            Self::SmartCare
+                | Self::Cleanup
+                | Self::Protection
+                | Self::Performance
+                | Self::Applications
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplicationUninstallRecord {
+    pub plan: UninstallPlan,
+    pub moved_paths: Vec<(PathBuf, PathBuf)>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,9 +164,44 @@ pub struct AppState {
     pub plugin_last_output: Vec<String>,
     pub plugin_last_diagnostics: Vec<String>,
     pub plugin_action_running: bool,
+    pub smart_care_profile: SmartCareProfile,
+    pub smart_care_descriptors: Vec<SmartCarePluginDescriptor>,
+    pub smart_care_error: Option<String>,
+    pub smart_care_source_summary: Option<String>,
+    pub smart_care_skipped_pack_ids: BTreeSet<String>,
+    pub smart_care_dev_fallback_pack_ids: BTreeSet<String>,
+    pub smart_care_preview: Option<SmartCarePreview>,
+    pub smart_care_selected_card: usize,
+    pub smart_care_has_analyze_result: bool,
+    pub smart_care_has_review_result: bool,
+    pub smart_care_review_mode: bool,
+    pub smart_care_review_scroll: u16,
+    pub smart_care_review_selected_entry: usize,
+    pub smart_care_review_disabled_entries: BTreeSet<String>,
+    pub smart_care_last_run_report: Vec<String>,
+    pub smart_care_last_analyze: Vec<String>,
+    pub smart_care_apply_armed: bool,
+    pub smart_care_action_running: bool,
+    pub smart_care_action_label: Option<String>,
+    pub smart_care_reopen_review_on_analyze: bool,
     pub main_scroll: u16,
     pub show_keybindings_popup: bool,
     pub keybindings_popup_scroll: u16,
+    pub show_info_popup: bool,
+    pub info_popup_scroll: u16,
+    pub applications_selected_row: usize,
+    pub applications_list_offset: usize,
+    pub applications_selected_items: BTreeSet<String>,
+    pub applications_inventory: Vec<String>,
+    pub applications_inventory_metadata: Vec<InstalledApplication>,
+    pub applications_inventory_revision: u64,
+    pub applications_last_action_lines: Vec<String>,
+    pub applications_info_target: Option<String>,
+    pub applications_info_paths: Vec<String>,
+    pub applications_show_paths_in_info: bool,
+    pub applications_uninstall_confirm: bool,
+    pub applications_pending_uninstall: Vec<String>,
+    pub applications_last_uninstall: Vec<ApplicationUninstallRecord>,
 }
 
 impl Default for AppState {
@@ -131,9 +216,44 @@ impl Default for AppState {
             plugin_last_output: Vec::new(),
             plugin_last_diagnostics: Vec::new(),
             plugin_action_running: false,
+            smart_care_profile: SmartCareProfile::default_profile(),
+            smart_care_descriptors: Vec::new(),
+            smart_care_error: None,
+            smart_care_source_summary: None,
+            smart_care_skipped_pack_ids: BTreeSet::new(),
+            smart_care_dev_fallback_pack_ids: BTreeSet::new(),
+            smart_care_preview: None,
+            smart_care_selected_card: 0,
+            smart_care_has_analyze_result: false,
+            smart_care_has_review_result: false,
+            smart_care_review_mode: false,
+            smart_care_review_scroll: 0,
+            smart_care_review_selected_entry: 0,
+            smart_care_review_disabled_entries: BTreeSet::new(),
+            smart_care_last_run_report: Vec::new(),
+            smart_care_last_analyze: Vec::new(),
+            smart_care_apply_armed: false,
+            smart_care_action_running: false,
+            smart_care_action_label: None,
+            smart_care_reopen_review_on_analyze: false,
             main_scroll: 0,
             show_keybindings_popup: false,
             keybindings_popup_scroll: 0,
+            show_info_popup: false,
+            info_popup_scroll: 0,
+            applications_selected_row: 0,
+            applications_list_offset: 0,
+            applications_selected_items: BTreeSet::new(),
+            applications_inventory: Vec::new(),
+            applications_inventory_metadata: Vec::new(),
+            applications_inventory_revision: 0,
+            applications_last_action_lines: Vec::new(),
+            applications_info_target: None,
+            applications_info_paths: Vec::new(),
+            applications_show_paths_in_info: false,
+            applications_uninstall_confirm: false,
+            applications_pending_uninstall: Vec::new(),
+            applications_last_uninstall: Vec::new(),
         }
     }
 }
@@ -143,6 +263,19 @@ impl AppState {
         if self.active_view != next {
             self.active_view = next;
             self.main_scroll = 0;
+            self.smart_care_apply_armed = false;
+            self.close_info_popup();
+            self.applications_cancel_uninstall_confirm();
+            if let Some(capability) = next.smart_care_capability()
+                && let Some(index) = self
+                    .smart_care_profile
+                    .capabilities
+                    .iter()
+                    .position(|selection| selection.capability == capability)
+            {
+                self.smart_care_selected_card = index;
+            }
+            self.applications_sync_selection();
         }
     }
 
@@ -176,6 +309,318 @@ impl AppState {
 
     pub fn scroll_keybindings_up(&mut self, amount: u16) {
         self.keybindings_popup_scroll = self.keybindings_popup_scroll.saturating_sub(amount);
+    }
+
+    pub fn toggle_info_popup(&mut self) {
+        self.show_info_popup = !self.show_info_popup;
+        if self.show_info_popup {
+            self.info_popup_scroll = 0;
+            self.applications_show_paths_in_info = false;
+        }
+    }
+
+    pub fn close_info_popup(&mut self) {
+        self.show_info_popup = false;
+        self.info_popup_scroll = 0;
+        self.applications_show_paths_in_info = false;
+    }
+
+    pub fn applications_toggle_paths_popup(&mut self) {
+        if self.show_info_popup && self.applications_show_paths_in_info {
+            self.close_info_popup();
+        } else {
+            self.applications_prepare_info_for_selected();
+            self.applications_show_paths_in_info = true;
+            self.show_info_popup = true;
+            self.info_popup_scroll = 0;
+        }
+    }
+
+    pub fn applications_items(&self) -> Vec<String> {
+        if !self.applications_inventory.is_empty() {
+            return self.applications_inventory.clone();
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return Vec::new();
+        };
+        snapshot.metrics.installed_applications.clone()
+    }
+
+    pub fn applications_run_local_inventory_analyze(&mut self) {
+        let previous_len = self.applications_inventory.len();
+        self.applications_inventory_metadata = app_inventory::collect_installed_applications();
+        self.applications_inventory = self
+            .applications_inventory_metadata
+            .iter()
+            .map(|app| app.identity.display_name.clone())
+            .collect();
+        self.applications_inventory_revision =
+            self.applications_inventory_revision.saturating_add(1);
+        self.applications_selected_row = 0;
+        self.applications_list_offset = 0;
+        self.close_info_popup();
+        self.applications_sync_selection();
+        self.smart_care_has_analyze_result = true;
+        self.smart_care_has_review_result = false;
+        self.smart_care_review_mode = false;
+        self.smart_care_review_scroll = 0;
+        self.smart_care_review_selected_entry = 0;
+        self.smart_care_review_disabled_entries.clear();
+        self.smart_care_last_run_report.clear();
+        let current_len = self.applications_inventory.len();
+        let delta = current_len as isize - previous_len as isize;
+        self.smart_care_last_analyze = vec![format!(
+            "applications scan #{}: {} app(s) found ({delta:+})",
+            self.applications_inventory_revision, current_len
+        )];
+        self.main_scroll = 0;
+    }
+
+    pub fn applications_sync_selection(&mut self) {
+        let items = self.applications_items();
+        self.applications_selected_items
+            .retain(|item| items.iter().any(|value| value == item));
+        if items.is_empty() {
+            self.applications_selected_row = 0;
+            self.applications_list_offset = 0;
+            self.main_scroll = 0;
+            return;
+        }
+        if self.applications_selected_row >= items.len() {
+            self.applications_selected_row = items.len().saturating_sub(1);
+        }
+        self.applications_sync_main_scroll_with_selection();
+    }
+
+    pub fn applications_select_next(&mut self) {
+        let items = self.applications_items();
+        if items.is_empty() {
+            self.applications_selected_row = 0;
+            self.applications_list_offset = 0;
+            return;
+        }
+        if self.applications_selected_row + 1 < items.len() {
+            self.applications_selected_row += 1;
+        }
+        self.applications_sync_main_scroll_with_selection();
+    }
+
+    pub fn applications_select_previous(&mut self) {
+        let items = self.applications_items();
+        if items.is_empty() {
+            self.applications_selected_row = 0;
+            self.applications_list_offset = 0;
+            return;
+        }
+        self.applications_selected_row = self.applications_selected_row.saturating_sub(1);
+        self.applications_sync_main_scroll_with_selection();
+    }
+
+    pub fn applications_selected_app(&self) -> Option<String> {
+        self.applications_items()
+            .get(self.applications_selected_row)
+            .cloned()
+    }
+
+    pub fn applications_is_selected(&self, app_name: &str) -> bool {
+        self.applications_selected_items.contains(app_name)
+    }
+
+    pub fn applications_toggle_selected(&mut self) {
+        let Some(app_name) = self.applications_selected_app() else {
+            return;
+        };
+        if self.applications_selected_items.contains(&app_name) {
+            self.applications_selected_items.remove(&app_name);
+        } else {
+            self.applications_selected_items.insert(app_name);
+        }
+    }
+
+    pub fn applications_selected_count(&self) -> usize {
+        self.applications_selected_items.len()
+    }
+
+    pub fn applications_prepare_info_for_selected(&mut self) {
+        let Some(app_name) = self.applications_selected_app() else {
+            self.applications_info_target = None;
+            self.applications_info_paths.clear();
+            return;
+        };
+        self.applications_info_paths = discover_application_related_paths(&app_name);
+        self.applications_info_target = Some(app_name);
+    }
+
+    fn applications_sync_main_scroll_with_selection(&mut self) {
+        // Main scroll is kept for legacy paragraph rendering paths.
+        const APP_LIST_HEADER_LINES: usize = 18;
+        self.main_scroll = APP_LIST_HEADER_LINES as u16;
+    }
+
+    fn applications_uninstall_targets(&self) -> Vec<String> {
+        let mut targets = self
+            .applications_selected_items
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if targets.is_empty()
+            && let Some(current) = self.applications_selected_app()
+        {
+            targets.push(current);
+        }
+        targets
+    }
+
+    pub fn applications_pending_uninstall_targets(&self) -> &[String] {
+        &self.applications_pending_uninstall
+    }
+
+    pub fn applications_open_uninstall_confirm(&mut self) -> Result<(), String> {
+        let targets = self.applications_uninstall_targets();
+        if targets.is_empty() {
+            return Err("hich applicationi baraye uninstall select nashode".to_string());
+        }
+        self.applications_pending_uninstall = targets;
+        self.applications_uninstall_confirm = true;
+        self.close_info_popup();
+        Ok(())
+    }
+
+    pub fn applications_cancel_uninstall_confirm(&mut self) {
+        self.applications_uninstall_confirm = false;
+        self.applications_pending_uninstall.clear();
+    }
+
+    pub fn applications_confirm_uninstall_selected(&mut self) -> Result<(), String> {
+        let targets = if self.applications_pending_uninstall.is_empty() {
+            self.applications_uninstall_targets()
+        } else {
+            std::mem::take(&mut self.applications_pending_uninstall)
+        };
+        self.applications_uninstall_confirm = false;
+        self.applications_execute_uninstall(targets)
+    }
+
+    fn applications_execute_uninstall(&mut self, targets: Vec<String>) -> Result<(), String> {
+        if targets.is_empty() {
+            return Err("hich applicationi baraye uninstall select nashode".to_string());
+        }
+        let mut logs = Vec::new();
+        let mut removed_apps = BTreeSet::new();
+        let mut uninstall_records = Vec::new();
+        for app_name in targets {
+            let plan = build_application_uninstall_plan(&app_name);
+            if plan.paths.is_empty() {
+                logs.push(format!("{app_name}: path peyda nashod"));
+                continue;
+            }
+            let mut moved_paths = Vec::new();
+            for related_path in &plan.paths {
+                let path = PathBuf::from(&related_path.path);
+                if !path.exists() {
+                    continue;
+                }
+                match move_path_to_trash(&path) {
+                    Ok(new_path) => {
+                        logs.push(format!(
+                            "moved: {} -> {}",
+                            path.display(),
+                            new_path.display()
+                        ));
+                        moved_paths.push((path, new_path));
+                    }
+                    Err(error) => logs.push(format!("failed: {} ({error})", path.display())),
+                }
+            }
+            if !moved_paths.is_empty() {
+                removed_apps.insert(app_name.clone());
+                uninstall_records.push(ApplicationUninstallRecord { plan, moved_paths });
+            }
+        }
+
+        if !removed_apps.is_empty() {
+            self.applications_inventory
+                .retain(|item| !removed_apps.contains(item));
+            self.applications_selected_items
+                .retain(|item| !removed_apps.contains(item));
+            self.applications_sync_selection();
+        }
+
+        if !uninstall_records.is_empty() {
+            self.applications_last_uninstall = uninstall_records;
+        }
+
+        if logs.is_empty() {
+            return Err("hich file jabeja nashod; momkene dastresi nadashte bashi".to_string());
+        }
+        self.applications_last_action_lines = logs;
+        Ok(())
+    }
+
+    pub fn applications_undo_last_uninstall(&mut self) -> Result<(), String> {
+        if self.applications_last_uninstall.is_empty() {
+            return Err("hich uninstalli baraye undo vojod nadarad".to_string());
+        }
+
+        let records = std::mem::take(&mut self.applications_last_uninstall);
+        let mut logs = Vec::new();
+        let mut restored_apps = Vec::new();
+
+        for record in records.into_iter().rev() {
+            let mut restored_any = false;
+            for (original, trashed) in record.moved_paths.into_iter().rev() {
+                if !trashed.exists() {
+                    logs.push(format!("missing trash item: {}", trashed.display()));
+                    continue;
+                }
+                if let Some(parent) = original.parent()
+                    && let Err(error) = fs::create_dir_all(parent)
+                {
+                    logs.push(format!("failed: {} ({error})", parent.display()));
+                    continue;
+                }
+                match fs::rename(&trashed, &original) {
+                    Ok(()) => {
+                        restored_any = true;
+                        logs.push(format!(
+                            "restored: {} -> {}",
+                            trashed.display(),
+                            original.display()
+                        ));
+                    }
+                    Err(error) => logs.push(format!("failed: {} ({error})", trashed.display())),
+                }
+            }
+            if restored_any {
+                restored_apps.push(record.plan.identity.display_name);
+            }
+        }
+
+        if !restored_apps.is_empty() {
+            for app in restored_apps {
+                if !self.applications_inventory.iter().any(|item| item == &app) {
+                    self.applications_inventory.push(app);
+                }
+            }
+            self.applications_inventory.sort();
+            self.applications_inventory.dedup();
+            self.applications_sync_selection();
+        }
+
+        if logs.is_empty() {
+            return Err("undo natavanest file ha ra restore konad".to_string());
+        }
+
+        self.applications_last_action_lines = logs;
+        Ok(())
+    }
+
+    pub fn scroll_info_popup_down(&mut self, amount: u16) {
+        self.info_popup_scroll = self.info_popup_scroll.saturating_add(amount);
+    }
+
+    pub fn scroll_info_popup_up(&mut self, amount: u16) {
+        self.info_popup_scroll = self.info_popup_scroll.saturating_sub(amount);
     }
 
     pub fn begin_plugin_spec_edit(&mut self) {
@@ -216,17 +661,436 @@ impl AppState {
             self.last_error = None;
         }
     }
+
+    pub fn begin_smart_care_action(
+        &mut self,
+        label: impl Into<String>,
+        reopen_review_on_analyze: bool,
+    ) -> bool {
+        if self.smart_care_action_running {
+            return false;
+        }
+        self.smart_care_action_running = true;
+        self.smart_care_action_label = Some(label.into());
+        self.smart_care_reopen_review_on_analyze = reopen_review_on_analyze;
+        true
+    }
+
+    pub fn clear_smart_care_action_state(&mut self) {
+        self.smart_care_action_running = false;
+        self.smart_care_action_label = None;
+        self.smart_care_reopen_review_on_analyze = false;
+    }
+
+    pub fn apply_smart_care_analyze_result(
+        &mut self,
+        preview: SmartCarePreview,
+        lines: Vec<String>,
+    ) {
+        self.smart_care_preview = Some(preview);
+        self.smart_care_last_analyze = lines;
+        self.smart_care_has_analyze_result = true;
+        self.smart_care_has_review_result = false;
+        self.smart_care_review_mode = false;
+        self.smart_care_review_scroll = 0;
+        self.smart_care_review_selected_entry = 0;
+        self.smart_care_review_disabled_entries.clear();
+        self.smart_care_apply_armed = false;
+        let reopen = self.smart_care_reopen_review_on_analyze;
+        self.clear_smart_care_action_state();
+        if reopen {
+            self.smart_care_open_review();
+        }
+    }
+
+    pub fn apply_smart_care_run_result(&mut self, lines: Vec<String>) {
+        self.smart_care_last_run_report = lines;
+        self.smart_care_review_mode = true;
+        self.smart_care_review_scroll = 0;
+        self.smart_care_apply_armed = false;
+        self.clear_smart_care_action_state();
+    }
+
+    pub fn apply_smart_care_descriptor_snapshot(
+        &mut self,
+        descriptors: Vec<SmartCarePluginDescriptor>,
+        resolver_error: Option<String>,
+        source_summary: Option<String>,
+        skipped_pack_ids: BTreeSet<String>,
+        dev_fallback_pack_ids: BTreeSet<String>,
+    ) {
+        let changed = self.smart_care_descriptors != descriptors
+            || self.smart_care_error != resolver_error
+            || self.smart_care_source_summary != source_summary
+            || self.smart_care_skipped_pack_ids != skipped_pack_ids
+            || self.smart_care_dev_fallback_pack_ids != dev_fallback_pack_ids;
+
+        self.smart_care_descriptors = descriptors;
+        self.smart_care_error = resolver_error;
+        self.smart_care_source_summary = source_summary;
+        self.smart_care_skipped_pack_ids = skipped_pack_ids;
+        self.smart_care_dev_fallback_pack_ids = dev_fallback_pack_ids;
+
+        if changed {
+            self.smart_care_preview = None;
+            self.smart_care_has_analyze_result = false;
+            self.smart_care_has_review_result = false;
+            self.smart_care_review_mode = false;
+            self.smart_care_review_scroll = 0;
+            self.smart_care_review_selected_entry = 0;
+            self.smart_care_review_disabled_entries.clear();
+            self.smart_care_last_analyze.clear();
+            self.smart_care_apply_armed = false;
+        }
+    }
+
+    pub fn apply_smart_care_undo_result(&mut self, lines: Vec<String>) {
+        self.smart_care_last_run_report = lines;
+        self.smart_care_review_mode = true;
+        self.smart_care_review_scroll = 0;
+        self.smart_care_apply_armed = false;
+        self.clear_smart_care_action_state();
+    }
+
+    pub fn smart_care_toggle_capability(&mut self, capability: SmartCareCapability) {
+        if let Some(selection) = self
+            .smart_care_profile
+            .capabilities
+            .iter_mut()
+            .find(|selection| selection.capability == capability)
+        {
+            selection.enabled = !selection.enabled;
+            self.smart_care_preview = None;
+            self.smart_care_has_analyze_result = false;
+            self.smart_care_has_review_result = false;
+            self.smart_care_review_mode = false;
+            self.smart_care_review_scroll = 0;
+            self.smart_care_review_selected_entry = 0;
+            self.smart_care_review_disabled_entries.clear();
+            self.smart_care_last_run_report.clear();
+            self.smart_care_last_analyze.clear();
+            self.smart_care_apply_armed = false;
+            self.clear_smart_care_action_state();
+            self.main_scroll = 0;
+        }
+    }
+
+    pub fn smart_care_reset_profile(&mut self) {
+        self.smart_care_profile = SmartCareProfile::default_profile();
+        self.smart_care_preview = None;
+        self.smart_care_selected_card = 0;
+        self.smart_care_has_analyze_result = false;
+        self.smart_care_has_review_result = false;
+        self.smart_care_review_mode = false;
+        self.smart_care_review_scroll = 0;
+        self.smart_care_review_selected_entry = 0;
+        self.smart_care_review_disabled_entries.clear();
+        self.smart_care_last_run_report.clear();
+        self.smart_care_last_analyze.clear();
+        self.smart_care_apply_armed = false;
+        self.clear_smart_care_action_state();
+        self.main_scroll = 0;
+    }
+
+    pub fn smart_care_arm_apply(&mut self) {
+        self.smart_care_apply_armed = true;
+    }
+
+    pub fn smart_care_disarm_apply(&mut self) {
+        self.smart_care_apply_armed = false;
+    }
+
+    pub fn smart_care_validate_run_request(&self) -> Result<(), String> {
+        if !self.smart_care_has_review_result {
+            return Err("review ro aval ba 'v' anjam bede".to_string());
+        }
+        if !self.smart_care_apply_armed {
+            return Err("baraye apply, aval Shift+X ro bezan".to_string());
+        }
+        let preview = self.smart_care_current_preview();
+        if !preview.overall_ready {
+            if let Some(blocker) = preview.blockers.first() {
+                return Err(format!("smart care blocker: {blocker}"));
+            }
+            return Err("smart care blocker: preview not ready".to_string());
+        }
+        let selected_entries = preview
+            .review_entries
+            .iter()
+            .filter(|entry| !self.smart_care_review_disabled_entries.contains(&entry.id))
+            .count();
+        if selected_entries == 0 {
+            return Err(
+                "run blocker: hich review entry select nashode; ba space ya 1/2/3/4 entekhab kon"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn smart_care_current_preview(&self) -> SmartCarePreview {
+        self.smart_care_preview.clone().unwrap_or_else(|| {
+            build_preview_from_descriptors(&self.smart_care_profile, &self.smart_care_descriptors)
+        })
+    }
+
+    pub fn smart_care_disabled_entry_ids(&self) -> HashSet<String> {
+        self.smart_care_review_disabled_entries
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    pub fn smart_care_run_local_analyze(&mut self) {
+        let output = smart_care_runtime::analyze(
+            &self.smart_care_profile,
+            &self.smart_care_descriptors,
+            None,
+        );
+        self.smart_care_last_analyze = output.lines;
+        self.smart_care_preview = Some(output.preview);
+        self.smart_care_has_analyze_result = true;
+        self.smart_care_has_review_result = false;
+        self.smart_care_review_mode = false;
+        self.smart_care_review_scroll = 0;
+        self.smart_care_review_selected_entry = 0;
+        self.smart_care_review_disabled_entries.clear();
+    }
+
+    pub fn smart_care_select_next_card(&mut self) {
+        let card_count = self.smart_care_profile.capabilities.len();
+        if card_count == 0 {
+            return;
+        }
+        self.smart_care_selected_card = (self.smart_care_selected_card + 1) % card_count;
+    }
+
+    pub fn smart_care_select_previous_card(&mut self) {
+        let card_count = self.smart_care_profile.capabilities.len();
+        if card_count == 0 {
+            return;
+        }
+        self.smart_care_selected_card =
+            (self.smart_care_selected_card + card_count - 1) % card_count;
+    }
+
+    pub fn smart_care_toggle_selected_card(&mut self) {
+        let Some(capability) = self
+            .smart_care_profile
+            .capabilities
+            .get(self.smart_care_selected_card)
+            .map(|selection| selection.capability)
+        else {
+            return;
+        };
+        self.smart_care_toggle_capability(capability);
+    }
+
+    pub fn smart_care_open_review(&mut self) {
+        if !self.smart_care_has_analyze_result {
+            self.last_error = Some("run analyze first with 'a' before opening review".to_string());
+            return;
+        }
+        if self.smart_care_preview.is_none() {
+            self.smart_care_run_local_analyze();
+        }
+        self.smart_care_has_review_result = true;
+        self.smart_care_review_mode = true;
+        self.smart_care_review_scroll = 0;
+        self.smart_care_review_selected_entry = 0;
+    }
+
+    pub fn smart_care_close_review(&mut self) {
+        self.smart_care_review_mode = false;
+        self.smart_care_review_scroll = 0;
+    }
+
+    pub fn smart_care_review_select_next_entry(&mut self) {
+        let Some(preview) = &self.smart_care_preview else {
+            return;
+        };
+        let total = preview.review_entries.len();
+        if total == 0 {
+            self.smart_care_review_selected_entry = 0;
+            return;
+        }
+        self.smart_care_review_selected_entry = (self.smart_care_review_selected_entry + 1) % total;
+    }
+
+    pub fn smart_care_review_select_previous_entry(&mut self) {
+        let Some(preview) = &self.smart_care_preview else {
+            return;
+        };
+        let total = preview.review_entries.len();
+        if total == 0 {
+            self.smart_care_review_selected_entry = 0;
+            return;
+        }
+        self.smart_care_review_selected_entry =
+            (self.smart_care_review_selected_entry + total - 1) % total;
+    }
+
+    pub fn smart_care_review_toggle_selected_entry(&mut self) {
+        let Some(preview) = &self.smart_care_preview else {
+            return;
+        };
+        let Some(entry) = preview
+            .review_entries
+            .get(self.smart_care_review_selected_entry)
+        else {
+            return;
+        };
+        if !self
+            .smart_care_review_disabled_entries
+            .insert(entry.id.clone())
+        {
+            self.smart_care_review_disabled_entries.remove(&entry.id);
+        }
+        self.smart_care_apply_armed = false;
+    }
+
+    pub fn smart_care_review_select_all_entries(&mut self) {
+        self.smart_care_review_disabled_entries.clear();
+        self.smart_care_apply_armed = false;
+    }
+
+    pub fn smart_care_review_unselect_all_entries(&mut self) {
+        let Some(preview) = &self.smart_care_preview else {
+            return;
+        };
+        self.smart_care_review_disabled_entries = preview
+            .review_entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        self.smart_care_apply_armed = false;
+    }
+
+    pub fn smart_care_review_toggle_capability_entries(&mut self, capability: SmartCareCapability) {
+        let Some(preview) = &self.smart_care_preview else {
+            return;
+        };
+        let capability_entries = preview
+            .review_entries
+            .iter()
+            .filter(|entry| entry.capability == capability)
+            .collect::<Vec<_>>();
+        if capability_entries.is_empty() {
+            return;
+        }
+
+        let all_selected = capability_entries
+            .iter()
+            .all(|entry| !self.smart_care_review_disabled_entries.contains(&entry.id));
+        if all_selected {
+            for entry in capability_entries {
+                self.smart_care_review_disabled_entries
+                    .insert(entry.id.clone());
+            }
+        } else {
+            for entry in capability_entries {
+                self.smart_care_review_disabled_entries.remove(&entry.id);
+            }
+        }
+        self.smart_care_apply_armed = false;
+    }
+
+    #[cfg(test)]
+    pub fn smart_care_review_selected_count(&self) -> usize {
+        let Some(preview) = &self.smart_care_preview else {
+            return 0;
+        };
+        preview
+            .review_entries
+            .iter()
+            .filter(|entry| !self.smart_care_review_disabled_entries.contains(&entry.id))
+            .count()
+    }
+
+    #[cfg(test)]
+    pub fn smart_care_run_local_execute(&mut self) {
+        let preview = self.smart_care_current_preview();
+        let output = smart_care_runtime::execute_local_dry_run(
+            &preview,
+            &self.smart_care_disabled_entry_ids(),
+            self.smart_care_has_review_result,
+        );
+        self.smart_care_last_run_report = output.lines;
+        self.smart_care_review_mode = true;
+        self.smart_care_review_scroll = 0;
+    }
+
+    #[cfg(test)]
+    pub fn smart_care_run_local_undo(&mut self) {
+        let output =
+            smart_care_runtime::undo_local_dry_run(!self.smart_care_last_run_report.is_empty());
+        self.smart_care_last_run_report = output.lines;
+        self.smart_care_review_mode = true;
+        self.smart_care_review_scroll = 0;
+    }
+
+    pub fn smart_care_scroll_review_down(&mut self, amount: u16) {
+        self.smart_care_review_scroll = self.smart_care_review_scroll.saturating_add(amount);
+    }
+
+    pub fn smart_care_scroll_review_up(&mut self, amount: u16) {
+        self.smart_care_review_scroll = self.smart_care_review_scroll.saturating_sub(amount);
+    }
+
+    pub fn smart_care_scroll_review_to_top(&mut self) {
+        self.smart_care_review_scroll = 0;
+    }
+
+    pub fn smart_care_is_enabled(&self, capability: SmartCareCapability) -> bool {
+        self.smart_care_profile
+            .capabilities
+            .iter()
+            .find(|selection| selection.capability == capability)
+            .is_some_and(|selection| selection.enabled)
+    }
+
+    pub fn smart_care_selected_capability(&self) -> Option<SmartCareCapability> {
+        if let Some(capability) = self.active_view.smart_care_capability() {
+            return Some(capability);
+        }
+        if !matches!(self.active_view, ActiveView::SmartCare) {
+            return None;
+        }
+        self.smart_care_profile
+            .capabilities
+            .get(self.smart_care_selected_card)
+            .map(|selection| selection.capability)
+    }
+
+    pub fn preferred_plugin_spec_for_capability(&self, capability: SmartCareCapability) -> String {
+        preen_core::smart_care::preferred_plugin_spec_for_capability(
+            capability,
+            &self.smart_care_descriptors,
+        )
+    }
+
+    pub fn preferred_plugin_spec_for_active_smart_care_context(&self) -> Option<String> {
+        self.smart_care_selected_capability()
+            .map(|capability| self.preferred_plugin_spec_for_capability(capability))
+    }
 }
 
 fn extract_plugin_diagnostics(lines: &[String]) -> Vec<String> {
-    let payload = lines.iter().find(|line| line.trim_start().starts_with('{'));
-    let Some(payload) = payload else {
-        return fallback_diagnostics_from_stderr(lines);
-    };
-    let Ok(summary) = parse_summary_from_cli_json(payload) else {
-        return fallback_diagnostics_from_stderr(lines);
-    };
-    render_summary_lines_with_language(&summary, "en-US")
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with('{')
+            && let Ok(summary) = parse_summary_from_cli_json(trimmed)
+        {
+            return render_summary_lines_with_language(&summary, "en-US");
+        }
+        if let Some(idx) = trimmed.find('{') {
+            let payload = &trimmed[idx..];
+            if let Ok(summary) = parse_summary_from_cli_json(payload) {
+                return render_summary_lines_with_language(&summary, "en-US");
+            }
+        }
+    }
+    fallback_diagnostics_from_stderr(lines)
 }
 
 fn fallback_diagnostics_from_stderr(lines: &[String]) -> Vec<String> {
@@ -235,7 +1099,7 @@ fn fallback_diagnostics_from_stderr(lines: &[String]) -> Vec<String> {
         .filter_map(|line| line.strip_prefix("stderr:").map(str::trim))
         .filter(|line| !line.is_empty())
         .take(3)
-        .map(ToOwned::to_owned)
+        .map(|line| clamp_diagnostic_line(line, 140))
         .collect::<Vec<_>>();
     if errors.is_empty() {
         return Vec::new();
@@ -248,9 +1112,222 @@ fn fallback_diagnostics_from_stderr(lines: &[String]) -> Vec<String> {
     diagnostics
 }
 
+fn clamp_diagnostic_line(line: &str, max_chars: usize) -> String {
+    if line.chars().count() <= max_chars {
+        return line.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let mut out = String::new();
+    for ch in line.chars().take(max_chars - 1) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+fn discover_application_related_paths(app_name: &str) -> Vec<String> {
+    build_application_uninstall_plan(app_name).target_paths()
+}
+
+fn build_application_uninstall_plan(app_name: &str) -> UninstallPlan {
+    let identity = find_installed_application_identity(app_name).unwrap_or_else(|| {
+        let platform = if cfg!(target_os = "linux") {
+            AppPlatform::Linux
+        } else {
+            AppPlatform::Macos
+        };
+        AppIdentity {
+            display_name: app_name.to_string(),
+            platform,
+            bundle_identifier: None,
+            desktop_id: None,
+        }
+    });
+    let paths = discover_application_related_path_items(&identity);
+    UninstallPlan::trash(identity, paths)
+}
+
+fn find_installed_application_identity(app_name: &str) -> Option<AppIdentity> {
+    app_inventory::collect_installed_applications()
+        .into_iter()
+        .find(|app| app.identity.display_name == app_name)
+        .map(|app| app.identity)
+}
+
+fn discover_application_related_path_items(identity: &AppIdentity) -> Vec<RelatedPath> {
+    let app_name = identity.display_name.trim();
+    if app_name.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let mut paths = BTreeSet::new();
+    let app_bundle = format!("{app_name}.app");
+    let match_keys = identity.primary_match_keys();
+
+    for root in [
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+        home_dir().join("Applications"),
+    ] {
+        let path = root.join(&app_bundle);
+        if path.exists() {
+            paths.insert((
+                path.display().to_string(),
+                RelatedPathKind::ApplicationBundle,
+                calculate_path_size(&path),
+            ));
+        }
+    }
+
+    for (root, kind) in application_related_roots() {
+        collect_matching_paths_under(&root, &match_keys, 2, kind, &mut paths);
+    }
+
+    paths
+        .into_iter()
+        .map(|(path, kind, estimated_size)| RelatedPath {
+            path,
+            kind,
+            estimated_size,
+        })
+        .collect()
+}
+
+fn application_related_roots() -> Vec<(PathBuf, RelatedPathKind)> {
+    vec![
+        (
+            home_dir().join("Library/Application Support"),
+            RelatedPathKind::Support,
+        ),
+        (home_dir().join("Library/Caches"), RelatedPathKind::Cache),
+        (home_dir().join("Library/Logs"), RelatedPathKind::Log),
+        (
+            home_dir().join("Library/HTTPStorages"),
+            RelatedPathKind::Cache,
+        ),
+        (home_dir().join("Library/WebKit"), RelatedPathKind::Cache),
+        (
+            home_dir().join("Library/Preferences"),
+            RelatedPathKind::Preference,
+        ),
+        (
+            home_dir().join("Library/Containers"),
+            RelatedPathKind::Container,
+        ),
+        (
+            home_dir().join("Library/Group Containers"),
+            RelatedPathKind::Container,
+        ),
+        (
+            home_dir().join("Library/Saved Application State"),
+            RelatedPathKind::Support,
+        ),
+    ]
+}
+
+fn collect_matching_paths_under(
+    root: &Path,
+    match_keys: &[String],
+    max_depth: usize,
+    kind: RelatedPathKind,
+    out: &mut BTreeSet<(String, RelatedPathKind, u64)>,
+) {
+    collect_matching_paths_recursive(root, match_keys, 0, max_depth, kind, out);
+}
+
+fn collect_matching_paths_recursive(
+    root: &Path,
+    match_keys: &[String],
+    depth: usize,
+    max_depth: usize,
+    kind: RelatedPathKind,
+    out: &mut BTreeSet<(String, RelatedPathKind, u64)>,
+) {
+    if depth > max_depth || !root.exists() {
+        return;
+    }
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_string());
+        if let Some(name) = name
+            && path_name_matches_app(&name, match_keys)
+        {
+            out.insert((
+                path.display().to_string(),
+                kind.clone(),
+                calculate_path_size(&path),
+            ));
+        }
+        if path.is_dir() {
+            collect_matching_paths_recursive(
+                &path,
+                match_keys,
+                depth + 1,
+                max_depth,
+                kind.clone(),
+                out,
+            );
+        }
+    }
+}
+
+fn calculate_path_size(path: &Path) -> u64 {
+    let Ok(metadata) = fs::metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| calculate_path_size(&entry.path()))
+        .fold(0_u64, u64::saturating_add)
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+fn move_path_to_trash(path: &Path) -> Result<PathBuf, String> {
+    let trash_dir = home_dir().join(".Trash");
+    if let Err(error) = fs::create_dir_all(&trash_dir) {
+        return Err(format!("create trash dir: {error}"));
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "invalid file name".to_string())?;
+    let mut candidate = trash_dir.join(file_name);
+    let mut counter = 1usize;
+    while candidate.exists() {
+        candidate = trash_dir.join(format!("{file_name}.{counter}"));
+        counter = counter.saturating_add(1);
+    }
+    fs::rename(path, &candidate).map_err(|error| error.to_string())?;
+    Ok(candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use preen_core::smart_care::{SmartCareCapabilitySelection, SmartCareCapabilityStatus};
 
     #[test]
     fn active_view_cycle_is_stable() {
@@ -260,6 +1337,20 @@ mod tests {
             let expected_prev = cycle[(idx + cycle.len() - 1) % cycle.len()];
             assert_eq!(current.next(), expected_next);
             assert_eq!(current.previous(), expected_prev);
+        }
+    }
+
+    #[test]
+    fn capability_views_are_marked_implemented_and_support_smart_care_controls() {
+        for view in [
+            ActiveView::Cleanup,
+            ActiveView::Protection,
+            ActiveView::Performance,
+            ActiveView::Applications,
+        ] {
+            assert!(view.is_implemented());
+            assert!(view.supports_smart_care_controls());
+            assert!(view.smart_care_capability().is_some());
         }
     }
 
@@ -380,6 +1471,505 @@ mod tests {
                 .plugin_last_diagnostics
                 .iter()
                 .any(|line| line.contains("clone failed"))
+        );
+    }
+
+    #[test]
+    fn smart_care_toggle_and_reset_work() {
+        let mut state = AppState::default();
+        assert_eq!(
+            state
+                .smart_care_profile
+                .capabilities
+                .iter()
+                .filter(|selection| selection.enabled)
+                .count(),
+            4
+        );
+        state.smart_care_toggle_capability(SmartCareCapability::Cleanup);
+        assert!(
+            state
+                .smart_care_profile
+                .capabilities
+                .iter()
+                .find(|selection| selection.capability == SmartCareCapability::Cleanup)
+                .is_some_and(|selection| !selection.enabled)
+        );
+        state.smart_care_reset_profile();
+        assert!(
+            state
+                .smart_care_profile
+                .capabilities
+                .iter()
+                .find(|selection| selection.capability == SmartCareCapability::Cleanup)
+                .is_some_and(|selection| selection.enabled)
+        );
+    }
+
+    #[test]
+    fn smart_care_local_analyze_requires_trusted_plugin() {
+        let mut state = AppState::default();
+        state.smart_care_descriptors = vec![SmartCarePluginDescriptor {
+            pack_id: "preen-rs.cleanup.base".to_string(),
+            capability: SmartCareCapability::Cleanup,
+            enabled: true,
+            trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+            version: Some("1.0.0".to_string()),
+        }];
+        state.smart_care_profile = SmartCareProfile {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            capabilities: vec![SmartCareCapabilitySelection::enabled(
+                SmartCareCapability::Cleanup,
+            )],
+        };
+
+        state.smart_care_run_local_analyze();
+        assert!(
+            state
+                .smart_care_last_analyze
+                .iter()
+                .any(|line| line == "overall: ready")
+        );
+        assert!(
+            state
+                .smart_care_last_analyze
+                .iter()
+                .any(|line| line.contains("plan: preen-rs.cleanup.base@1.0.0"))
+        );
+    }
+
+    #[test]
+    fn smart_care_local_analyze_is_ready_for_all_capabilities() {
+        let mut state = AppState::default();
+        state.smart_care_descriptors = vec![
+            SmartCarePluginDescriptor {
+                pack_id: "preen-rs.cleanup.base".to_string(),
+                capability: SmartCareCapability::Cleanup,
+                enabled: true,
+                trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+                version: Some("1.0.0".to_string()),
+            },
+            SmartCarePluginDescriptor {
+                pack_id: "preen-rs.performance.base".to_string(),
+                capability: SmartCareCapability::Performance,
+                enabled: true,
+                trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+                version: Some("1.0.0".to_string()),
+            },
+            SmartCarePluginDescriptor {
+                pack_id: "preen-rs.applications.base".to_string(),
+                capability: SmartCareCapability::Applications,
+                enabled: true,
+                trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+                version: Some("1.0.0".to_string()),
+            },
+            SmartCarePluginDescriptor {
+                pack_id: "preen-rs.protection.base".to_string(),
+                capability: SmartCareCapability::Protection,
+                enabled: true,
+                trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+                version: Some("1.0.0".to_string()),
+            },
+        ];
+
+        state.smart_care_run_local_analyze();
+        assert!(
+            state
+                .smart_care_last_analyze
+                .iter()
+                .any(|line| line == "overall: ready")
+        );
+
+        let preview = state.smart_care_current_preview();
+        assert!(preview.overall_ready);
+        for capability in [
+            SmartCareCapability::Cleanup,
+            SmartCareCapability::Performance,
+            SmartCareCapability::Applications,
+            SmartCareCapability::Protection,
+        ] {
+            let card = preview
+                .cards
+                .iter()
+                .find(|card| card.capability == capability)
+                .unwrap();
+            assert_eq!(card.status, SmartCareCapabilityStatus::Ready);
+        }
+
+        state.smart_care_open_review();
+        assert_eq!(state.smart_care_review_selected_count(), 4);
+
+        state.smart_care_run_local_execute();
+        assert!(
+            state
+                .smart_care_last_run_report
+                .iter()
+                .any(|line| line == "capability=cleanup entries=1")
+        );
+        assert!(
+            state
+                .smart_care_last_run_report
+                .iter()
+                .any(|line| line == "capability=performance entries=1")
+        );
+        assert!(
+            state
+                .smart_care_last_run_report
+                .iter()
+                .any(|line| line == "capability=applications entries=1")
+        );
+        assert!(
+            state
+                .smart_care_last_run_report
+                .iter()
+                .any(|line| line == "capability=protection entries=1")
+        );
+    }
+
+    #[test]
+    fn smart_care_local_execute_and_undo_emit_report() {
+        let mut state = AppState::default();
+        state.smart_care_descriptors = vec![SmartCarePluginDescriptor {
+            pack_id: "preen-rs.cleanup.base".to_string(),
+            capability: SmartCareCapability::Cleanup,
+            enabled: true,
+            trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+            version: Some("1.0.0".to_string()),
+        }];
+        state.smart_care_profile = SmartCareProfile {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            capabilities: vec![SmartCareCapabilitySelection::enabled(
+                SmartCareCapability::Cleanup,
+            )],
+        };
+
+        state.smart_care_run_local_analyze();
+        state.smart_care_open_review();
+        state.smart_care_run_local_execute();
+        assert!(
+            state
+                .smart_care_last_run_report
+                .iter()
+                .any(|line| line.starts_with("run: local-dry-run-"))
+        );
+        assert!(state.smart_care_review_mode);
+
+        state.smart_care_run_local_undo();
+        assert!(
+            state
+                .smart_care_last_run_report
+                .iter()
+                .any(|line| line == "undo: local-dry-run rollback")
+        );
+    }
+
+    #[test]
+    fn smart_care_previous_card_moves_to_previous_index() {
+        let mut state = AppState::default();
+        state.smart_care_selected_card = 3;
+        state.smart_care_select_previous_card();
+        assert_eq!(state.smart_care_selected_card, 2);
+
+        state.smart_care_selected_card = 0;
+        state.smart_care_select_previous_card();
+        assert_eq!(state.smart_care_selected_card, 3);
+    }
+
+    #[test]
+    fn smart_care_review_requires_analyze_before_open() {
+        let mut state = AppState::default();
+        state.smart_care_open_review();
+        assert!(!state.smart_care_review_mode);
+        assert!(!state.smart_care_has_review_result);
+        assert!(
+            state
+                .last_error
+                .as_deref()
+                .is_some_and(|line| line.contains("run analyze first"))
+        );
+
+        state.smart_care_run_local_analyze();
+        state.smart_care_open_review();
+        assert!(state.smart_care_review_mode);
+        assert!(state.smart_care_has_review_result);
+    }
+
+    #[test]
+    fn smart_care_review_toggle_affects_selected_count() {
+        let mut state = AppState::default();
+        state.smart_care_descriptors = vec![
+            SmartCarePluginDescriptor {
+                pack_id: "preen-rs.cleanup.base".to_string(),
+                capability: SmartCareCapability::Cleanup,
+                enabled: true,
+                trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+                version: Some("1.0.0".to_string()),
+            },
+            SmartCarePluginDescriptor {
+                pack_id: "preen-rs.performance.base".to_string(),
+                capability: SmartCareCapability::Performance,
+                enabled: true,
+                trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+                version: Some("1.1.0".to_string()),
+            },
+        ];
+        state.smart_care_run_local_analyze();
+        state.smart_care_open_review();
+        assert_eq!(state.smart_care_review_selected_count(), 2);
+
+        state.smart_care_review_toggle_selected_entry();
+        assert_eq!(state.smart_care_review_selected_count(), 1);
+        state.smart_care_review_select_next_entry();
+        state.smart_care_review_toggle_selected_entry();
+        assert_eq!(state.smart_care_review_selected_count(), 0);
+
+        state.smart_care_review_select_all_entries();
+        assert_eq!(state.smart_care_review_selected_count(), 2);
+    }
+
+    #[test]
+    fn smart_care_review_changes_disarm_apply() {
+        let mut state = AppState::default();
+        state.smart_care_descriptors = vec![SmartCarePluginDescriptor {
+            pack_id: "preen-rs.cleanup.base".to_string(),
+            capability: SmartCareCapability::Cleanup,
+            enabled: true,
+            trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+            version: Some("1.0.0".to_string()),
+        }];
+        state.smart_care_run_local_analyze();
+        state.smart_care_open_review();
+        state.smart_care_arm_apply();
+        assert!(state.smart_care_apply_armed);
+
+        state.smart_care_review_toggle_selected_entry();
+        assert!(!state.smart_care_apply_armed);
+
+        state.smart_care_arm_apply();
+        state.smart_care_review_select_all_entries();
+        assert!(!state.smart_care_apply_armed);
+
+        state.smart_care_arm_apply();
+        state.smart_care_review_unselect_all_entries();
+        assert!(!state.smart_care_apply_armed);
+    }
+
+    #[test]
+    fn smart_care_review_toggle_capability_entries_toggles_group() {
+        let mut state = AppState::default();
+        state.smart_care_descriptors = vec![
+            SmartCarePluginDescriptor {
+                pack_id: "preen-rs.cleanup.base".to_string(),
+                capability: SmartCareCapability::Cleanup,
+                enabled: true,
+                trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+                version: Some("1.0.0".to_string()),
+            },
+            SmartCarePluginDescriptor {
+                pack_id: "preen-rs.performance.base".to_string(),
+                capability: SmartCareCapability::Performance,
+                enabled: true,
+                trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+                version: Some("1.0.0".to_string()),
+            },
+        ];
+        state.smart_care_run_local_analyze();
+        state.smart_care_open_review();
+        assert_eq!(state.smart_care_review_selected_count(), 2);
+
+        state.smart_care_review_toggle_capability_entries(SmartCareCapability::Cleanup);
+        assert_eq!(state.smart_care_review_selected_count(), 1);
+
+        state.smart_care_review_toggle_capability_entries(SmartCareCapability::Cleanup);
+        assert_eq!(state.smart_care_review_selected_count(), 2);
+    }
+
+    #[test]
+    fn descriptor_snapshot_refresh_invalidates_stale_analyze_state_when_changed() {
+        let mut state = AppState::default();
+        state.smart_care_descriptors = vec![SmartCarePluginDescriptor {
+            pack_id: "preen-rs.cleanup.base".to_string(),
+            capability: SmartCareCapability::Cleanup,
+            enabled: true,
+            trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+            version: Some("1.0.0".to_string()),
+        }];
+        state.smart_care_source_summary = Some("state-only (packs=1)".to_string());
+        state.smart_care_run_local_analyze();
+        state.smart_care_open_review();
+        state.smart_care_arm_apply();
+        assert!(state.smart_care_has_analyze_result);
+        assert!(state.smart_care_review_mode);
+        assert!(state.smart_care_apply_armed);
+
+        state.apply_smart_care_descriptor_snapshot(
+            vec![SmartCarePluginDescriptor {
+                pack_id: "preen-rs.cleanup.base".to_string(),
+                capability: SmartCareCapability::Cleanup,
+                enabled: true,
+                trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+                version: Some("1.1.0".to_string()),
+            }],
+            None,
+            Some("state-only (packs=1)".to_string()),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+
+        assert!(!state.smart_care_has_analyze_result);
+        assert!(!state.smart_care_has_review_result);
+        assert!(!state.smart_care_review_mode);
+        assert!(!state.smart_care_apply_armed);
+        assert!(state.smart_care_preview.is_none());
+        assert!(state.smart_care_last_analyze.is_empty());
+    }
+
+    #[test]
+    fn descriptor_snapshot_refresh_keeps_analyze_state_when_unchanged() {
+        let mut state = AppState::default();
+        let descriptors = vec![SmartCarePluginDescriptor {
+            pack_id: "preen-rs.cleanup.base".to_string(),
+            capability: SmartCareCapability::Cleanup,
+            enabled: true,
+            trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+            version: Some("1.0.0".to_string()),
+        }];
+        state.smart_care_descriptors = descriptors.clone();
+        state.smart_care_source_summary = Some("state-only (packs=1)".to_string());
+        state.smart_care_run_local_analyze();
+        state.smart_care_open_review();
+        state.smart_care_arm_apply();
+
+        state.apply_smart_care_descriptor_snapshot(
+            descriptors,
+            None,
+            Some("state-only (packs=1)".to_string()),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+
+        assert!(state.smart_care_has_analyze_result);
+        assert!(state.smart_care_has_review_result);
+        assert!(state.smart_care_review_mode);
+        assert!(state.smart_care_apply_armed);
+        assert!(state.smart_care_preview.is_some());
+    }
+
+    #[test]
+    fn smart_care_run_is_blocked_until_review_is_opened() {
+        let mut state = AppState::default();
+        state.smart_care_descriptors = vec![SmartCarePluginDescriptor {
+            pack_id: "preen-rs.cleanup.base".to_string(),
+            capability: SmartCareCapability::Cleanup,
+            enabled: true,
+            trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+            version: Some("1.0.0".to_string()),
+        }];
+        state.smart_care_profile = SmartCareProfile {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            capabilities: vec![SmartCareCapabilitySelection::enabled(
+                SmartCareCapability::Cleanup,
+            )],
+        };
+
+        state.smart_care_run_local_analyze();
+        state.smart_care_run_local_execute();
+
+        assert!(
+            state
+                .smart_care_last_run_report
+                .iter()
+                .any(|line| line == "reason: review is required before run")
+        );
+
+        state.smart_care_open_review();
+        state.smart_care_run_local_execute();
+
+        assert!(
+            state
+                .smart_care_last_run_report
+                .iter()
+                .any(|line| line.starts_with("run: local-dry-run-"))
+        );
+    }
+
+    #[test]
+    fn smart_care_validate_run_request_covers_main_blockers() {
+        let mut state = AppState::default();
+        state.smart_care_descriptors = vec![SmartCarePluginDescriptor {
+            pack_id: "preen-rs.cleanup.base".to_string(),
+            capability: SmartCareCapability::Cleanup,
+            enabled: true,
+            trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+            version: Some("1.0.0".to_string()),
+        }];
+        state.smart_care_profile = SmartCareProfile {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            capabilities: vec![SmartCareCapabilitySelection::enabled(
+                SmartCareCapability::Cleanup,
+            )],
+        };
+
+        let review_error = state.smart_care_validate_run_request().unwrap_err();
+        assert!(review_error.contains("review"));
+
+        state.smart_care_run_local_analyze();
+        state.smart_care_open_review();
+        let arm_error = state.smart_care_validate_run_request().unwrap_err();
+        assert!(arm_error.contains("Shift+X"));
+
+        state.smart_care_arm_apply();
+        assert!(state.smart_care_validate_run_request().is_ok());
+
+        state.smart_care_review_unselect_all_entries();
+        state.smart_care_arm_apply();
+        let selection_error = state.smart_care_validate_run_request().unwrap_err();
+        assert!(selection_error.contains("review entry"));
+    }
+
+    #[test]
+    fn selected_capability_and_preferred_spec_follow_active_context() {
+        let mut state = AppState::default();
+        state.smart_care_descriptors = vec![
+            SmartCarePluginDescriptor {
+                pack_id: "preen-rs.cleanup.alt".to_string(),
+                capability: SmartCareCapability::Cleanup,
+                enabled: true,
+                trusted_identity: None,
+                version: Some("2.0.0".to_string()),
+            },
+            SmartCarePluginDescriptor {
+                pack_id: "preen-rs.cleanup.base".to_string(),
+                capability: SmartCareCapability::Cleanup,
+                enabled: true,
+                trusted_identity: Some("https://github.com/Preen-rs".to_string()),
+                version: Some("1.0.0".to_string()),
+            },
+        ];
+        state.active_view = ActiveView::SmartCare;
+        state.smart_care_selected_card = 0;
+
+        assert_eq!(
+            state.smart_care_selected_capability(),
+            Some(SmartCareCapability::Cleanup)
+        );
+        assert_eq!(
+            state.preferred_plugin_spec_for_active_smart_care_context(),
+            Some("preen-rs.cleanup.base@1.0.0".to_string())
+        );
+
+        state.active_view = ActiveView::Performance;
+        assert_eq!(
+            state.smart_care_selected_capability(),
+            Some(SmartCareCapability::Performance)
+        );
+        assert_eq!(
+            state.preferred_plugin_spec_for_active_smart_care_context(),
+            Some("preen-rs.performance.base".to_string())
         );
     }
 }

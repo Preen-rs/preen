@@ -92,9 +92,58 @@ impl OsActionExecutor {
     }
 
     fn trash_path(path: &Path) -> Result<(), ActionExecutionError> {
-        trash::delete(path).map_err(|e| ActionExecutionError::Failed {
-            message: format!("trash failed: {}: {e}", path.display()),
-        })
+        if let Err(error) = trash::delete(path) {
+            Self::move_to_home_trash(path).map_err(|fallback_error| {
+                ActionExecutionError::Failed {
+                    message: format!(
+                        "trash failed: {}; fallback failed: {}: {error}",
+                        path.display(),
+                        fallback_error
+                    ),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    fn move_to_home_trash(path: &Path) -> Result<(), String> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| "HOME is not set".to_string())?;
+        let trash_dir = home.join(".Trash");
+        fs::create_dir_all(&trash_dir)
+            .map_err(|error| format!("create trash dir failed: {error}"))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| "path has no file name".to_string())?;
+        let mut candidate = trash_dir.join(file_name);
+        let mut suffix = 1usize;
+        while candidate.exists() {
+            candidate = trash_dir.join(format!("{}.{}", file_name.to_string_lossy(), suffix));
+            suffix = suffix.saturating_add(1);
+        }
+        loop {
+            match fs::rename(path, &candidate) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+                    ) =>
+                {
+                    candidate =
+                        trash_dir.join(format!("{}.{}", file_name.to_string_lossy(), suffix));
+                    suffix = suffix.saturating_add(1);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "move to trash failed: {} -> {}: {error}",
+                        path.display(),
+                        candidate.display()
+                    ));
+                }
+            }
+        }
     }
 
     fn count_matching_files<F>(
@@ -957,7 +1006,8 @@ impl OsActionExecutor {
     ) -> Result<ActionExecutionResult, ActionExecutionError> {
         let action_type = &plan.request.action.action_type;
         if !plan.request.action.paths.is_empty() {
-            return Self::execute_delete_like_paths(plan, false);
+            let use_trash = matches!(action_type, ActionType::AppUninstall);
+            return Self::execute_delete_like_paths(plan, use_trash);
         }
         if !plan.request.action.command.is_empty() {
             return Self::execute_run_command(plan).await;

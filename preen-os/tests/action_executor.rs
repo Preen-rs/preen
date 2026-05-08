@@ -173,8 +173,10 @@ fn executor_does_not_support_other_action_type() {
 }
 
 #[tokio::test]
-async fn app_uninstall_apply_deletes_target_paths() {
+async fn app_uninstall_apply_trashes_target_paths() {
+    let _env_lock = env_lock();
     let dir = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", dir.path().to_string_lossy().as_ref());
     let app = dir.path().join("Demo.app");
     fs::create_dir_all(&app).unwrap();
     fs::write(app.join("Info.plist"), b"demo").unwrap();
@@ -233,7 +235,9 @@ async fn remove_orphans_both_paths_and_command_prefers_paths() {
 
 #[tokio::test]
 async fn app_uninstall_both_paths_and_command_prefers_paths() {
+    let _env_lock = env_lock();
     let dir = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", dir.path().to_string_lossy().as_ref());
     let app = dir.path().join("Demo.app");
     fs::create_dir_all(&app).unwrap();
     fs::write(app.join("Info.plist"), b"x").unwrap();

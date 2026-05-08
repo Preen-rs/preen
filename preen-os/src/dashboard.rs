@@ -1,3 +1,4 @@
+use crate::app_inventory;
 use chrono::{DateTime, Local, Utc};
 use preen_core::dashboard::{
     CheckSeverity, DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
@@ -597,6 +598,7 @@ fn collect_dashboard_metrics(
 
     let process_count = Some(system.processes().len() as u64);
     let top_processes = collect_top_processes(system);
+    let installed_applications = collect_installed_applications();
 
     let disks = Disks::new_with_refreshed_list();
     let (disk_total_bytes, disk_available_bytes, disk_filesystem) =
@@ -671,6 +673,7 @@ fn collect_dashboard_metrics(
         disk_write_rate_mbps,
         process_count,
         top_processes,
+        installed_applications,
         network_rx_bytes,
         network_tx_bytes,
         network_rx_rate_mbps,
@@ -692,6 +695,10 @@ fn collect_dashboard_metrics(
         adapter_power_watts,
         battery_power_watts,
     }
+}
+
+fn collect_installed_applications() -> Vec<String> {
+    app_inventory::collect_installed_application_names()
 }
 
 fn select_state_disk(state_dir: &Path, disks: &Disks) -> Option<(u64, u64, Option<String>)> {
