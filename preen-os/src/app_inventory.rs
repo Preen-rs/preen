@@ -115,10 +115,7 @@ fn collect_linux_applications() -> Vec<InstalledApplication> {
                 continue;
             };
             let desktop = parse_desktop_entry(&content);
-            if desktop
-                .get("NoDisplay")
-                .is_some_and(|value| is_truthy(value))
-            {
+            if !is_visible_application_desktop_entry(&desktop) {
                 continue;
             }
             let Some(name) = desktop.get("Name").filter(|value| !value.trim().is_empty()) else {
@@ -189,6 +186,25 @@ fn parse_desktop_entry(content: &str) -> BTreeMap<String, String> {
         values.insert(key.trim().to_string(), value.trim().to_string());
     }
     values
+}
+
+fn is_visible_application_desktop_entry(desktop: &BTreeMap<String, String>) -> bool {
+    if desktop
+        .get("Type")
+        .is_some_and(|value| !value.eq_ignore_ascii_case("Application"))
+    {
+        return false;
+    }
+    if desktop
+        .get("NoDisplay")
+        .is_some_and(|value| is_truthy(value))
+    {
+        return false;
+    }
+    if desktop.get("Hidden").is_some_and(|value| is_truthy(value)) {
+        return false;
+    }
+    true
 }
 
 fn extract_xml_tag_value(line: &str, tag: &str) -> Option<String> {
@@ -278,5 +294,40 @@ X-Version=1.2.3
         assert_eq!(values.get("Name").map(String::as_str), Some("Demo"));
         assert_eq!(values.get("X-Version").map(String::as_str), Some("1.2.3"));
         assert!(!values.contains_key("Name[de]"));
+    }
+
+    #[test]
+    fn filters_hidden_and_non_application_desktop_entries() {
+        let visible = parse_desktop_entry(
+            r#"[Desktop Entry]
+Type=Application
+Name=Demo
+"#,
+        );
+        let hidden = parse_desktop_entry(
+            r#"[Desktop Entry]
+Type=Application
+Name=Hidden Demo
+Hidden=true
+"#,
+        );
+        let no_display = parse_desktop_entry(
+            r#"[Desktop Entry]
+Type=Application
+Name=No Display Demo
+NoDisplay=yes
+"#,
+        );
+        let link = parse_desktop_entry(
+            r#"[Desktop Entry]
+Type=Link
+Name=Docs
+"#,
+        );
+
+        assert!(is_visible_application_desktop_entry(&visible));
+        assert!(!is_visible_application_desktop_entry(&hidden));
+        assert!(!is_visible_application_desktop_entry(&no_display));
+        assert!(!is_visible_application_desktop_entry(&link));
     }
 }
