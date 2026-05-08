@@ -197,18 +197,18 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
     let max_scroll = content_length.saturating_sub(viewport_height);
 
     let mut list_state = ListState::default();
-    let mut scrollbar_position = 0usize;
+    let mut list_scroll_offset = 0usize;
     if app_items.is_empty() {
         list_state.select(None);
     } else {
         let selected = state
             .applications_selected_row
             .min(app_items.len().saturating_sub(1));
-        scrollbar_position = selected;
         // Deterministic offset avoids jumpy list behavior near boundaries.
         let computed_offset = selected
             .saturating_sub(viewport_height.saturating_sub(1))
             .min(max_scroll);
+        list_scroll_offset = computed_offset;
         list_state.select(Some(selected));
         list_state = list_state.with_offset(computed_offset);
     }
@@ -265,7 +265,7 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
         list_inner,
         viewport_height,
         content_length,
-        scrollbar_position,
+        list_scroll_offset,
     );
 }
 
@@ -659,14 +659,17 @@ fn render_vertical_scrollbar(
     area: Rect,
     viewport_height: usize,
     content_length: usize,
-    position: usize,
+    scroll_offset: usize,
 ) {
     if viewport_height == 0 || content_length <= viewport_height {
         return;
     }
     let max_position = content_length.saturating_sub(1);
+    // Ratatui maps `position` against the whole content length. Use the
+    // visible end row so the thumb reaches the bottom on the last page.
+    let visible_end_position = scroll_offset.saturating_add(viewport_height.saturating_sub(1));
     let mut scrollbar_state = ScrollbarState::new(content_length)
-        .position(position.min(max_position))
+        .position(visible_end_position.min(max_position))
         .viewport_content_length(viewport_height.min(content_length));
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)

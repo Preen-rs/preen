@@ -120,9 +120,11 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
 
         if event::poll(Duration::from_millis(120)).map_err(|error| error.to_string())? {
             let mut terminal_area = None;
+            let mut pending_mouse_scrolls = MouseScrollDeltas::default();
             for event in read_event_batch()? {
                 match event {
                     Event::Key(key) => {
+                        pending_mouse_scrolls.apply(&mut state);
                         if key.kind != KeyEventKind::Press {
                             continue;
                         }
@@ -633,12 +635,21 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                         };
                         match mouse.kind {
                             MouseEventKind::ScrollDown => {
-                                handle_mouse_scroll_down(&mut state, area, mouse.column, mouse.row);
+                                if let Some(target) =
+                                    mouse_scroll_target(&state, area, mouse.column, mouse.row)
+                                {
+                                    pending_mouse_scrolls.add(target, 1);
+                                }
                             }
                             MouseEventKind::ScrollUp => {
-                                handle_mouse_scroll_up(&mut state, area, mouse.column, mouse.row);
+                                if let Some(target) =
+                                    mouse_scroll_target(&state, area, mouse.column, mouse.row)
+                                {
+                                    pending_mouse_scrolls.add(target, -1);
+                                }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
+                                pending_mouse_scrolls.apply(&mut state);
                                 if let Some(target) =
                                     ui::footer_link_at(area, mouse.column, mouse.row)
                                     && let Err(error) = open_footer_link(target)
@@ -666,6 +677,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                     _ => {}
                 }
             }
+            pending_mouse_scrolls.apply(&mut state);
         }
     }
 }
@@ -833,52 +845,90 @@ fn default_state_dir() -> Option<PathBuf> {
     }
 }
 
-fn handle_mouse_scroll_down(state: &mut AppState, root: Rect, column: u16, row: u16) {
-    if state.show_keybindings_popup {
-        if rect_contains(ui::keybindings_popup_area(root), column, row) {
-            state.scroll_keybindings_down(1);
-        }
-        return;
+#[derive(Clone, Copy)]
+enum MouseScrollTarget {
+    Keybindings,
+    SmartCareReview,
+    Info,
+    Main,
+}
+
+#[derive(Default)]
+struct MouseScrollDeltas {
+    keybindings: i16,
+    smart_care_review: i16,
+    info: i16,
+    main: i16,
+}
+
+impl MouseScrollDeltas {
+    fn add(&mut self, target: MouseScrollTarget, delta: i16) {
+        let slot = match target {
+            MouseScrollTarget::Keybindings => &mut self.keybindings,
+            MouseScrollTarget::SmartCareReview => &mut self.smart_care_review,
+            MouseScrollTarget::Info => &mut self.info,
+            MouseScrollTarget::Main => &mut self.main,
+        };
+        *slot = slot.saturating_add(delta);
     }
-    if state.smart_care_review_mode && state.active_view.supports_smart_care_controls() {
-        if rect_contains(ui::smart_care_review_popup_area(root), column, row) {
-            state.smart_care_scroll_review_down(1);
+
+    fn apply(&mut self, state: &mut AppState) {
+        if self.keybindings > 0 {
+            state.scroll_keybindings_down(self.keybindings.unsigned_abs());
+        } else if self.keybindings < 0 {
+            state.scroll_keybindings_up(self.keybindings.unsigned_abs());
         }
-        return;
-    }
-    if state.show_info_popup && state.active_view.supports_smart_care_controls() {
-        if rect_contains(ui::info_popup_area(root), column, row) {
-            state.scroll_info_popup_down(1);
+
+        if self.smart_care_review > 0 {
+            state.smart_care_scroll_review_down(self.smart_care_review.unsigned_abs());
+        } else if self.smart_care_review < 0 {
+            state.smart_care_scroll_review_up(self.smart_care_review.unsigned_abs());
         }
-        return;
-    }
-    if rect_contains(ui::main_container_area(root), column, row) {
-        state.scroll_down(1);
+
+        if self.info > 0 {
+            state.scroll_info_popup_down(self.info.unsigned_abs());
+        } else if self.info < 0 {
+            state.scroll_info_popup_up(self.info.unsigned_abs());
+        }
+
+        if self.main > 0 {
+            state.scroll_down(self.main.unsigned_abs());
+        } else if self.main < 0 {
+            state.scroll_up(self.main.unsigned_abs());
+        }
+
+        *self = Self::default();
     }
 }
 
-fn handle_mouse_scroll_up(state: &mut AppState, root: Rect, column: u16, row: u16) {
+fn mouse_scroll_target(
+    state: &AppState,
+    root: Rect,
+    column: u16,
+    row: u16,
+) -> Option<MouseScrollTarget> {
     if state.show_keybindings_popup {
         if rect_contains(ui::keybindings_popup_area(root), column, row) {
-            state.scroll_keybindings_up(1);
+            return Some(MouseScrollTarget::Keybindings);
         }
-        return;
+        return None;
     }
     if state.smart_care_review_mode && state.active_view.supports_smart_care_controls() {
         if rect_contains(ui::smart_care_review_popup_area(root), column, row) {
-            state.smart_care_scroll_review_up(1);
+            return Some(MouseScrollTarget::SmartCareReview);
         }
-        return;
+        return None;
     }
     if state.show_info_popup && state.active_view.supports_smart_care_controls() {
         if rect_contains(ui::info_popup_area(root), column, row) {
-            state.scroll_info_popup_up(1);
+            return Some(MouseScrollTarget::Info);
         }
-        return;
+        return None;
     }
     if rect_contains(ui::main_container_area(root), column, row) {
-        state.scroll_up(1);
+        return Some(MouseScrollTarget::Main);
     }
+    None
 }
 
 fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
