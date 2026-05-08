@@ -14,6 +14,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
@@ -33,6 +34,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
     let (mut worker, worker_rx) = StatusWorker::spawn(Duration::from_secs(1));
     worker.refresh_now();
     let mut state = AppState::default();
+    if let Some(state_dir) = default_state_dir() {
+        state.load_config_from_state_dir(&state_dir);
+    }
     state.begin_busy_view(
         BusyViewKind::Dashboard,
         state.tr(TextKey::LoadingDashboardTitle),
@@ -743,6 +747,25 @@ fn dispatch_applications_inventory_analyze(state: &mut AppState, worker: &Status
     );
     state.last_error = None;
     worker.run_applications_inventory_analyze();
+}
+
+fn default_state_dir() -> Option<PathBuf> {
+    match std::env::consts::OS {
+        "macos" => std::env::var_os("HOME").map(PathBuf::from).map(|home| {
+            home.join("Library")
+                .join("Application Support")
+                .join("Preen")
+        }),
+        "linux" => std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".config"))
+            })
+            .map(|config_dir| config_dir.join("preen")),
+        _ => None,
+    }
 }
 
 fn handle_mouse_scroll_down(state: &mut AppState, root: Rect, column: u16, row: u16) {
