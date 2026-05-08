@@ -1,7 +1,8 @@
 use crate::i18n::{Language, TextKey};
 use crate::model::{ActiveView, AppState, DashboardSnapshot, PluginActionKind};
 use preen_core::app_uninstall::{
-    AppManagementSource, AppSource, AppUpdateAvailability, InstalledApplication,
+    AppManagementSource, AppPackageDetectionConfidence, AppPackageManager, AppSource,
+    AppUpdateAvailability, InstalledApplication,
 };
 use preen_core::check_list_view::CheckListView;
 use preen_core::plugin_list_view::PluginListView;
@@ -434,6 +435,37 @@ fn push_application_detail_lines(
         localized(state, "Update availability", "Update-Verfuegbarkeit"),
         application_update_availability_label(state, &application.update_availability)
     )));
+    if let Some(package) = &application.package_metadata {
+        lines.push(Line::from(format!(
+            "- {}: {}",
+            localized(state, "Package manager", "Paketmanager"),
+            application_package_manager_label(state, &package.manager)
+        )));
+        lines.push(Line::from(format!(
+            "- {}: {}",
+            localized(state, "Package id", "Paket-ID"),
+            package.package_id
+        )));
+        if let Some(version) = &package.installed_version {
+            lines.push(Line::from(format!(
+                "- {}: {}",
+                localized(state, "Package version", "Paketversion"),
+                version
+            )));
+        }
+        if let Some(command) = &package.update_command {
+            lines.push(Line::from(format!(
+                "- {}: {}",
+                localized(state, "Update command", "Update-Befehl"),
+                command
+            )));
+        }
+        lines.push(Line::from(format!(
+            "- {}: {}",
+            localized(state, "Package match", "Paket-Zuordnung"),
+            application_package_confidence_label(state, &package.detection_confidence)
+        )));
+    }
 }
 
 fn application_source_label(state: &AppState, source: &AppSource) -> &'static str {
@@ -480,6 +512,32 @@ fn application_update_availability_label(
             localized(state, "not supported", "nicht unterstuetzt")
         }
         AppUpdateAvailability::Unknown => localized(state, "unknown", "unbekannt"),
+    }
+}
+
+fn application_package_manager_label(
+    state: &AppState,
+    manager: &AppPackageManager,
+) -> &'static str {
+    match manager {
+        AppPackageManager::HomebrewCask => localized(state, "Homebrew cask", "Homebrew Cask"),
+        AppPackageManager::Apt => localized(state, "APT", "APT"),
+        AppPackageManager::Dnf => localized(state, "DNF", "DNF"),
+        AppPackageManager::Pacman => localized(state, "pacman", "pacman"),
+        AppPackageManager::Flatpak => localized(state, "Flatpak", "Flatpak"),
+        AppPackageManager::Snap => localized(state, "Snap", "Snap"),
+        AppPackageManager::Unknown => localized(state, "unknown", "unbekannt"),
+    }
+}
+
+fn application_package_confidence_label(
+    state: &AppState,
+    confidence: &AppPackageDetectionConfidence,
+) -> &'static str {
+    match confidence {
+        AppPackageDetectionConfidence::Exact => localized(state, "exact", "exakt"),
+        AppPackageDetectionConfidence::Strong => localized(state, "strong", "stark"),
+        AppPackageDetectionConfidence::Fallback => localized(state, "fallback", "Fallback"),
     }
 }
 
@@ -2054,7 +2112,8 @@ mod tests {
     use crate::i18n::LanguagePreference;
     use crate::model::{ActiveView, AppState, PluginActionKind};
     use preen_core::app_uninstall::{
-        AppIdentity, AppManagementSource, AppSource, AppUpdateAvailability, InstalledApplication,
+        AppIdentity, AppManagementSource, AppPackageDetectionConfidence, AppPackageManager,
+        AppPackageMetadata, AppSource, AppUpdateAvailability, InstalledApplication,
     };
     use preen_core::dashboard::{
         CheckSeverity, DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
@@ -2159,6 +2218,14 @@ mod tests {
                 last_used_at: None,
                 management_source: AppManagementSource::Manual,
                 update_availability: AppUpdateAvailability::Unsupported,
+                package_metadata: Some(AppPackageMetadata {
+                    manager: AppPackageManager::HomebrewCask,
+                    package_id: "affinity-designer".to_string(),
+                    installed_version: Some("2.6.0".to_string()),
+                    latest_version: None,
+                    update_command: Some("brew upgrade --cask affinity-designer".to_string()),
+                    detection_confidence: AppPackageDetectionConfidence::Strong,
+                }),
                 protected: false,
             }],
             applications_info_target: Some("Affinity".to_string()),
@@ -2183,6 +2250,11 @@ mod tests {
         assert!(text.contains("- Last used: unknown"));
         assert!(text.contains("- Managed by: manual/local"));
         assert!(text.contains("- Update availability: not supported"));
+        assert!(text.contains("- Package manager: Homebrew cask"));
+        assert!(text.contains("- Package id: affinity-designer"));
+        assert!(text.contains("- Package version: 2.6.0"));
+        assert!(text.contains("- Update command: brew upgrade --cask affinity-designer"));
+        assert!(text.contains("- Package match: strong"));
         assert!(text.contains("Related paths"));
         assert!(!text.contains("Info target"));
         assert!(!text.contains("Shortcuts"));

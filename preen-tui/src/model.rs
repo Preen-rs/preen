@@ -1427,6 +1427,7 @@ mod tests {
                     last_used_at: None,
                     management_source: AppManagementSource::System,
                     update_availability: AppUpdateAvailability::Unsupported,
+                    package_metadata: None,
                     protected: true,
                 },
                 InstalledApplication {
@@ -1438,6 +1439,7 @@ mod tests {
                     last_used_at: None,
                     management_source: AppManagementSource::Manual,
                     update_availability: AppUpdateAvailability::Unsupported,
+                    package_metadata: None,
                     protected: false,
                 },
             ],
@@ -1481,6 +1483,7 @@ mod tests {
                 last_used_at: None,
                 management_source: AppManagementSource::Manual,
                 update_availability: AppUpdateAvailability::Unsupported,
+                package_metadata: None,
                 protected: false,
             }],
             ..AppState::default()
@@ -1509,6 +1512,7 @@ mod tests {
                     last_used_at: None,
                     management_source: AppManagementSource::Manual,
                     update_availability: AppUpdateAvailability::Unsupported,
+                    package_metadata: None,
                     protected: false,
                 },
                 InstalledApplication {
@@ -1520,6 +1524,7 @@ mod tests {
                     last_used_at: None,
                     management_source: AppManagementSource::Manual,
                     update_availability: AppUpdateAvailability::Unsupported,
+                    package_metadata: None,
                     protected: false,
                 },
             ],

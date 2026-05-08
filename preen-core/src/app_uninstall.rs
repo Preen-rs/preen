@@ -68,6 +68,7 @@ pub struct InstalledApplication {
     pub last_used_at: Option<DateTime<Utc>>,
     pub management_source: AppManagementSource,
     pub update_availability: AppUpdateAvailability,
+    pub package_metadata: Option<AppPackageMetadata>,
     pub protected: bool,
 }
 
@@ -87,6 +88,34 @@ pub enum AppUpdateAvailability {
     NotChecked,
     Unsupported,
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppPackageMetadata {
+    pub manager: AppPackageManager,
+    pub package_id: String,
+    pub installed_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub update_command: Option<String>,
+    pub detection_confidence: AppPackageDetectionConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppPackageManager {
+    HomebrewCask,
+    Apt,
+    Dnf,
+    Pacman,
+    Flatpak,
+    Snap,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppPackageDetectionConfidence {
+    Exact,
+    Strong,
+    Fallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -272,6 +301,7 @@ mod tests {
             last_used_at: None,
             management_source: AppManagementSource::System,
             update_availability: AppUpdateAvailability::Unsupported,
+            package_metadata: None,
             protected: true,
         };
 

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use preen_core::app_uninstall::{
-    AppIdentity, AppManagementSource, AppSource, AppUpdateAvailability, InstalledApplication,
+    AppIdentity, AppManagementSource, AppPackageDetectionConfidence, AppPackageManager,
+    AppPackageMetadata, AppSource, AppUpdateAvailability, InstalledApplication,
     normalize_app_match_key,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,6 +101,13 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                 &identity,
                 homebrew_casks.as_ref(),
             );
+            let package_metadata = macos_package_metadata(
+                &path,
+                &source,
+                protected,
+                &identity,
+                homebrew_casks.as_ref(),
+            );
 
             apps.push(InstalledApplication {
                 identity,
@@ -117,6 +125,7 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                 },
                 management_source,
                 update_availability,
+                package_metadata,
                 protected,
             });
         }
@@ -166,6 +175,8 @@ fn collect_linux_applications(include_sizes: bool) -> Vec<InstalledApplication> 
             let management_source = linux_management_source(&source, &desktop);
             let update_availability =
                 linux_update_availability(&source, &desktop, &identity, package_updates.as_ref());
+            let package_metadata =
+                linux_package_metadata(&desktop, &identity, package_updates.as_ref());
 
             apps.push(InstalledApplication {
                 identity,
@@ -180,6 +191,7 @@ fn collect_linux_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                 },
                 management_source,
                 update_availability,
+                package_metadata,
                 protected: matches!(source, AppSource::System),
             });
         }
@@ -365,6 +377,19 @@ fn macos_update_availability(
     }
 }
 
+fn macos_package_metadata(
+    path: &Path,
+    source: &AppSource,
+    protected: bool,
+    identity: &AppIdentity,
+    casks: Option<&HomebrewCaskSnapshot>,
+) -> Option<AppPackageMetadata> {
+    if protected || matches!(source, AppSource::System) {
+        return None;
+    }
+    casks.and_then(|snapshot| snapshot.package_metadata(identity, path))
+}
+
 fn linux_management_source(
     source: &AppSource,
     desktop: &BTreeMap<String, String>,
@@ -403,10 +428,50 @@ fn linux_update_availability(
     }
 }
 
+fn linux_package_metadata(
+    desktop: &BTreeMap<String, String>,
+    identity: &AppIdentity,
+    package_updates: Option<&LinuxPackageUpdateSnapshot>,
+) -> Option<AppPackageMetadata> {
+    if let Some(package_id) = desktop
+        .get("X-Flatpak")
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(AppPackageMetadata {
+            manager: AppPackageManager::Flatpak,
+            package_id: package_id.clone(),
+            installed_version: None,
+            latest_version: None,
+            update_command: Some(format!("flatpak update {package_id}")),
+            detection_confidence: AppPackageDetectionConfidence::Exact,
+        });
+    }
+    if let Some(package_id) = desktop
+        .get("X-SnapInstanceName")
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(AppPackageMetadata {
+            manager: AppPackageManager::Snap,
+            package_id: package_id.clone(),
+            installed_version: None,
+            latest_version: None,
+            update_command: Some(format!("snap refresh {package_id}")),
+            detection_confidence: AppPackageDetectionConfidence::Exact,
+        });
+    }
+    package_updates.and_then(|snapshot| snapshot.package_metadata(identity, desktop))
+}
+
 #[derive(Debug, Clone, Default)]
 struct HomebrewCaskSnapshot {
-    installed: BTreeSet<String>,
+    installed: BTreeMap<String, HomebrewCaskMetadata>,
     outdated: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct HomebrewCaskMetadata {
+    token: String,
+    installed_version: Option<String>,
 }
 
 impl HomebrewCaskSnapshot {
@@ -414,7 +479,7 @@ impl HomebrewCaskSnapshot {
         let candidates = macos_app_match_candidates(identity, path);
         candidates
             .iter()
-            .any(|candidate| self.installed.contains(candidate))
+            .any(|candidate| self.installed.contains_key(candidate))
     }
 
     fn app_has_update(&self, identity: &AppIdentity, path: &Path) -> bool {
@@ -422,6 +487,30 @@ impl HomebrewCaskSnapshot {
         candidates
             .iter()
             .any(|candidate| self.outdated.contains(candidate))
+    }
+
+    fn package_metadata(&self, identity: &AppIdentity, path: &Path) -> Option<AppPackageMetadata> {
+        let (matched_key, cask) = self.matching_cask(identity, path)?;
+        Some(AppPackageMetadata {
+            manager: AppPackageManager::HomebrewCask,
+            package_id: cask.token.clone(),
+            installed_version: cask.installed_version.clone(),
+            latest_version: None,
+            update_command: Some(format!("brew upgrade --cask {}", cask.token)),
+            detection_confidence: homebrew_detection_confidence(identity, path, matched_key),
+        })
+    }
+
+    fn matching_cask(
+        &self,
+        identity: &AppIdentity,
+        path: &Path,
+    ) -> Option<(&str, &HomebrewCaskMetadata)> {
+        let candidates = macos_app_match_candidates(identity, path);
+        candidates
+            .iter()
+            .find_map(|candidate| self.installed.get_key_value(candidate))
+            .map(|(key, value)| (key.as_str(), value))
     }
 }
 
@@ -437,7 +526,8 @@ fn homebrew_cask_snapshot() -> Option<HomebrewCaskSnapshot> {
     if !installed_output.status.success() {
         return None;
     }
-    let installed = parse_homebrew_cask_tokens(&String::from_utf8_lossy(&installed_output.stdout));
+    let installed =
+        parse_homebrew_installed_casks(&String::from_utf8_lossy(&installed_output.stdout));
     if installed.is_empty() {
         return None;
     }
@@ -465,6 +555,50 @@ fn parse_homebrew_cask_tokens(output: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn parse_homebrew_installed_casks(output: &str) -> BTreeMap<String, HomebrewCaskMetadata> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let token = parts.next()?;
+            let normalized = normalize_app_match_key(token);
+            if normalized.is_empty() {
+                return None;
+            }
+            let version = parts.collect::<Vec<_>>().join(" ");
+            Some((
+                normalized,
+                HomebrewCaskMetadata {
+                    token: token.to_string(),
+                    installed_version: (!version.is_empty()).then_some(version),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn homebrew_detection_confidence(
+    identity: &AppIdentity,
+    path: &Path,
+    matched_key: &str,
+) -> AppPackageDetectionConfidence {
+    let path_key = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(normalize_app_match_key);
+    if path_key.as_deref() == Some(matched_key) {
+        return AppPackageDetectionConfidence::Strong;
+    }
+    if identity.bundle_identifier.as_ref().is_some_and(|value| {
+        value
+            .split(['.', '-'])
+            .any(|part| normalize_app_match_key(part) == matched_key)
+    }) {
+        return AppPackageDetectionConfidence::Strong;
+    }
+    AppPackageDetectionConfidence::Fallback
+}
+
 fn macos_app_match_candidates(identity: &AppIdentity, path: &Path) -> BTreeSet<String> {
     let mut candidates = app_identity_match_candidates(identity);
     if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
@@ -475,20 +609,50 @@ fn macos_app_match_candidates(identity: &AppIdentity, path: &Path) -> BTreeSet<S
 
 #[derive(Debug, Clone, Default)]
 struct LinuxPackageUpdateSnapshot {
-    upgradable_packages: BTreeSet<String>,
+    upgradable_packages: BTreeMap<String, LinuxPackageMetadata>,
+}
+
+#[derive(Debug, Clone)]
+struct LinuxPackageMetadata {
+    manager: AppPackageManager,
+    package_id: String,
 }
 
 impl LinuxPackageUpdateSnapshot {
     fn app_has_update(&self, identity: &AppIdentity, desktop: &BTreeMap<String, String>) -> bool {
+        self.matching_update_package(identity, desktop).is_some()
+    }
+
+    fn package_metadata(
+        &self,
+        identity: &AppIdentity,
+        desktop: &BTreeMap<String, String>,
+    ) -> Option<AppPackageMetadata> {
+        let package = self.matching_update_package(identity, desktop)?;
+        Some(AppPackageMetadata {
+            manager: package.manager.clone(),
+            package_id: package.package_id.clone(),
+            installed_version: None,
+            latest_version: None,
+            update_command: None,
+            detection_confidence: AppPackageDetectionConfidence::Fallback,
+        })
+    }
+
+    fn matching_update_package(
+        &self,
+        identity: &AppIdentity,
+        desktop: &BTreeMap<String, String>,
+    ) -> Option<&LinuxPackageMetadata> {
         let candidates = linux_app_match_candidates(identity, desktop);
         candidates
             .iter()
-            .any(|candidate| self.upgradable_packages.contains(candidate))
+            .find_map(|candidate| self.upgradable_packages.get(candidate))
     }
 }
 
 fn linux_package_update_snapshot() -> Option<LinuxPackageUpdateSnapshot> {
-    let mut upgradable_packages = BTreeSet::new();
+    let mut upgradable_packages = BTreeMap::new();
 
     if let Some(apt) = find_executable_in_common_paths("apt", &["/usr/bin/apt"]) {
         let output = run_inventory_command_with_timeout(
@@ -538,16 +702,15 @@ fn linux_package_update_snapshot() -> Option<LinuxPackageUpdateSnapshot> {
     })
 }
 
-fn parse_apt_upgradable_packages(output: &str) -> BTreeSet<String> {
+fn parse_apt_upgradable_packages(output: &str) -> BTreeMap<String, LinuxPackageMetadata> {
     output
         .lines()
-        .filter_map(|line| line.split_once('/').map(|(name, _)| name))
-        .map(normalize_app_match_key)
-        .filter(|name| !name.is_empty())
+        .filter_map(|line| line.split_once('/').map(|(name, _)| name.trim()))
+        .filter_map(|name| linux_package_metadata_entry(AppPackageManager::Apt, name))
         .collect()
 }
 
-fn parse_dnf_upgradable_packages(output: &str) -> BTreeSet<String> {
+fn parse_dnf_upgradable_packages(output: &str) -> BTreeMap<String, LinuxPackageMetadata> {
     output
         .lines()
         .filter_map(|line| {
@@ -562,18 +725,33 @@ fn parse_dnf_upgradable_packages(output: &str) -> BTreeSet<String> {
                     .unwrap_or(first),
             )
         })
-        .map(normalize_app_match_key)
-        .filter(|name| !name.is_empty())
+        .filter_map(|name| linux_package_metadata_entry(AppPackageManager::Dnf, name))
         .collect()
 }
 
-fn parse_pacman_upgradable_packages(output: &str) -> BTreeSet<String> {
+fn parse_pacman_upgradable_packages(output: &str) -> BTreeMap<String, LinuxPackageMetadata> {
     output
         .lines()
         .filter_map(|line| line.split_whitespace().next())
-        .map(normalize_app_match_key)
-        .filter(|name| !name.is_empty())
+        .filter_map(|name| linux_package_metadata_entry(AppPackageManager::Pacman, name))
         .collect()
+}
+
+fn linux_package_metadata_entry(
+    manager: AppPackageManager,
+    package_id: &str,
+) -> Option<(String, LinuxPackageMetadata)> {
+    let normalized = normalize_app_match_key(package_id);
+    if normalized.is_empty() {
+        return None;
+    }
+    Some((
+        normalized,
+        LinuxPackageMetadata {
+            manager,
+            package_id: package_id.to_string(),
+        },
+    ))
 }
 
 fn linux_app_match_candidates(
@@ -854,6 +1032,18 @@ raycast
         assert!(tokens.contains("googlechrome"));
         assert!(tokens.contains("visualstudiocode"));
         assert!(tokens.contains("raycast"));
+
+        let installed = parse_homebrew_installed_casks("google-chrome 124.0\nraycast\n");
+        assert_eq!(
+            installed
+                .get("googlechrome")
+                .and_then(|cask| cask.installed_version.as_deref()),
+            Some("124.0")
+        );
+        assert_eq!(
+            installed.get("raycast").map(|cask| cask.token.as_str()),
+            Some("raycast")
+        );
     }
 
     #[test]
@@ -863,7 +1053,13 @@ raycast
         fs::create_dir_all(&app_bundle).unwrap();
         let identity = AppIdentity::macos("Google Chrome".to_string());
         let snapshot = HomebrewCaskSnapshot {
-            installed: BTreeSet::from([normalize_app_match_key("google-chrome")]),
+            installed: BTreeMap::from([(
+                normalize_app_match_key("google-chrome"),
+                HomebrewCaskMetadata {
+                    token: "google-chrome".to_string(),
+                    installed_version: Some("124.0".to_string()),
+                },
+            )]),
             outdated: BTreeSet::from([normalize_app_match_key("google-chrome")]),
         };
 
@@ -887,6 +1083,21 @@ raycast
             ),
             AppUpdateAvailability::UpdateAvailable
         );
+        let package = macos_package_metadata(
+            &app_bundle,
+            &AppSource::Local,
+            false,
+            &identity,
+            Some(&snapshot),
+        )
+        .unwrap();
+        assert_eq!(package.manager, AppPackageManager::HomebrewCask);
+        assert_eq!(package.package_id, "google-chrome");
+        assert_eq!(package.installed_version.as_deref(), Some("124.0"));
+        assert_eq!(
+            package.update_command.as_deref(),
+            Some("brew upgrade --cask google-chrome")
+        );
     }
 
     #[test]
@@ -896,7 +1107,13 @@ raycast
         fs::create_dir_all(&app_bundle).unwrap();
         let identity = AppIdentity::macos("Raycast".to_string());
         let snapshot = HomebrewCaskSnapshot {
-            installed: BTreeSet::from([normalize_app_match_key("raycast")]),
+            installed: BTreeMap::from([(
+                normalize_app_match_key("raycast"),
+                HomebrewCaskMetadata {
+                    token: "raycast".to_string(),
+                    installed_version: Some("1.2.3".to_string()),
+                },
+            )]),
             outdated: BTreeSet::new(),
         };
 
@@ -932,12 +1149,21 @@ visual-studio-code-bin 1.98 -> 1.99
 "#,
         );
 
-        assert!(apt.contains("firefox"));
-        assert!(apt.contains("code"));
-        assert!(dnf.contains("firefox"));
-        assert!(dnf.contains("orggnomecalculator"));
-        assert!(pacman.contains("firefox"));
-        assert!(pacman.contains("visualstudiocodebin"));
+        assert!(apt.contains_key("firefox"));
+        assert!(apt.contains_key("code"));
+        assert!(dnf.contains_key("firefox"));
+        assert!(dnf.contains_key("orggnomecalculator"));
+        assert!(pacman.contains_key("firefox"));
+        assert!(pacman.contains_key("visualstudiocodebin"));
+        assert_eq!(
+            apt.get("code").map(|package| &package.manager),
+            Some(&AppPackageManager::Apt)
+        );
+        assert_eq!(
+            dnf.get("firefox")
+                .map(|package| package.package_id.as_str()),
+            Some("firefox")
+        );
     }
 
     #[test]
@@ -952,12 +1178,25 @@ Exec=/usr/bin/code --unity-launch
         let mut identity = AppIdentity::linux("Visual Studio Code".to_string());
         identity.desktop_id = Some("code".to_string());
         let updates = LinuxPackageUpdateSnapshot {
-            upgradable_packages: BTreeSet::from([normalize_app_match_key("code")]),
+            upgradable_packages: BTreeMap::from([(
+                normalize_app_match_key("code"),
+                LinuxPackageMetadata {
+                    manager: AppPackageManager::Apt,
+                    package_id: "code".to_string(),
+                },
+            )]),
         };
 
         assert_eq!(
             linux_update_availability(&AppSource::System, &desktop, &identity, Some(&updates)),
             AppUpdateAvailability::UpdateAvailable
+        );
+        let package = linux_package_metadata(&desktop, &identity, Some(&updates)).unwrap();
+        assert_eq!(package.manager, AppPackageManager::Apt);
+        assert_eq!(package.package_id, "code");
+        assert_eq!(
+            package.detection_confidence,
+            AppPackageDetectionConfidence::Fallback
         );
     }
 

@@ -589,6 +589,7 @@ mod tests {
             last_used_at: None,
             management_source: AppManagementSource::System,
             update_availability: AppUpdateAvailability::Unsupported,
+            package_metadata: None,
             protected: true,
         });
 
@@ -703,6 +704,7 @@ mod tests {
                 last_used_at: None,
                 management_source: AppManagementSource::Manual,
                 update_availability: AppUpdateAvailability::Unsupported,
+                package_metadata: None,
                 protected: false,
             }],
             Some(&state_dir),
@@ -744,6 +746,7 @@ mod tests {
                 last_used_at: None,
                 management_source: AppManagementSource::Manual,
                 update_availability: AppUpdateAvailability::Unsupported,
+                package_metadata: None,
                 protected: false,
             }],
             Some(&state_dir),
