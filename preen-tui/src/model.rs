@@ -9,9 +9,9 @@ use preen_os::app_inventory;
 use preen_os::app_uninstall;
 pub use preen_os::plugin_command::PluginCommandKind as PluginActionKind;
 use preen_os::smart_care_runtime;
+use preen_os::trash_ops;
 use std::collections::{BTreeSet, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveView {
@@ -522,14 +522,14 @@ impl AppState {
                 if !path.exists() {
                     continue;
                 }
-                match move_path_to_trash(&path) {
-                    Ok(new_path) => {
+                match trash_ops::move_path_to_home_trash(&path) {
+                    Ok(moved) => {
                         logs.push(format!(
                             "moved: {} -> {}",
                             path.display(),
-                            new_path.display()
+                            moved.trashed_path.display()
                         ));
-                        moved_paths.push((path, new_path));
+                        moved_paths.push((moved.original_path, moved.trashed_path));
                     }
                     Err(error) => logs.push(format!("failed: {} ({error})", path.display())),
                 }
@@ -571,17 +571,7 @@ impl AppState {
         for record in records.into_iter().rev() {
             let mut restored_any = false;
             for (original, trashed) in record.moved_paths.into_iter().rev() {
-                if !trashed.exists() {
-                    logs.push(format!("missing trash item: {}", trashed.display()));
-                    continue;
-                }
-                if let Some(parent) = original.parent()
-                    && let Err(error) = fs::create_dir_all(parent)
-                {
-                    logs.push(format!("failed: {} ({error})", parent.display()));
-                    continue;
-                }
-                match fs::rename(&trashed, &original) {
+                match trash_ops::restore_trashed_path(&original, &trashed) {
                     Ok(()) => {
                         restored_any = true;
                         logs.push(format!(
@@ -1135,31 +1125,6 @@ fn discover_application_related_paths(app_name: &str) -> Vec<String> {
 
 fn build_application_uninstall_plan(app_name: &str) -> UninstallPlan {
     app_uninstall::build_uninstall_plan_for_name(app_name)
-}
-
-fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
-}
-
-fn move_path_to_trash(path: &Path) -> Result<PathBuf, String> {
-    let trash_dir = home_dir().join(".Trash");
-    if let Err(error) = fs::create_dir_all(&trash_dir) {
-        return Err(format!("create trash dir: {error}"));
-    }
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| "invalid file name".to_string())?;
-    let mut candidate = trash_dir.join(file_name);
-    let mut counter = 1usize;
-    while candidate.exists() {
-        candidate = trash_dir.join(format!("{file_name}.{counter}"));
-        counter = counter.saturating_add(1);
-    }
-    fs::rename(path, &candidate).map_err(|error| error.to_string())?;
-    Ok(candidate)
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+use crate::trash_ops;
 use async_trait::async_trait;
 use preen_core::action_runtime::{
     ActionExecutionError, ActionExecutionResult, ActionExecutorPort, ExecutionMode, ExecutionPlan,
@@ -92,58 +93,11 @@ impl OsActionExecutor {
     }
 
     fn trash_path(path: &Path) -> Result<(), ActionExecutionError> {
-        if let Err(error) = trash::delete(path) {
-            Self::move_to_home_trash(path).map_err(|fallback_error| {
-                ActionExecutionError::Failed {
-                    message: format!(
-                        "trash failed: {}; fallback failed: {}: {error}",
-                        path.display(),
-                        fallback_error
-                    ),
-                }
-            })?;
-        }
-        Ok(())
-    }
-
-    fn move_to_home_trash(path: &Path) -> Result<(), String> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME is not set".to_string())?;
-        let trash_dir = home.join(".Trash");
-        fs::create_dir_all(&trash_dir)
-            .map_err(|error| format!("create trash dir failed: {error}"))?;
-        let file_name = path
-            .file_name()
-            .ok_or_else(|| "path has no file name".to_string())?;
-        let mut candidate = trash_dir.join(file_name);
-        let mut suffix = 1usize;
-        while candidate.exists() {
-            candidate = trash_dir.join(format!("{}.{}", file_name.to_string_lossy(), suffix));
-            suffix = suffix.saturating_add(1);
-        }
-        loop {
-            match fs::rename(path, &candidate) {
-                Ok(()) => return Ok(()),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
-                    ) =>
-                {
-                    candidate =
-                        trash_dir.join(format!("{}.{}", file_name.to_string_lossy(), suffix));
-                    suffix = suffix.saturating_add(1);
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "move to trash failed: {} -> {}: {error}",
-                        path.display(),
-                        candidate.display()
-                    ));
-                }
-            }
-        }
+        trash_ops::move_path_to_trash(path)
+            .map(|_| ())
+            .map_err(|message| ActionExecutionError::Failed {
+                message: format!("trash failed: {}: {message}", path.display()),
+            })
     }
 
     fn count_matching_files<F>(

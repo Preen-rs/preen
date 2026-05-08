@@ -28,6 +28,7 @@ pub mod plugin_command;
 pub mod smart_care;
 pub mod smart_care_runtime;
 pub mod store;
+pub mod trash_ops;
 #[cfg(all(unix, not(target_os = "macos")))]
 const LINUX_UNDO_PREFIX: &str = "linux-trash";
 
