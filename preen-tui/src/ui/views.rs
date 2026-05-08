@@ -209,8 +209,6 @@ pub(super) fn build_info_popup_lines(state: &AppState) -> Vec<Line<'static>> {
             .iter()
             .find(|application| application.identity.display_name == app_name);
 
-        lines.push(Line::from(app_name.clone()));
-        lines.push(Line::from(""));
         push_application_detail_lines(state, &mut lines, selected_metadata, &app_name);
 
         if state.applications_show_paths_in_info {
@@ -2132,7 +2130,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.starts_with("Affinity\n\nApplication details"));
+        assert!(text.starts_with("Application details"));
+        assert!(!text.starts_with("Affinity\n"));
         assert!(text.contains("- Version: 2.6.0"));
         assert!(text.contains("- Estimated size: 1.0GB"));
         assert!(text.contains("- Last used: not available yet"));

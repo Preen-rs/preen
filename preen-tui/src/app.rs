@@ -119,6 +119,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
             .map_err(|error| error.to_string())?;
 
         if event::poll(Duration::from_millis(120)).map_err(|error| error.to_string())? {
+            let mut terminal_area = None;
             for event in read_event_batch()? {
                 match event {
                     Event::Key(key) => {
@@ -622,8 +623,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                         }
                     }
                     Event::Mouse(mouse) => {
-                        let size = terminal.size().map_err(|error| error.to_string())?;
-                        let area = Rect::new(0, 0, size.width, size.height);
+                        let area = if let Some(area) = terminal_area {
+                            area
+                        } else {
+                            let size = terminal.size().map_err(|error| error.to_string())?;
+                            let area = Rect::new(0, 0, size.width, size.height);
+                            terminal_area = Some(area);
+                            area
+                        };
                         match mouse.kind {
                             MouseEventKind::ScrollDown => {
                                 handle_mouse_scroll_down(&mut state, area, mouse.column, mouse.row);

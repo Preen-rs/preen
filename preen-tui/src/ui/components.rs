@@ -84,9 +84,11 @@ pub(super) fn render_main_container(frame: &mut Frame<'_>, area: Rect, state: &A
     let viewport_height = area.height.saturating_sub(2) as usize;
     let mut content_width = area.width.saturating_sub(2) as usize;
     let mut lines = views::build_main_lines(state, content_width);
+    drop_duplicate_view_title(state, &mut lines);
     if viewport_height > 0 && lines.len() > viewport_height {
         content_width = area.width.saturating_sub(3) as usize;
         lines = views::build_main_lines(state, content_width);
+        drop_duplicate_view_title(state, &mut lines);
     }
     let content_length = lines.len();
     let max_scroll = lines.len().saturating_sub(viewport_height) as u16;
@@ -102,15 +104,23 @@ pub(super) fn render_main_container(frame: &mut Frame<'_>, area: Rect, state: &A
         .scroll((effective_scroll, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
-    let scrollbar_position =
-        effective_scroll as usize + viewport_height.saturating_sub(1).min(content_length);
     render_vertical_scrollbar(
         frame,
         area,
         viewport_height,
         content_length,
-        scrollbar_position,
+        effective_scroll as usize,
     );
+}
+
+fn drop_duplicate_view_title(state: &AppState, lines: &mut Vec<Line<'static>>) {
+    let title = state
+        .active_view
+        .title_for_language(state.effective_language())
+        .to_string();
+    if lines.first().is_some_and(|line| line.to_string() == title) {
+        lines.remove(0);
+    }
 }
 
 fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -136,17 +146,16 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
     let show_last_action = !state.applications_last_action_lines.is_empty();
     let vertical = if show_last_action {
         Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(2),
             Constraint::Min(8),
             Constraint::Length(7),
         ])
         .split(inner)
     } else {
-        Layout::vertical([Constraint::Length(3), Constraint::Min(8)]).split(inner)
+        Layout::vertical([Constraint::Length(2), Constraint::Min(8)]).split(inner)
     };
 
     let header = Paragraph::new(vec![
-        Line::from(state.tr(TextKey::Applications)),
         Line::from(localized(
             state,
             "a analyze | r reanalyze | j/k move | space select | p paths | u uninstall(selected)",
@@ -337,13 +346,7 @@ pub(super) fn render_info_popup(frame: &mut Frame<'_>, area: Rect, state: &AppSt
     });
 
     let mut viewport_height = inner.height as usize;
-    let mut content_width = inner.width as usize;
-    let raw_lines = views::build_info_popup_lines(state);
-    let mut lines = wrap_plain_lines(raw_lines.clone(), content_width);
-    if viewport_height > 0 && lines.len() > viewport_height && content_width > 0 {
-        content_width = content_width.saturating_sub(1);
-        lines = wrap_plain_lines(raw_lines, content_width);
-    }
+    let lines = views::build_info_popup_lines(state);
     let show_scrollbar = viewport_height > 0 && lines.len() > viewport_height;
     let content_area = if show_scrollbar && inner.width > 1 {
         Rect {
