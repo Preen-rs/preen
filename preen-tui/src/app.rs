@@ -95,6 +95,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                     state.apply_applications_inventory_analyze_result(applications);
                     state.last_error = None;
                 }
+                WorkerEvent::ApplicationsPathsInspectResult { app_name, paths } => {
+                    state.apply_applications_paths_inspect_result(app_name, paths);
+                }
                 WorkerEvent::SmartCareAnalyzeResult { preview, lines } => {
                     state.apply_smart_care_analyze_result(preview, lines);
                     state.last_error = None;
@@ -290,7 +293,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                                 && matches!(state.active_view, ActiveView::Applications) =>
                         {
                             if state.smart_care_has_analyze_result {
-                                state.applications_toggle_paths_popup();
+                                dispatch_applications_paths_inspect(&mut state, &worker);
                             } else {
                                 state.last_error = Some(
                                     "run analyze with 'a' first, then press 'p' to inspect app paths"
@@ -747,6 +750,22 @@ fn dispatch_applications_inventory_analyze(state: &mut AppState, worker: &Status
     );
     state.last_error = None;
     worker.run_applications_inventory_analyze();
+}
+
+fn dispatch_applications_paths_inspect(state: &mut AppState, worker: &StatusWorker) {
+    if state.applications_close_paths_popup_if_open() {
+        return;
+    }
+    if state.is_busy() || state.smart_care_action_running || state.plugin_action_running {
+        state.last_error = Some("background action already running".to_string());
+        return;
+    }
+    let Some(app_name) = state.applications_selected_app() else {
+        state.last_error = Some("no application selected".to_string());
+        return;
+    };
+    state.begin_applications_paths_inspect(&app_name);
+    worker.run_applications_paths_inspect(app_name);
 }
 
 fn default_state_dir() -> Option<PathBuf> {

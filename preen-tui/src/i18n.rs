@@ -90,6 +90,8 @@ pub enum TextKey {
     RunningSmartCareDetail,
     AnalyzingApplicationsTitle,
     AnalyzingApplicationsDetail,
+    LoadingApplicationPathsTitle,
+    LoadingApplicationPathsDetail,
     CollectingSnapshot,
     SnapshotWorkerRunning,
     SettingsTitle,
@@ -133,6 +135,10 @@ pub fn tr(language: Language, key: TextKey) -> &'static str {
             TextKey::AnalyzingApplicationsTitle => "Analyzing applications",
             TextKey::AnalyzingApplicationsDetail => {
                 "Scanning installed apps and reading uninstall metadata"
+            }
+            TextKey::LoadingApplicationPathsTitle => "Loading application paths",
+            TextKey::LoadingApplicationPathsDetail => {
+                "Finding related files before opening the paths view"
             }
             TextKey::CollectingSnapshot => "Collecting realtime snapshot...",
             TextKey::SnapshotWorkerRunning => "State worker is running in background.",
@@ -178,6 +184,10 @@ pub fn tr(language: Language, key: TextKey) -> &'static str {
             TextKey::AnalyzingApplicationsTitle => "Anwendungen werden analysiert",
             TextKey::AnalyzingApplicationsDetail => {
                 "Installierte Apps und Deinstallations-Metadaten werden gelesen"
+            }
+            TextKey::LoadingApplicationPathsTitle => "Anwendungspfade werden geladen",
+            TextKey::LoadingApplicationPathsDetail => {
+                "Zugehörige Dateien werden gesucht, bevor die Pfadansicht geöffnet wird"
             }
             TextKey::CollectingSnapshot => "Echtzeit-Snapshot wird gesammelt...",
             TextKey::SnapshotWorkerRunning => "Status-Worker läuft im Hintergrund.",

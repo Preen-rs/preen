@@ -3,13 +3,13 @@ use preen_core::app_uninstall::InstalledApplication;
 use preen_core::dashboard_provider::DashboardProvider;
 use preen_core::dashboard_service::DashboardApplicationService;
 use preen_core::smart_care::{SmartCarePluginDescriptor, SmartCarePreview, SmartCareProfile};
-use preen_os::app_inventory;
 use preen_os::dashboard::SnapshotCollector;
 use preen_os::plugin_command::{PluginCommandOutput, run_plugin_cli_command};
 use preen_os::smart_care::resolve_descriptors_with_report_from_state_dir;
 use preen_os::smart_care_runtime::{
     analyze, execute_from_state_dir, undo_from_state_dir, undo_local_dry_run,
 };
+use preen_os::{app_inventory, app_uninstall};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,6 +37,10 @@ pub enum WorkerEvent {
     ApplicationsInventoryAnalyzeResult {
         applications: Vec<InstalledApplication>,
     },
+    ApplicationsPathsInspectResult {
+        app_name: String,
+        paths: Vec<String>,
+    },
     SmartCareAnalyzeResult {
         preview: SmartCarePreview,
         lines: Vec<String>,
@@ -57,6 +61,9 @@ pub enum WorkerCommand {
         spec: Option<String>,
     },
     ApplicationsInventoryAnalyze,
+    ApplicationsPathsInspect {
+        app_name: String,
+    },
     SmartCareAnalyze {
         profile: SmartCareProfile,
         descriptors: Vec<SmartCarePluginDescriptor>,
@@ -128,6 +135,12 @@ impl StatusWorker {
         let _ = self
             .command_tx
             .send(WorkerCommand::ApplicationsInventoryAnalyze);
+    }
+
+    pub fn run_applications_paths_inspect(&self, app_name: String) {
+        let _ = self
+            .command_tx
+            .send(WorkerCommand::ApplicationsPathsInspect { app_name });
     }
 
     pub fn run_smart_care_analyze(
@@ -262,6 +275,29 @@ fn run_worker_loop(
                     background_action_running.store(false, Ordering::SeqCst);
                     let _ = event_tx_for_action
                         .send(WorkerEvent::ApplicationsInventoryAnalyzeResult { applications });
+                });
+                continue;
+            }
+            Ok(WorkerCommand::ApplicationsPathsInspect { app_name }) => {
+                if background_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "background action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_action = event_tx.clone();
+                let background_action_running = Arc::clone(&background_action_running);
+                thread::spawn(move || {
+                    let paths =
+                        app_uninstall::build_uninstall_plan_for_name(&app_name).target_paths();
+                    background_action_running.store(false, Ordering::SeqCst);
+                    let _ = event_tx_for_action
+                        .send(WorkerEvent::ApplicationsPathsInspectResult { app_name, paths });
                 });
                 continue;
             }
@@ -776,6 +812,7 @@ params = {{}}
                     break (action, ok, lines);
                 }
                 Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
+                | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -882,6 +919,7 @@ params = {{}}
                     break;
                 }
                 Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
+                | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -934,6 +972,7 @@ params = {{}}
                     }
                 }
                 Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
+                | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -974,6 +1013,7 @@ params = {{}}
                 }
                 Ok(WorkerEvent::Snapshot { .. })
                 | Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
+                | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
                 | Ok(WorkerEvent::PluginActionResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -1023,6 +1063,7 @@ params = {{}}
                 }
                 Ok(WorkerEvent::Snapshot { .. })
                 | Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
+                | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
                 | Ok(WorkerEvent::PluginActionResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. }) => {}
                 Ok(WorkerEvent::Error(error)) => panic!("unexpected worker error: {error}"),

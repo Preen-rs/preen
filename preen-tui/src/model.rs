@@ -172,6 +172,7 @@ pub struct ApplicationUninstallRecord {
 pub enum BusyViewKind {
     Dashboard,
     Applications,
+    ApplicationsPaths,
     PluginAction,
     SmartCareAction,
 }
@@ -493,15 +494,12 @@ impl AppState {
         self.applications_show_paths_in_info = false;
     }
 
-    pub fn applications_toggle_paths_popup(&mut self) {
+    pub fn applications_close_paths_popup_if_open(&mut self) -> bool {
         if self.show_info_popup && self.applications_show_paths_in_info {
             self.close_info_popup();
-        } else {
-            self.applications_prepare_info_for_selected();
-            self.applications_show_paths_in_info = true;
-            self.show_info_popup = true;
-            self.info_popup_scroll = 0;
+            return true;
         }
+        false
     }
 
     pub fn applications_items(&self) -> Vec<String> {
@@ -625,14 +623,30 @@ impl AppState {
         self.applications_selected_items.len()
     }
 
-    pub fn applications_prepare_info_for_selected(&mut self) {
-        let Some(app_name) = self.applications_selected_app() else {
-            self.applications_info_target = None;
-            self.applications_info_paths.clear();
-            return;
-        };
-        self.applications_info_paths = discover_application_related_paths(&app_name);
+    pub fn begin_applications_paths_inspect(&mut self, app_name: &str) {
+        self.begin_busy_view(
+            BusyViewKind::ApplicationsPaths,
+            self.tr(TextKey::LoadingApplicationPathsTitle),
+            self.tr(TextKey::LoadingApplicationPathsDetail),
+            self.tr(TextKey::Applications),
+        );
+        self.applications_info_target = Some(app_name.to_string());
+        self.applications_info_paths.clear();
+        self.last_error = None;
+    }
+
+    pub fn apply_applications_paths_inspect_result(
+        &mut self,
+        app_name: String,
+        paths: Vec<String>,
+    ) {
         self.applications_info_target = Some(app_name);
+        self.applications_info_paths = paths;
+        self.applications_show_paths_in_info = true;
+        self.show_info_popup = true;
+        self.info_popup_scroll = 0;
+        self.clear_busy_view_kind(BusyViewKind::ApplicationsPaths);
+        self.last_error = None;
     }
 
     fn applications_sync_main_scroll_with_selection(&mut self) {
@@ -1432,10 +1446,6 @@ fn app_uninstall_records_from_journal(
         .collect()
 }
 
-fn discover_application_related_paths(app_name: &str) -> Vec<String> {
-    app_uninstall::build_uninstall_plan_for_name(app_name).target_paths()
-}
-
 fn build_application_uninstall_plan(app_name: &str) -> UninstallPlan {
     app_uninstall::build_uninstall_plan_for_name(app_name)
 }
@@ -1742,6 +1752,35 @@ mod tests {
             state.applications_pending_uninstall_targets(),
             &["User App".to_string()]
         );
+    }
+
+    #[test]
+    fn applications_paths_inspect_uses_busy_view_until_result() {
+        let mut state = AppState::default();
+
+        state.begin_applications_paths_inspect("Demo");
+        assert_eq!(
+            state.busy_view.as_ref().map(|busy| busy.kind),
+            Some(BusyViewKind::ApplicationsPaths)
+        );
+        assert_eq!(state.applications_info_target.as_deref(), Some("Demo"));
+        assert!(state.applications_info_paths.is_empty());
+        assert!(!state.show_info_popup);
+
+        state.apply_applications_paths_inspect_result(
+            "Demo".to_string(),
+            vec!["/Applications/Demo.app".to_string()],
+        );
+
+        assert!(!state.is_busy());
+        assert!(state.show_info_popup);
+        assert!(state.applications_show_paths_in_info);
+        assert_eq!(
+            state.applications_info_paths,
+            vec!["/Applications/Demo.app".to_string()]
+        );
+        assert!(state.applications_close_paths_popup_if_open());
+        assert!(!state.show_info_popup);
     }
 
     #[test]
