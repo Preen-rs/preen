@@ -405,8 +405,9 @@ pub(super) fn render_busy_overlay(frame: &mut Frame<'_>, area: Rect, state: &App
         horizontal: 2,
     });
 
+    let content_width = inner.width as usize;
     let spinner = ["◐", "◓", "◑", "◒"][(state.ui_tick as usize / 2) % 4];
-    let bar_width = inner.width.saturating_sub(4).max(12) as usize;
+    let bar_width = content_width.max(12);
     let active = (state.ui_tick as usize) % bar_width;
     let mut bar = String::with_capacity(bar_width);
     for idx in 0..bar_width {
@@ -439,7 +440,7 @@ pub(super) fn render_busy_overlay(frame: &mut Frame<'_>, area: Rect, state: &App
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().fg(PALETTE_TEXT))
-            .wrap(Wrap { trim: true }),
+            .wrap(Wrap { trim: false }),
         inner,
     );
 }

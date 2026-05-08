@@ -592,6 +592,14 @@ impl AppState {
             .cloned()
     }
 
+    pub fn applications_selected_metadata(&self) -> Option<InstalledApplication> {
+        let app_name = self.applications_selected_app()?;
+        self.applications_inventory_metadata
+            .iter()
+            .find(|app| app.identity.display_name == app_name)
+            .cloned()
+    }
+
     pub fn applications_is_selected(&self, app_name: &str) -> bool {
         self.applications_selected_items.contains(app_name)
     }

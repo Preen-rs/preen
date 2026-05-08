@@ -62,7 +62,7 @@ pub enum WorkerCommand {
     },
     ApplicationsInventoryAnalyze,
     ApplicationsPathsInspect {
-        app_name: String,
+        application: InstalledApplication,
     },
     SmartCareAnalyze {
         profile: SmartCareProfile,
@@ -137,10 +137,10 @@ impl StatusWorker {
             .send(WorkerCommand::ApplicationsInventoryAnalyze);
     }
 
-    pub fn run_applications_paths_inspect(&self, app_name: String) {
+    pub fn run_applications_paths_inspect(&self, application: InstalledApplication) {
         let _ = self
             .command_tx
-            .send(WorkerCommand::ApplicationsPathsInspect { app_name });
+            .send(WorkerCommand::ApplicationsPathsInspect { application });
     }
 
     pub fn run_smart_care_analyze(
@@ -278,7 +278,7 @@ fn run_worker_loop(
                 });
                 continue;
             }
-            Ok(WorkerCommand::ApplicationsPathsInspect { app_name }) => {
+            Ok(WorkerCommand::ApplicationsPathsInspect { application }) => {
                 if background_action_running.swap(true, Ordering::SeqCst) {
                     if event_tx
                         .send(WorkerEvent::Error(
@@ -293,8 +293,9 @@ fn run_worker_loop(
                 let event_tx_for_action = event_tx.clone();
                 let background_action_running = Arc::clone(&background_action_running);
                 thread::spawn(move || {
-                    let paths =
-                        app_uninstall::build_uninstall_plan_for_name(&app_name).target_paths();
+                    let app_name = application.identity.display_name.clone();
+                    let paths = app_uninstall::build_uninstall_plan_for_application(application)
+                        .target_paths();
                     background_action_running.store(false, Ordering::SeqCst);
                     let _ = event_tx_for_action
                         .send(WorkerEvent::ApplicationsPathsInspectResult { app_name, paths });

@@ -760,12 +760,13 @@ fn dispatch_applications_paths_inspect(state: &mut AppState, worker: &StatusWork
         state.last_error = Some("background action already running".to_string());
         return;
     }
-    let Some(app_name) = state.applications_selected_app() else {
+    let Some(application) = state.applications_selected_metadata() else {
         state.last_error = Some("no application selected".to_string());
         return;
     };
+    let app_name = application.identity.display_name.clone();
     state.begin_applications_paths_inspect(&app_name);
-    worker.run_applications_paths_inspect(app_name);
+    worker.run_applications_paths_inspect(application);
 }
 
 fn default_state_dir() -> Option<PathBuf> {
