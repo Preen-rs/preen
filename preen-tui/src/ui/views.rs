@@ -1,5 +1,6 @@
 use crate::i18n::{Language, TextKey};
 use crate::model::{ActiveView, AppState, DashboardSnapshot, PluginActionKind};
+use preen_core::app_uninstall::{AppSource, InstalledApplication};
 use preen_core::check_list_view::CheckListView;
 use preen_core::plugin_list_view::PluginListView;
 use preen_core::smart_care::{
@@ -192,50 +193,58 @@ pub(super) fn build_smart_care_review_popup_lines(state: &AppState) -> Vec<Line<
 }
 
 pub(super) fn build_info_popup_lines(state: &AppState) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from("Info"), Line::from("")];
+    let mut lines = Vec::new();
 
     if matches!(state.active_view, ActiveView::Applications) {
         let selected_app = state
             .applications_selected_app()
             .unwrap_or_else(|| "n/a".to_string());
-        let descriptors = state
-            .smart_care_descriptors
+        let app_name = state
+            .applications_info_target
+            .as_deref()
+            .unwrap_or(&selected_app)
+            .to_string();
+        let selected_metadata = state
+            .applications_inventory_metadata
             .iter()
-            .filter(|descriptor| descriptor.capability == SmartCareCapability::Applications)
-            .collect::<Vec<_>>();
-        lines.push(Line::from("View: Applications"));
-        lines.push(Line::from(format!(
-            "Capability ON: {}",
-            yes_no(state.smart_care_is_enabled(SmartCareCapability::Applications))
-        )));
-        lines.push(Line::from(format!(
-            "Matched plugins: {}",
-            descriptors.len()
-        )));
-        lines.push(Line::from(format!(
-            "Installed apps: {} | Selected: {}",
-            state.applications_items().len(),
-            state.applications_selected_count()
-        )));
-        lines.push(Line::from(format!("Current row: {selected_app}")));
+            .find(|application| application.identity.display_name == app_name);
+
+        lines.push(Line::from(app_name.clone()));
+        lines.push(Line::from(""));
+        push_application_detail_lines(state, &mut lines, selected_metadata, &app_name);
+
         if state.applications_show_paths_in_info {
-            if let Some(target) = &state.applications_info_target {
-                lines.push(Line::from(format!("Info target: {target}")));
-            }
             lines.push(Line::from(""));
-            lines.push(Line::from("Related paths"));
+            lines.push(Line::from(localized(
+                state,
+                "Related paths",
+                "Zugehoerige Pfade",
+            )));
             if state.applications_info_paths.is_empty() {
-                lines.push(Line::from("- no related path found"));
+                lines.push(Line::from(format!(
+                    "- {}",
+                    localized(state, "no related path found", "keine zugehoerigen Pfade")
+                )));
             } else {
                 for path in &state.applications_info_paths {
                     lines.push(Line::from(format!("- {path}")));
                 }
             }
+            return lines;
         }
+
+        let descriptors = state
+            .smart_care_descriptors
+            .iter()
+            .filter(|descriptor| descriptor.capability == SmartCareCapability::Applications)
+            .collect::<Vec<_>>();
         lines.push(Line::from(""));
-        lines.push(Line::from("Plugins"));
+        lines.push(Line::from(localized(state, "Plugins", "Plugins")));
         if descriptors.is_empty() {
-            lines.push(Line::from("- none"));
+            lines.push(Line::from(format!(
+                "- {}",
+                localized(state, "none", "keine")
+            )));
         } else {
             for descriptor in descriptors {
                 lines.push(Line::from(format!(
@@ -251,17 +260,9 @@ pub(super) fn build_info_popup_lines(state: &AppState) -> Vec<Line<'static>> {
                 )));
             }
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from("Shortcuts"));
-        lines.push(Line::from("- Close: i / Esc"));
-        lines.push(Line::from("- Scroll: j/k / PgUp/PgDn / mouse wheel"));
-        lines.push(Line::from("- Select app row: j/k"));
-        lines.push(Line::from("- Toggle app: space"));
-        lines.push(Line::from("- Open app paths: p"));
-        lines.push(Line::from("- Analyze inventory: a"));
-        lines.push(Line::from("- Reanalyze inventory: r"));
-        lines.push(Line::from("- Uninstall selected: u"));
     } else if state.active_view.supports_smart_care_controls() {
+        lines.push(Line::from("Info"));
+        lines.push(Line::from(""));
         let preview = state
             .smart_care_preview
             .clone()
@@ -351,10 +352,96 @@ pub(super) fn build_info_popup_lines(state: &AppState) -> Vec<Line<'static>> {
         lines.push(Line::from("- Review details: v"));
         lines.push(Line::from("- Analyze: a, Run: Shift+X then x"));
     } else {
+        lines.push(Line::from("Info"));
+        lines.push(Line::from(""));
         lines.push(Line::from("No extra info for this view."));
     }
 
     lines
+}
+
+fn push_application_detail_lines(
+    state: &AppState,
+    lines: &mut Vec<Line<'static>>,
+    application: Option<&InstalledApplication>,
+    fallback_name: &str,
+) {
+    lines.push(Line::from(localized(
+        state,
+        "Application details",
+        "Anwendungsdetails",
+    )));
+    let Some(application) = application else {
+        lines.push(Line::from(format!(
+            "- {}: {}",
+            localized(state, "Name", "Name"),
+            fallback_name
+        )));
+        lines.push(Line::from(format!(
+            "- {}: {}",
+            localized(state, "Inventory data", "Inventardaten"),
+            localized(state, "not available yet", "noch nicht verfuegbar")
+        )));
+        return;
+    };
+
+    lines.push(Line::from(format!(
+        "- {}: {}",
+        localized(state, "Name", "Name"),
+        application.identity.display_name
+    )));
+    lines.push(Line::from(format!(
+        "- {}: {}",
+        localized(state, "Version", "Version"),
+        application.version.as_deref().unwrap_or("n/a")
+    )));
+    lines.push(Line::from(format!(
+        "- {}: {}",
+        localized(state, "Source", "Quelle"),
+        application_source_label(state, &application.source)
+    )));
+    lines.push(Line::from(format!(
+        "- {}: {}",
+        localized(state, "Estimated size", "Geschaetzte Groesse"),
+        format_bytes(application.estimated_size)
+    )));
+    lines.push(Line::from(format!(
+        "- {}: {}",
+        localized(state, "Protected", "Geschuetzt"),
+        localized_bool(state, application.protected)
+    )));
+    lines.push(Line::from(format!(
+        "- {}: {}",
+        localized(state, "App path", "App-Pfad"),
+        application.path
+    )));
+    lines.push(Line::from(format!(
+        "- {}: {}",
+        localized(state, "Last used", "Zuletzt verwendet"),
+        localized(state, "not available yet", "noch nicht verfuegbar")
+    )));
+    lines.push(Line::from(format!(
+        "- {}: {}",
+        localized(state, "Update status", "Update-Status"),
+        localized(state, "not available yet", "noch nicht verfuegbar")
+    )));
+}
+
+fn application_source_label(state: &AppState, source: &AppSource) -> &'static str {
+    match source {
+        AppSource::System => localized(state, "system", "System"),
+        AppSource::User => localized(state, "user", "Benutzer"),
+        AppSource::Local => localized(state, "local", "Lokal"),
+        AppSource::Unknown => localized(state, "unknown", "unbekannt"),
+    }
+}
+
+fn localized_bool(state: &AppState, value: bool) -> &'static str {
+    if value {
+        localized(state, "yes", "ja")
+    } else {
+        localized(state, "no", "nein")
+    }
 }
 
 fn capability_label(capability: SmartCareCapability) -> &'static str {
@@ -1922,11 +2009,12 @@ fn coming_soon_lines(state: &AppState) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        applications_lines, build_smart_care_review_popup_lines, capability_lines, check_lines,
-        plugin_lines, smart_care_lines,
+        applications_lines, build_info_popup_lines, build_smart_care_review_popup_lines,
+        capability_lines, check_lines, plugin_lines, smart_care_lines,
     };
     use crate::i18n::LanguagePreference;
     use crate::model::{ActiveView, AppState, PluginActionKind};
+    use preen_core::app_uninstall::{AppIdentity, AppSource, InstalledApplication};
     use preen_core::dashboard::{
         CheckSeverity, DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
         DashboardMetrics, DashboardSnapshot, PluginRow, RegistrySummary, StatusCheck,
@@ -2014,6 +2102,43 @@ mod tests {
         assert!(text.contains("[ Anwendungen analysieren ]"));
         assert!(text.contains("Kein Anwendungen-Plugin installiert."));
         assert!(text.contains("Installationsablauf"));
+    }
+
+    #[test]
+    fn applications_paths_info_prioritizes_app_details() {
+        let state = AppState {
+            active_view: ActiveView::Applications,
+            applications_inventory: vec!["Affinity".to_string()],
+            applications_inventory_metadata: vec![InstalledApplication {
+                identity: AppIdentity::macos("Affinity"),
+                path: "/Applications/Affinity.app".to_string(),
+                version: Some("2.6.0".to_string()),
+                source: AppSource::User,
+                estimated_size: 1_073_741_824,
+                protected: false,
+            }],
+            applications_info_target: Some("Affinity".to_string()),
+            applications_show_paths_in_info: true,
+            applications_info_paths: vec![
+                "/Applications/Affinity.app".to_string(),
+                "/Users/test/Library/Application Support/Affinity".to_string(),
+            ],
+            ..AppState::default()
+        };
+
+        let text = build_info_popup_lines(&state)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.starts_with("Affinity\n\nApplication details"));
+        assert!(text.contains("- Version: 2.6.0"));
+        assert!(text.contains("- Estimated size: 1.0GB"));
+        assert!(text.contains("- Last used: not available yet"));
+        assert!(text.contains("Related paths"));
+        assert!(!text.contains("Info target"));
+        assert!(!text.contains("Shortcuts"));
     }
 
     #[test]

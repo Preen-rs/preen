@@ -327,7 +327,7 @@ pub(super) fn render_info_popup(frame: &mut Frame<'_>, area: Rect, state: &AppSt
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
-        .title(" Info ")
+        .title(info_popup_title(state))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(PALETTE_ACCENT));
     frame.render_widget(block, popup_area);
@@ -376,6 +376,18 @@ pub(super) fn render_info_popup(frame: &mut Frame<'_>, area: Rect, state: &AppSt
 
 pub(super) fn info_popup_area(area: Rect) -> Rect {
     layout::smart_care_review_popup_area(area)
+}
+
+fn info_popup_title(state: &AppState) -> String {
+    if matches!(state.active_view, ActiveView::Applications) {
+        if let Some(target) = &state.applications_info_target {
+            return format!(" {target} ");
+        }
+        if let Some(selected) = state.applications_selected_app() {
+            return format!(" {selected} ");
+        }
+    }
+    format!(" {} ", localized(state, "Info", "Info"))
 }
 
 pub(super) fn render_busy_overlay(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
