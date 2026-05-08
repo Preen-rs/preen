@@ -510,6 +510,10 @@ impl AppState {
         let mut uninstall_records = Vec::new();
         for app_name in targets {
             let plan = build_application_uninstall_plan(&app_name);
+            if plan.protected {
+                logs.push(format!("{app_name}: protected system application skipped"));
+                continue;
+            }
             if plan.paths.is_empty() {
                 logs.push(format!("{app_name}: path peyda nashod"));
                 continue;
@@ -1132,7 +1136,28 @@ fn discover_application_related_paths(app_name: &str) -> Vec<String> {
 }
 
 fn build_application_uninstall_plan(app_name: &str) -> UninstallPlan {
-    let identity = find_installed_application_identity(app_name).unwrap_or_else(|| {
+    if let Some(app) = find_installed_application(app_name) {
+        let mut paths = Vec::new();
+        let app_path = PathBuf::from(&app.path);
+        if app_path.exists() {
+            paths.push(RelatedPath {
+                path: app.path.clone(),
+                kind: match app.identity.platform {
+                    AppPlatform::Macos => RelatedPathKind::ApplicationBundle,
+                    AppPlatform::Linux => RelatedPathKind::DesktopEntry,
+                },
+                estimated_size: calculate_path_size(&app_path),
+            });
+        }
+        paths.extend(discover_application_related_path_items(&app.identity));
+        return UninstallPlan::trash_with_protection(
+            app.identity,
+            dedup_related_paths(paths),
+            app.protected,
+        );
+    }
+
+    let identity = {
         let platform = if cfg!(target_os = "linux") {
             AppPlatform::Linux
         } else {
@@ -1144,16 +1169,15 @@ fn build_application_uninstall_plan(app_name: &str) -> UninstallPlan {
             bundle_identifier: None,
             desktop_id: None,
         }
-    });
+    };
     let paths = discover_application_related_path_items(&identity);
     UninstallPlan::trash(identity, paths)
 }
 
-fn find_installed_application_identity(app_name: &str) -> Option<AppIdentity> {
+fn find_installed_application(app_name: &str) -> Option<InstalledApplication> {
     app_inventory::collect_installed_applications()
         .into_iter()
         .find(|app| app.identity.display_name == app_name)
-        .map(|app| app.identity)
 }
 
 fn discover_application_related_path_items(identity: &AppIdentity) -> Vec<RelatedPath> {
@@ -1196,6 +1220,15 @@ fn discover_application_related_path_items(identity: &AppIdentity) -> Vec<Relate
 }
 
 fn application_related_roots() -> Vec<(PathBuf, RelatedPathKind)> {
+    if cfg!(target_os = "linux") {
+        return vec![
+            (home_dir().join(".config"), RelatedPathKind::Preference),
+            (home_dir().join(".cache"), RelatedPathKind::Cache),
+            (home_dir().join(".local/share"), RelatedPathKind::Support),
+            (home_dir().join(".local/state"), RelatedPathKind::Support),
+        ];
+    }
+
     vec![
         (
             home_dir().join("Library/Application Support"),
@@ -1225,6 +1258,17 @@ fn application_related_roots() -> Vec<(PathBuf, RelatedPathKind)> {
             RelatedPathKind::Support,
         ),
     ]
+}
+
+fn dedup_related_paths(paths: Vec<RelatedPath>) -> Vec<RelatedPath> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for path in paths {
+        if seen.insert(path.path.clone()) {
+            out.push(path);
+        }
+    }
+    out
 }
 
 fn collect_matching_paths_under(

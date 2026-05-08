@@ -96,14 +96,24 @@ pub struct UninstallPlan {
     pub identity: AppIdentity,
     pub paths: Vec<RelatedPath>,
     pub disposition: UninstallDisposition,
+    pub protected: bool,
 }
 
 impl UninstallPlan {
     pub fn trash(identity: AppIdentity, paths: Vec<RelatedPath>) -> Self {
+        Self::trash_with_protection(identity, paths, false)
+    }
+
+    pub fn trash_with_protection(
+        identity: AppIdentity,
+        paths: Vec<RelatedPath>,
+        protected: bool,
+    ) -> Self {
         Self {
             identity,
             paths,
             disposition: UninstallDisposition::Trash,
+            protected,
         }
     }
 
@@ -194,6 +204,15 @@ mod tests {
         );
         assert_eq!(plan.estimated_size(), 7);
         assert_eq!(plan.disposition, UninstallDisposition::Trash);
+        assert!(!plan.protected);
+    }
+
+    #[test]
+    fn uninstall_plan_can_mark_protected_apps() {
+        let plan =
+            UninstallPlan::trash_with_protection(AppIdentity::macos("Preview"), Vec::new(), true);
+
+        assert!(plan.protected);
     }
 
     #[test]
