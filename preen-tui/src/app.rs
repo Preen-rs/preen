@@ -1,4 +1,4 @@
-use crate::model::{ActiveView, AppState, PluginActionKind, SmartCareCapability};
+use crate::model::{ActiveView, AppState, BusyViewKind, PluginActionKind, SmartCareCapability};
 use crate::ui;
 use crate::worker::{StatusWorker, WorkerEvent};
 use crossterm::event::{
@@ -33,6 +33,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
     worker.refresh_now();
     let mut state = AppState::default();
     state.begin_busy_view(
+        BusyViewKind::Dashboard,
         "Loading dashboard",
         "Collecting system health, plugins, checks, and runtime metrics",
         "Dashboard",
@@ -64,7 +65,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                         smart_care_skipped_pack_ids.into_iter().collect(),
                         smart_care_dev_fallback_pack_ids.into_iter().collect(),
                     );
-                    state.clear_busy_view();
+                    state.clear_busy_view_kind(BusyViewKind::Dashboard);
                     state.last_error = None;
                 }
                 WorkerEvent::Error(error) => {
@@ -713,6 +714,7 @@ fn dispatch_applications_inventory_analyze(state: &mut AppState, worker: &Status
         return;
     }
     state.begin_busy_view(
+        BusyViewKind::Applications,
         "Analyzing applications",
         "Scanning installed apps and reading uninstall metadata",
         "Applications",

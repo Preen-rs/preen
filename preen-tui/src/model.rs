@@ -150,8 +150,17 @@ pub struct ApplicationUninstallRecord {
     pub moved_paths: Vec<(PathBuf, PathBuf)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusyViewKind {
+    Dashboard,
+    Applications,
+    PluginAction,
+    SmartCareAction,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BusyViewState {
+    pub kind: BusyViewKind,
     pub title: String,
     pub detail: String,
     pub context: String,
@@ -159,11 +168,13 @@ pub struct BusyViewState {
 
 impl BusyViewState {
     pub fn new(
+        kind: BusyViewKind,
         title: impl Into<String>,
         detail: impl Into<String>,
         context: impl Into<String>,
     ) -> Self {
         Self {
+            kind,
             title: title.into(),
             detail: detail.into(),
             context: context.into(),
@@ -287,15 +298,26 @@ impl AppState {
 
     pub fn begin_busy_view(
         &mut self,
+        kind: BusyViewKind,
         title: impl Into<String>,
         detail: impl Into<String>,
         context: impl Into<String>,
     ) {
-        self.busy_view = Some(BusyViewState::new(title, detail, context));
+        self.busy_view = Some(BusyViewState::new(kind, title, detail, context));
     }
 
     pub fn clear_busy_view(&mut self) {
         self.busy_view = None;
+    }
+
+    pub fn clear_busy_view_kind(&mut self, kind: BusyViewKind) {
+        if self
+            .busy_view
+            .as_ref()
+            .is_some_and(|busy| busy.kind == kind)
+        {
+            self.clear_busy_view();
+        }
     }
 
     pub fn is_busy(&self) -> bool {
@@ -426,7 +448,7 @@ impl AppState {
             self.applications_inventory_revision, current_len
         )];
         self.main_scroll = 0;
-        self.clear_busy_view();
+        self.clear_busy_view_kind(BusyViewKind::Applications);
     }
 
     pub fn applications_sync_selection(&mut self) {
@@ -777,6 +799,12 @@ impl AppState {
         self.plugin_last_output.clear();
         self.plugin_last_diagnostics.clear();
         self.last_error = None;
+        self.begin_busy_view(
+            BusyViewKind::PluginAction,
+            format!("Running plugin {}", action.label()),
+            "Executing plugin command and collecting diagnostics",
+            "Plugins",
+        );
     }
 
     pub fn apply_plugin_command_result(
@@ -789,6 +817,7 @@ impl AppState {
         self.plugin_last_action = Some(action);
         self.plugin_last_diagnostics = extract_plugin_diagnostics(&lines);
         self.plugin_last_output = lines;
+        self.clear_busy_view_kind(BusyViewKind::PluginAction);
         if ok {
             self.last_error = None;
         }
@@ -803,8 +832,15 @@ impl AppState {
             return false;
         }
         self.smart_care_action_running = true;
-        self.smart_care_action_label = Some(label.into());
+        let label = label.into();
+        self.smart_care_action_label = Some(label.clone());
         self.smart_care_reopen_review_on_analyze = reopen_review_on_analyze;
+        self.begin_busy_view(
+            BusyViewKind::SmartCareAction,
+            format!("Running Smart Care {label}"),
+            "Preparing recommendations and applying selected workflow checks",
+            "Smart Care",
+        );
         true
     }
 
@@ -812,6 +848,7 @@ impl AppState {
         self.smart_care_action_running = false;
         self.smart_care_action_label = None;
         self.smart_care_reopen_review_on_analyze = false;
+        self.clear_busy_view_kind(BusyViewKind::SmartCareAction);
     }
 
     pub fn apply_smart_care_analyze_result(
@@ -1348,6 +1385,7 @@ mod tests {
         let mut state = AppState::default();
 
         state.begin_busy_view(
+            BusyViewKind::Applications,
             "Analyzing applications",
             "Scanning metadata",
             "Applications",
@@ -1360,8 +1398,10 @@ mod tests {
             state.busy_view.as_ref().map(|busy| busy.title.as_str()),
             Some("Analyzing applications")
         );
+        state.clear_busy_view_kind(BusyViewKind::Dashboard);
+        assert!(state.is_busy());
 
-        state.clear_busy_view();
+        state.clear_busy_view_kind(BusyViewKind::Applications);
 
         assert!(!state.is_busy());
     }
@@ -1611,6 +1651,10 @@ mod tests {
 
         state.apply_plugin_command_started(PluginActionKind::Test);
         assert!(state.plugin_action_running);
+        assert_eq!(
+            state.busy_view.as_ref().map(|busy| busy.kind),
+            Some(BusyViewKind::PluginAction)
+        );
         assert_eq!(state.plugin_last_action, Some(PluginActionKind::Test));
         assert!(state.plugin_last_output.is_empty());
         assert_eq!(state.last_error, None);
@@ -1622,6 +1666,7 @@ mod tests {
             vec!["stderr: fail".to_string()],
         );
         assert!(!state.plugin_action_running);
+        assert!(!state.is_busy());
         assert_eq!(state.plugin_last_action, Some(PluginActionKind::Test));
         assert_eq!(state.plugin_last_output, vec!["stderr: fail".to_string()]);
         assert_eq!(
@@ -1717,6 +1762,25 @@ mod tests {
                 .find(|selection| selection.capability == SmartCareCapability::Cleanup)
                 .is_some_and(|selection| selection.enabled)
         );
+    }
+
+    #[test]
+    fn smart_care_action_uses_busy_view_until_cleared() {
+        let mut state = AppState::default();
+
+        assert!(state.begin_smart_care_action("analyze", false));
+        assert!(state.smart_care_action_running);
+        assert_eq!(
+            state.busy_view.as_ref().map(|busy| busy.kind),
+            Some(BusyViewKind::SmartCareAction)
+        );
+
+        state.clear_busy_view_kind(BusyViewKind::Dashboard);
+        assert!(state.is_busy());
+
+        state.clear_smart_care_action_state();
+        assert!(!state.smart_care_action_running);
+        assert!(!state.is_busy());
     }
 
     #[test]
