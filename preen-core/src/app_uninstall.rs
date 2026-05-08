@@ -59,15 +59,6 @@ pub enum AppSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AppUpdateStatus {
-    ManagedBySystem,
-    ManagedByAppStore,
-    ManagedByPackageManager,
-    NotManaged,
-    Unknown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledApplication {
     pub identity: AppIdentity,
     pub path: String,
@@ -75,8 +66,27 @@ pub struct InstalledApplication {
     pub source: AppSource,
     pub estimated_size: u64,
     pub last_used_at: Option<DateTime<Utc>>,
-    pub update_status: AppUpdateStatus,
+    pub management_source: AppManagementSource,
+    pub update_availability: AppUpdateAvailability,
     pub protected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppManagementSource {
+    System,
+    AppStore,
+    PackageManager,
+    Manual,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppUpdateAvailability {
+    UpdateAvailable,
+    UpToDate,
+    NotChecked,
+    Unsupported,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -260,14 +270,16 @@ mod tests {
             source: AppSource::System,
             estimated_size: 42,
             last_used_at: None,
-            update_status: AppUpdateStatus::ManagedBySystem,
+            management_source: AppManagementSource::System,
+            update_availability: AppUpdateAvailability::Unsupported,
             protected: true,
         };
 
         assert_eq!(app.identity.display_name, "Preview");
         assert!(app.protected);
         assert_eq!(app.source, AppSource::System);
-        assert_eq!(app.update_status, AppUpdateStatus::ManagedBySystem);
+        assert_eq!(app.management_source, AppManagementSource::System);
+        assert_eq!(app.update_availability, AppUpdateAvailability::Unsupported);
     }
 
     #[test]

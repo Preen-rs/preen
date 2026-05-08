@@ -1303,7 +1303,9 @@ fn clamp_diagnostic_line(line: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use preen_core::app_uninstall::{AppIdentity, AppSource, AppUpdateStatus};
+    use preen_core::app_uninstall::{
+        AppIdentity, AppManagementSource, AppSource, AppUpdateAvailability,
+    };
     use preen_core::smart_care::{SmartCareCapabilitySelection, SmartCareCapabilityStatus};
     use std::collections::BTreeSet;
     use std::fs;
@@ -1423,7 +1425,8 @@ mod tests {
                     source: AppSource::System,
                     estimated_size: 0,
                     last_used_at: None,
-                    update_status: AppUpdateStatus::ManagedBySystem,
+                    management_source: AppManagementSource::System,
+                    update_availability: AppUpdateAvailability::Unsupported,
                     protected: true,
                 },
                 InstalledApplication {
@@ -1433,7 +1436,8 @@ mod tests {
                     source: AppSource::User,
                     estimated_size: 0,
                     last_used_at: None,
-                    update_status: AppUpdateStatus::NotManaged,
+                    management_source: AppManagementSource::Manual,
+                    update_availability: AppUpdateAvailability::Unsupported,
                     protected: false,
                 },
             ],
@@ -1475,7 +1479,8 @@ mod tests {
                 source: AppSource::User,
                 estimated_size: 0,
                 last_used_at: None,
-                update_status: AppUpdateStatus::NotManaged,
+                management_source: AppManagementSource::Manual,
+                update_availability: AppUpdateAvailability::Unsupported,
                 protected: false,
             }],
             ..AppState::default()
@@ -1502,7 +1507,8 @@ mod tests {
                     source: AppSource::User,
                     estimated_size: 0,
                     last_used_at: None,
-                    update_status: AppUpdateStatus::NotManaged,
+                    management_source: AppManagementSource::Manual,
+                    update_availability: AppUpdateAvailability::Unsupported,
                     protected: false,
                 },
                 InstalledApplication {
@@ -1512,7 +1518,8 @@ mod tests {
                     source: AppSource::User,
                     estimated_size: 0,
                     last_used_at: None,
-                    update_status: AppUpdateStatus::NotManaged,
+                    management_source: AppManagementSource::Manual,
+                    update_availability: AppUpdateAvailability::Unsupported,
                     protected: false,
                 },
             ],

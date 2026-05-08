@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use preen_core::app_uninstall::{AppIdentity, AppSource, AppUpdateStatus, InstalledApplication};
+use preen_core::app_uninstall::{
+    AppIdentity, AppManagementSource, AppSource, AppUpdateAvailability, InstalledApplication,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -94,7 +96,8 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                 } else {
                     None
                 },
-                update_status: macos_update_status(&path, &source, protected),
+                management_source: macos_management_source(&path, &source, protected),
+                update_availability: macos_update_availability(&path, &source, protected),
                 protected,
             });
         }
@@ -152,7 +155,8 @@ fn collect_linux_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                 } else {
                     None
                 },
-                update_status: linux_update_status(&source),
+                management_source: linux_management_source(&source),
+                update_availability: linux_update_availability(&source),
                 protected: matches!(source, AppSource::System),
             });
         }
@@ -295,21 +299,51 @@ fn system_time_to_utc(value: SystemTime) -> DateTime<Utc> {
     DateTime::<Utc>::from(value)
 }
 
-fn macos_update_status(path: &Path, source: &AppSource, protected: bool) -> AppUpdateStatus {
+fn macos_management_source(
+    path: &Path,
+    source: &AppSource,
+    protected: bool,
+) -> AppManagementSource {
     if protected || matches!(source, AppSource::System) {
-        return AppUpdateStatus::ManagedBySystem;
+        return AppManagementSource::System;
     }
     if path.join("Contents/_MASReceipt/receipt").is_file() {
-        return AppUpdateStatus::ManagedByAppStore;
+        return AppManagementSource::AppStore;
     }
-    AppUpdateStatus::NotManaged
+    AppManagementSource::Manual
 }
 
-fn linux_update_status(source: &AppSource) -> AppUpdateStatus {
+fn macos_update_availability(
+    path: &Path,
+    source: &AppSource,
+    protected: bool,
+) -> AppUpdateAvailability {
+    match macos_management_source(path, source, protected) {
+        AppManagementSource::System => AppUpdateAvailability::Unsupported,
+        AppManagementSource::AppStore => AppUpdateAvailability::NotChecked,
+        AppManagementSource::Manual => AppUpdateAvailability::Unsupported,
+        AppManagementSource::PackageManager | AppManagementSource::Unknown => {
+            AppUpdateAvailability::Unknown
+        }
+    }
+}
+
+fn linux_management_source(source: &AppSource) -> AppManagementSource {
     match source {
-        AppSource::System | AppSource::Local => AppUpdateStatus::ManagedByPackageManager,
-        AppSource::User => AppUpdateStatus::NotManaged,
-        AppSource::Unknown => AppUpdateStatus::Unknown,
+        AppSource::System | AppSource::Local => AppManagementSource::PackageManager,
+        AppSource::User => AppManagementSource::Manual,
+        AppSource::Unknown => AppManagementSource::Unknown,
+    }
+}
+
+fn linux_update_availability(source: &AppSource) -> AppUpdateAvailability {
+    match linux_management_source(source) {
+        AppManagementSource::PackageManager => AppUpdateAvailability::NotChecked,
+        AppManagementSource::Manual => AppUpdateAvailability::Unsupported,
+        AppManagementSource::Unknown => AppUpdateAvailability::Unknown,
+        AppManagementSource::System | AppManagementSource::AppStore => {
+            AppUpdateAvailability::Unknown
+        }
     }
 }
 
@@ -452,7 +486,7 @@ Name=Docs
     }
 
     #[test]
-    fn detects_macos_app_store_receipt_status() {
+    fn detects_macos_app_store_receipt_management() {
         let dir = tempfile::tempdir().unwrap();
         let app_bundle = dir.path().join("Demo.app");
         let receipt_dir = app_bundle.join("Contents").join("_MASReceipt");
@@ -460,12 +494,20 @@ Name=Docs
         fs::write(receipt_dir.join("receipt"), "receipt").unwrap();
 
         assert_eq!(
-            macos_update_status(&app_bundle, &AppSource::Local, false),
-            AppUpdateStatus::ManagedByAppStore
+            macos_management_source(&app_bundle, &AppSource::Local, false),
+            AppManagementSource::AppStore
         );
         assert_eq!(
-            macos_update_status(&app_bundle, &AppSource::System, true),
-            AppUpdateStatus::ManagedBySystem
+            macos_update_availability(&app_bundle, &AppSource::Local, false),
+            AppUpdateAvailability::NotChecked
+        );
+        assert_eq!(
+            macos_management_source(&app_bundle, &AppSource::System, true),
+            AppManagementSource::System
+        );
+        assert_eq!(
+            macos_update_availability(&app_bundle, &AppSource::System, true),
+            AppUpdateAvailability::Unsupported
         );
     }
 

@@ -1,6 +1,8 @@
 use crate::i18n::{Language, TextKey};
 use crate::model::{ActiveView, AppState, DashboardSnapshot, PluginActionKind};
-use preen_core::app_uninstall::{AppSource, AppUpdateStatus, InstalledApplication};
+use preen_core::app_uninstall::{
+    AppManagementSource, AppSource, AppUpdateAvailability, InstalledApplication,
+};
 use preen_core::check_list_view::CheckListView;
 use preen_core::plugin_list_view::PluginListView;
 use preen_core::smart_care::{
@@ -424,8 +426,13 @@ fn push_application_detail_lines(
     )));
     lines.push(Line::from(format!(
         "- {}: {}",
-        localized(state, "Update status", "Update-Status"),
-        application_update_status_label(state, &application.update_status)
+        localized(state, "Managed by", "Verwaltet von"),
+        application_management_source_label(state, &application.management_source)
+    )));
+    lines.push(Line::from(format!(
+        "- {}: {}",
+        localized(state, "Update availability", "Update-Verfuegbarkeit"),
+        application_update_availability_label(state, &application.update_availability)
     )));
 }
 
@@ -446,21 +453,33 @@ fn localized_bool(state: &AppState, value: bool) -> &'static str {
     }
 }
 
-fn application_update_status_label(state: &AppState, status: &AppUpdateStatus) -> &'static str {
-    match status {
-        AppUpdateStatus::ManagedBySystem => localized(state, "system managed", "systemverwaltet"),
-        AppUpdateStatus::ManagedByAppStore => {
-            localized(state, "App Store managed", "App-Store-verwaltet")
+fn application_management_source_label(
+    state: &AppState,
+    source: &AppManagementSource,
+) -> &'static str {
+    match source {
+        AppManagementSource::System => localized(state, "system", "System"),
+        AppManagementSource::AppStore => localized(state, "App Store", "App Store"),
+        AppManagementSource::PackageManager => localized(state, "package manager", "Paketmanager"),
+        AppManagementSource::Manual => localized(state, "manual/local", "manuell/lokal"),
+        AppManagementSource::Unknown => localized(state, "unknown", "unbekannt"),
+    }
+}
+
+fn application_update_availability_label(
+    state: &AppState,
+    availability: &AppUpdateAvailability,
+) -> &'static str {
+    match availability {
+        AppUpdateAvailability::UpdateAvailable => {
+            localized(state, "update available", "Update verfuegbar")
         }
-        AppUpdateStatus::ManagedByPackageManager => {
-            localized(state, "package manager managed", "paketmanager-verwaltet")
+        AppUpdateAvailability::UpToDate => localized(state, "up to date", "aktuell"),
+        AppUpdateAvailability::NotChecked => localized(state, "not checked", "nicht geprueft"),
+        AppUpdateAvailability::Unsupported => {
+            localized(state, "not supported", "nicht unterstuetzt")
         }
-        AppUpdateStatus::NotManaged => localized(
-            state,
-            "manual/local install",
-            "manuelle/lokale Installation",
-        ),
-        AppUpdateStatus::Unknown => localized(state, "unknown", "unbekannt"),
+        AppUpdateAvailability::Unknown => localized(state, "unknown", "unbekannt"),
     }
 }
 
@@ -2035,7 +2054,7 @@ mod tests {
     use crate::i18n::LanguagePreference;
     use crate::model::{ActiveView, AppState, PluginActionKind};
     use preen_core::app_uninstall::{
-        AppIdentity, AppSource, AppUpdateStatus, InstalledApplication,
+        AppIdentity, AppManagementSource, AppSource, AppUpdateAvailability, InstalledApplication,
     };
     use preen_core::dashboard::{
         CheckSeverity, DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
@@ -2138,7 +2157,8 @@ mod tests {
                 source: AppSource::User,
                 estimated_size: 1_073_741_824,
                 last_used_at: None,
-                update_status: AppUpdateStatus::NotManaged,
+                management_source: AppManagementSource::Manual,
+                update_availability: AppUpdateAvailability::Unsupported,
                 protected: false,
             }],
             applications_info_target: Some("Affinity".to_string()),
@@ -2161,7 +2181,8 @@ mod tests {
         assert!(text.contains("- Version: 2.6.0"));
         assert!(text.contains("- Estimated size: 1.0GB"));
         assert!(text.contains("- Last used: unknown"));
-        assert!(text.contains("- Update status: manual/local install"));
+        assert!(text.contains("- Managed by: manual/local"));
+        assert!(text.contains("- Update availability: not supported"));
         assert!(text.contains("Related paths"));
         assert!(!text.contains("Info target"));
         assert!(!text.contains("Shortcuts"));

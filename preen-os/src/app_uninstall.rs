@@ -533,7 +533,7 @@ fn home_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use preen_core::app_uninstall::{AppSource, AppUpdateStatus};
+    use preen_core::app_uninstall::{AppManagementSource, AppSource, AppUpdateAvailability};
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -587,7 +587,8 @@ mod tests {
             source: AppSource::System,
             estimated_size: 0,
             last_used_at: None,
-            update_status: AppUpdateStatus::ManagedBySystem,
+            management_source: AppManagementSource::System,
+            update_availability: AppUpdateAvailability::Unsupported,
             protected: true,
         });
 
@@ -700,7 +701,8 @@ mod tests {
                 source: AppSource::User,
                 estimated_size: 0,
                 last_used_at: None,
-                update_status: AppUpdateStatus::NotManaged,
+                management_source: AppManagementSource::Manual,
+                update_availability: AppUpdateAvailability::Unsupported,
                 protected: false,
             }],
             Some(&state_dir),
@@ -740,7 +742,8 @@ mod tests {
                 source: AppSource::User,
                 estimated_size: 0,
                 last_used_at: None,
-                update_status: AppUpdateStatus::NotManaged,
+                management_source: AppManagementSource::Manual,
+                update_availability: AppUpdateAvailability::Unsupported,
                 protected: false,
             }],
             Some(&state_dir),
