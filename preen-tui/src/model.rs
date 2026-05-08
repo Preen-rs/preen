@@ -1461,7 +1461,9 @@ fn build_application_uninstall_plan(app_name: &str) -> UninstallPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use preen_core::app_uninstall::{AppIdentity, AppSource, RelatedPath, RelatedPathKind};
+    use preen_core::app_uninstall::{
+        AppIdentity, AppSource, AppUpdateStatus, RelatedPath, RelatedPathKind,
+    };
     use preen_core::dashboard::{
         DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION, DashboardMetrics,
         RegistrySummary,
@@ -1724,6 +1726,8 @@ mod tests {
                     version: None,
                     source: AppSource::System,
                     estimated_size: 0,
+                    last_used_at: None,
+                    update_status: AppUpdateStatus::ManagedBySystem,
                     protected: true,
                 },
                 InstalledApplication {
@@ -1732,6 +1736,8 @@ mod tests {
                     version: None,
                     source: AppSource::User,
                     estimated_size: 0,
+                    last_used_at: None,
+                    update_status: AppUpdateStatus::NotManaged,
                     protected: false,
                 },
             ],

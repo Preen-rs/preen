@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,12 +59,23 @@ pub enum AppSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppUpdateStatus {
+    ManagedBySystem,
+    ManagedByAppStore,
+    ManagedByPackageManager,
+    NotManaged,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledApplication {
     pub identity: AppIdentity,
     pub path: String,
     pub version: Option<String>,
     pub source: AppSource,
     pub estimated_size: u64,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub update_status: AppUpdateStatus,
     pub protected: bool,
 }
 
@@ -223,12 +235,15 @@ mod tests {
             version: Some("11.0".to_string()),
             source: AppSource::System,
             estimated_size: 42,
+            last_used_at: None,
+            update_status: AppUpdateStatus::ManagedBySystem,
             protected: true,
         };
 
         assert_eq!(app.identity.display_name, "Preview");
         assert!(app.protected);
         assert_eq!(app.source, AppSource::System);
+        assert_eq!(app.update_status, AppUpdateStatus::ManagedBySystem);
     }
 
     #[test]

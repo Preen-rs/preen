@@ -1,7 +1,10 @@
-use preen_core::app_uninstall::{AppIdentity, AppSource, InstalledApplication};
+use chrono::{DateTime, Utc};
+use preen_core::app_uninstall::{AppIdentity, AppSource, AppUpdateStatus, InstalledApplication};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::SystemTime;
 
 const MAX_DISCOVERED_APPS: usize = 400;
 
@@ -86,6 +89,12 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                     .cloned(),
                 source: source.clone(),
                 estimated_size: estimated_path_size(&path, include_sizes),
+                last_used_at: if include_sizes {
+                    macos_last_used_at(&path).or_else(|| filesystem_last_used_at(&path))
+                } else {
+                    None
+                },
+                update_status: macos_update_status(&path, &source, protected),
                 protected,
             });
         }
@@ -138,6 +147,12 @@ fn collect_linux_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                 version: desktop.get("X-Version").cloned(),
                 source: source.clone(),
                 estimated_size: estimated_path_size(&path, include_sizes),
+                last_used_at: if include_sizes {
+                    filesystem_last_used_at(&path)
+                } else {
+                    None
+                },
+                update_status: linux_update_status(&source),
                 protected: matches!(source, AppSource::System),
             });
         }
@@ -240,6 +255,61 @@ fn estimated_path_size(path: &Path, include_size: bool) -> u64 {
         calculate_path_size(path)
     } else {
         0
+    }
+}
+
+fn macos_last_used_at(path: &Path) -> Option<DateTime<Utc>> {
+    let output = Command::new("mdls")
+        .arg("-raw")
+        .arg("-name")
+        .arg("kMDItemLastUsedDate")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_macos_mdls_date(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_macos_mdls_date(value: &str) -> Option<DateTime<Utc>> {
+    let value = value.trim();
+    if value.is_empty() || value == "(null)" {
+        return None;
+    }
+    DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S %z")
+        .ok()
+        .map(|date| date.with_timezone(&Utc))
+}
+
+fn filesystem_last_used_at(path: &Path) -> Option<DateTime<Utc>> {
+    let metadata = fs::metadata(path).ok()?;
+    metadata
+        .accessed()
+        .or_else(|_| metadata.modified())
+        .ok()
+        .map(system_time_to_utc)
+}
+
+fn system_time_to_utc(value: SystemTime) -> DateTime<Utc> {
+    DateTime::<Utc>::from(value)
+}
+
+fn macos_update_status(path: &Path, source: &AppSource, protected: bool) -> AppUpdateStatus {
+    if protected || matches!(source, AppSource::System) {
+        return AppUpdateStatus::ManagedBySystem;
+    }
+    if path.join("Contents/_MASReceipt/receipt").is_file() {
+        return AppUpdateStatus::ManagedByAppStore;
+    }
+    AppUpdateStatus::NotManaged
+}
+
+fn linux_update_status(source: &AppSource) -> AppUpdateStatus {
+    match source {
+        AppSource::System | AppSource::Local => AppUpdateStatus::ManagedByPackageManager,
+        AppSource::User => AppUpdateStatus::NotManaged,
+        AppSource::Unknown => AppUpdateStatus::Unknown,
     }
 }
 
@@ -371,6 +441,32 @@ Name=Docs
 
         assert_eq!(estimated_path_size(&app_bundle, false), 0);
         assert_eq!(estimated_path_size(&app_bundle, true), 5);
+    }
+
+    #[test]
+    fn parses_macos_mdls_last_used_date() {
+        let parsed = parse_macos_mdls_date("2026-05-08 19:12:30 +0000\n").unwrap();
+
+        assert_eq!(parsed.to_rfc3339(), "2026-05-08T19:12:30+00:00");
+        assert!(parse_macos_mdls_date("(null)").is_none());
+    }
+
+    #[test]
+    fn detects_macos_app_store_receipt_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_bundle = dir.path().join("Demo.app");
+        let receipt_dir = app_bundle.join("Contents").join("_MASReceipt");
+        fs::create_dir_all(&receipt_dir).unwrap();
+        fs::write(receipt_dir.join("receipt"), "receipt").unwrap();
+
+        assert_eq!(
+            macos_update_status(&app_bundle, &AppSource::Local, false),
+            AppUpdateStatus::ManagedByAppStore
+        );
+        assert_eq!(
+            macos_update_status(&app_bundle, &AppSource::System, true),
+            AppUpdateStatus::ManagedBySystem
+        );
     }
 
     #[cfg(unix)]

@@ -301,7 +301,7 @@ fn home_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use preen_core::app_uninstall::AppSource;
+    use preen_core::app_uninstall::{AppSource, AppUpdateStatus};
 
     #[test]
     fn planner_keeps_protected_flag_and_application_path() {
@@ -316,6 +316,8 @@ mod tests {
             version: None,
             source: AppSource::System,
             estimated_size: 0,
+            last_used_at: None,
+            update_status: AppUpdateStatus::ManagedBySystem,
             protected: true,
         });
 
