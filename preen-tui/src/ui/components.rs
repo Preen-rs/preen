@@ -140,17 +140,7 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
     let inner = container.inner(area);
     frame.render_widget(container, area);
 
-    let show_last_action = !state.applications_last_action_lines.is_empty();
-    let vertical = if show_last_action {
-        Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(8),
-            Constraint::Length(7),
-        ])
-        .split(inner)
-    } else {
-        Layout::vertical([Constraint::Length(2), Constraint::Min(8)]).split(inner)
-    };
+    let vertical = Layout::vertical([Constraint::Length(2), Constraint::Min(8)]).split(inner);
 
     let header = Paragraph::new(vec![
         Line::from(localized(
@@ -237,25 +227,6 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
         .highlight_style(Style::default().bg(PALETTE_ACCENT).fg(Color::Black))
         .highlight_symbol("▶");
     frame.render_stateful_widget(list_widget, vertical[1], &mut list_state);
-
-    if show_last_action {
-        let logs = {
-            let mut lines = vec![Line::from(localized(state, "Last action", "Letzte Aktion"))];
-            for line in state.applications_last_action_lines.iter().take(4) {
-                lines.push(Line::from(format!("- {line}")));
-            }
-            lines
-        };
-        let logs_widget = Paragraph::new(logs)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(PALETTE_LINE)),
-            )
-            .style(Style::default().fg(PALETTE_TEXT))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(logs_widget, vertical[2]);
-    }
 
     render_vertical_scrollbar(
         frame,
@@ -384,6 +355,9 @@ pub(super) fn info_popup_area(area: Rect) -> Rect {
 
 fn info_popup_title(state: &AppState) -> String {
     if matches!(state.active_view, ActiveView::Applications) {
+        if state.applications_show_action_details {
+            return format!(" {} ", localized(state, "Update result", "Update-Ergebnis"));
+        }
         if let Some(target) = &state.applications_info_target {
             return format!(" {target} ");
         }

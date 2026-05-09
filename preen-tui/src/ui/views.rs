@@ -199,6 +199,41 @@ pub(super) fn build_info_popup_lines(state: &AppState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     if matches!(state.active_view, ActiveView::Applications) {
+        if state.applications_show_action_details {
+            lines.push(Line::from(localized(
+                state,
+                "Application update result",
+                "Anwendungsupdate-Ergebnis",
+            )));
+            lines.push(Line::from(""));
+            if state.applications_last_action_lines.is_empty() {
+                lines.push(Line::from(format!(
+                    "- {}",
+                    localized(state, "no result yet", "noch kein Ergebnis")
+                )));
+            } else {
+                for item in &state.applications_last_action_lines {
+                    lines.push(Line::from(format!("- {item}")));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(localized(
+                state,
+                "Supported update providers",
+                "Unterstuetzte Update-Quellen",
+            )));
+            lines.push(Line::from("- Homebrew cask"));
+            lines.push(Line::from("- Flatpak"));
+            lines.push(Line::from("- Snap"));
+            lines.push(Line::from(""));
+            lines.push(Line::from(localized(
+                state,
+                "Close: i / Esc | Scroll: j/k / PgUp/PgDn / mouse wheel",
+                "Schliessen: i / Esc | Scroll: j/k / PgUp/PgDn / Mausrad",
+            )));
+            return lines;
+        }
+
         let selected_app = state
             .applications_selected_app()
             .unwrap_or_else(|| "n/a".to_string());
@@ -711,16 +746,6 @@ fn applications_lines(
                 "[ ]"
             };
             lines.push(Line::from(format!("  {marker} {selected} {app_name}")));
-        }
-    }
-
-    if !state.applications_last_action_lines.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(localized(state, "Last action", "Letzte Aktion")));
-        for item in state.applications_last_action_lines.iter().take(12) {
-            for wrapped in wrap_with_prefix("- ", item, content_width) {
-                lines.push(Line::from(wrapped));
-            }
         }
     }
 
@@ -2258,6 +2283,31 @@ mod tests {
         assert!(text.contains("Related paths"));
         assert!(!text.contains("Info target"));
         assert!(!text.contains("Shortcuts"));
+    }
+
+    #[test]
+    fn applications_action_details_use_scrollable_info_popup_content() {
+        let state = AppState {
+            active_view: ActiveView::Applications,
+            applications_show_action_details: true,
+            applications_last_action_lines: vec![
+                "Affinity: no supported updater detected; supported now: Homebrew cask, Flatpak, Snap"
+                    .to_string(),
+                "Anaconda Navigator: update available".to_string(),
+            ],
+            ..AppState::default()
+        };
+
+        let text = build_info_popup_lines(&state)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.starts_with("Application update result"));
+        assert!(text.contains("Anaconda Navigator: update available"));
+        assert!(text.contains("Supported update providers"));
+        assert!(text.contains("Homebrew cask"));
     }
 
     #[test]

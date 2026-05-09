@@ -243,6 +243,7 @@ pub struct AppState {
     pub applications_inventory_metadata: Vec<InstalledApplication>,
     pub applications_inventory_revision: u64,
     pub applications_last_action_lines: Vec<String>,
+    pub applications_show_action_details: bool,
     pub applications_info_target: Option<String>,
     pub applications_info_paths: Vec<String>,
     pub applications_show_paths_in_info: bool,
@@ -301,6 +302,7 @@ impl Default for AppState {
             applications_inventory_metadata: Vec::new(),
             applications_inventory_revision: 0,
             applications_last_action_lines: Vec::new(),
+            applications_show_action_details: false,
             applications_info_target: None,
             applications_info_paths: Vec::new(),
             applications_show_paths_in_info: false,
@@ -468,6 +470,7 @@ impl AppState {
         self.show_info_popup = !self.show_info_popup;
         if self.show_info_popup {
             self.info_popup_scroll = 0;
+            self.applications_show_action_details = false;
             self.applications_show_paths_in_info = false;
         }
     }
@@ -475,6 +478,7 @@ impl AppState {
     pub fn close_info_popup(&mut self) {
         self.show_info_popup = false;
         self.info_popup_scroll = 0;
+        self.applications_show_action_details = false;
         self.applications_show_paths_in_info = false;
     }
 
@@ -621,6 +625,7 @@ impl AppState {
         );
         self.applications_info_target = Some(app_name.to_string());
         self.applications_info_paths.clear();
+        self.applications_show_action_details = false;
         self.last_error = None;
     }
 
@@ -817,6 +822,9 @@ impl AppState {
             self.applications_sync_selection();
         }
         self.applications_last_action_lines = lines;
+        self.applications_show_action_details = !self.applications_last_action_lines.is_empty();
+        self.show_info_popup = self.applications_show_action_details;
+        self.info_popup_scroll = 0;
         self.clear_busy_view_kind(BusyViewKind::Applications);
     }
 
@@ -834,6 +842,9 @@ impl AppState {
         self.applications_inventory.dedup();
         self.applications_sync_selection();
         self.applications_last_action_lines = lines;
+        self.applications_show_action_details = !self.applications_last_action_lines.is_empty();
+        self.show_info_popup = self.applications_show_action_details;
+        self.info_popup_scroll = 0;
         self.clear_busy_view_kind(BusyViewKind::Applications);
     }
 
@@ -854,11 +865,17 @@ impl AppState {
             }
         }
         self.applications_last_action_lines = lines;
+        self.applications_show_action_details = !self.applications_last_action_lines.is_empty();
+        self.show_info_popup = self.applications_show_action_details;
+        self.info_popup_scroll = 0;
         self.clear_busy_view_kind(BusyViewKind::Applications);
     }
 
     pub fn apply_applications_update_status_lines(&mut self, lines: Vec<String>) {
         self.applications_last_action_lines = lines;
+        self.applications_show_action_details = !self.applications_last_action_lines.is_empty();
+        self.show_info_popup = self.applications_show_action_details;
+        self.info_popup_scroll = 0;
         self.last_error = None;
     }
 
@@ -1367,10 +1384,12 @@ fn application_update_status_line(app: &InstalledApplication) -> String {
             }
         }
         AppUpdateAvailability::NotChecked => {
-            format!("{name}: update status was not checked yet; run reanalyze")
+            format!("{name}: update status is not checked for this provider yet")
         }
         AppUpdateAvailability::Unsupported => {
-            format!("{name}: update is not supported for this app source yet")
+            format!(
+                "{name}: no supported updater detected; supported now: Homebrew cask, Flatpak, Snap"
+            )
         }
         AppUpdateAvailability::Unknown => {
             format!("{name}: update status is unknown")

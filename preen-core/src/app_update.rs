@@ -46,7 +46,10 @@ pub fn build_update_plan_for_app(app: &InstalledApplication) -> AppUpdatePlan {
             latest_version: None,
             command_preview: Vec::new(),
             executable: false,
-            reason: Some("application is not managed by a supported package manager".to_string()),
+            reason: Some(
+                "no supported updater detected; supported now: Homebrew cask, Flatpak, Snap"
+                    .to_string(),
+            ),
         };
     };
 
