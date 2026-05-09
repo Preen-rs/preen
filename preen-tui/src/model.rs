@@ -1,6 +1,6 @@
 use crate::i18n::{Language, LanguagePreference, TextKey, detect_system_language, locale, tr};
 use crate::plugin_status::{parse_summary_from_cli_json, render_summary_lines_with_language};
-use preen_core::app_uninstall::InstalledApplication;
+use preen_core::app_uninstall::{AppUpdateAvailability, InstalledApplication};
 pub use preen_core::dashboard::DashboardSnapshot;
 pub use preen_core::smart_care::{
     SmartCareCapability, SmartCarePluginDescriptor, SmartCarePreview, SmartCareProfile,
@@ -665,6 +665,32 @@ impl AppState {
         &self.applications_pending_uninstall
     }
 
+    fn applications_update_targets(&self) -> Vec<String> {
+        let mut targets = self
+            .applications_selected_items
+            .iter()
+            .filter(|app_name| self.applications_can_update(app_name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if targets.is_empty()
+            && let Some(current) = self
+                .applications_selected_app()
+                .filter(|app_name| self.applications_can_update(app_name))
+        {
+            targets.push(current);
+        }
+        targets
+    }
+
+    fn applications_can_update(&self, app_name: &str) -> bool {
+        self.applications_inventory_metadata.iter().any(|app| {
+            app.identity.display_name == app_name
+                && !app.protected
+                && app.update_availability == AppUpdateAvailability::UpdateAvailable
+                && app.package_metadata.is_some()
+        })
+    }
+
     fn applications_metadata_for_name(&self, app_name: &str) -> Option<InstalledApplication> {
         self.applications_inventory_metadata
             .iter()
@@ -718,11 +744,36 @@ impl AppState {
         Ok(applications)
     }
 
+    pub fn applications_update_selected(&self) -> Result<Vec<InstalledApplication>, String> {
+        let targets = self.applications_update_targets();
+        if targets.is_empty() {
+            return Err("no selected application has an available supported update".to_string());
+        }
+        let mut applications = Vec::new();
+        for app_name in targets {
+            let application = self
+                .applications_metadata_for_name(&app_name)
+                .ok_or_else(|| format!("{app_name}: application metadata is unavailable"))?;
+            applications.push(application);
+        }
+        Ok(applications)
+    }
+
     pub fn begin_applications_uninstall_action(&mut self) {
         self.begin_busy_view(
             BusyViewKind::Applications,
             self.tr(TextKey::UninstallingApplicationsTitle),
             self.tr(TextKey::UninstallingApplicationsDetail),
+            self.tr(TextKey::Applications),
+        );
+        self.last_error = None;
+    }
+
+    pub fn begin_applications_update_action(&mut self) {
+        self.begin_busy_view(
+            BusyViewKind::Applications,
+            self.tr(TextKey::UpdatingApplicationsTitle),
+            self.tr(TextKey::UpdatingApplicationsDetail),
             self.tr(TextKey::Applications),
         );
         self.last_error = None;
@@ -770,6 +821,26 @@ impl AppState {
         self.applications_inventory.sort();
         self.applications_inventory.dedup();
         self.applications_sync_selection();
+        self.applications_last_action_lines = lines;
+        self.clear_busy_view_kind(BusyViewKind::Applications);
+    }
+
+    pub fn apply_applications_update_result(
+        &mut self,
+        lines: Vec<String>,
+        updated_apps: Vec<String>,
+    ) {
+        let updated_apps = updated_apps.into_iter().collect::<BTreeSet<_>>();
+        for app in &mut self.applications_inventory_metadata {
+            if updated_apps.contains(&app.identity.display_name) {
+                app.update_availability = AppUpdateAvailability::UpToDate;
+                if let Some(package) = &mut app.package_metadata
+                    && let Some(latest_version) = package.latest_version.clone()
+                {
+                    package.installed_version = Some(latest_version);
+                }
+            }
+        }
         self.applications_last_action_lines = lines;
         self.clear_busy_view_kind(BusyViewKind::Applications);
     }

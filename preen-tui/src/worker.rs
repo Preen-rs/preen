@@ -9,7 +9,7 @@ use preen_os::smart_care::resolve_descriptors_with_report_from_state_dir;
 use preen_os::smart_care_runtime::{
     analyze, execute_from_state_dir, undo_from_state_dir, undo_local_dry_run,
 };
-use preen_os::{app_inventory, app_uninstall};
+use preen_os::{app_inventory, app_uninstall, app_update};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,6 +45,10 @@ pub enum WorkerEvent {
         lines: Vec<String>,
         removed_apps: Vec<String>,
     },
+    ApplicationsUpdateResult {
+        lines: Vec<String>,
+        updated_apps: Vec<String>,
+    },
     ApplicationsUndoResult {
         lines: Vec<String>,
         restored_apps: Vec<String>,
@@ -76,6 +80,9 @@ pub enum WorkerCommand {
     ApplicationsUninstall {
         applications: Vec<InstalledApplication>,
         excluded_paths: Vec<PathBuf>,
+    },
+    ApplicationsUpdate {
+        applications: Vec<InstalledApplication>,
     },
     ApplicationsUndo,
     SmartCareAnalyze {
@@ -173,6 +180,12 @@ impl StatusWorker {
             applications,
             excluded_paths,
         });
+    }
+
+    pub fn run_applications_update(&self, applications: Vec<InstalledApplication>) {
+        let _ = self
+            .command_tx
+            .send(WorkerCommand::ApplicationsUpdate { applications });
     }
 
     pub fn run_applications_undo(&self) {
@@ -379,6 +392,38 @@ fn run_worker_loop(
                                     removed_apps: output.removed_apps,
                                 },
                             );
+                        }
+                        Err(error) => {
+                            let _ = event_tx_for_action.send(WorkerEvent::Error(error));
+                        }
+                    }
+                });
+                continue;
+            }
+            Ok(WorkerCommand::ApplicationsUpdate { applications }) => {
+                if background_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "background action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_action = event_tx.clone();
+                let background_action_running = Arc::clone(&background_action_running);
+                thread::spawn(move || {
+                    let output = app_update::execute_application_updates(applications);
+                    background_action_running.store(false, Ordering::SeqCst);
+                    match output {
+                        Ok(output) => {
+                            let _ =
+                                event_tx_for_action.send(WorkerEvent::ApplicationsUpdateResult {
+                                    lines: output.lines,
+                                    updated_apps: output.updated_apps,
+                                });
                         }
                         Err(error) => {
                             let _ = event_tx_for_action.send(WorkerEvent::Error(error));
@@ -935,6 +980,7 @@ params = {{}}
                 Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
                 | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
                 | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
+                | Ok(WorkerEvent::ApplicationsUpdateResult { .. })
                 | Ok(WorkerEvent::ApplicationsUndoResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
@@ -1044,6 +1090,7 @@ params = {{}}
                 Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
                 | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
                 | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
+                | Ok(WorkerEvent::ApplicationsUpdateResult { .. })
                 | Ok(WorkerEvent::ApplicationsUndoResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
@@ -1099,6 +1146,7 @@ params = {{}}
                 Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
                 | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
                 | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
+                | Ok(WorkerEvent::ApplicationsUpdateResult { .. })
                 | Ok(WorkerEvent::ApplicationsUndoResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
@@ -1142,6 +1190,7 @@ params = {{}}
                 | Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
                 | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
                 | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
+                | Ok(WorkerEvent::ApplicationsUpdateResult { .. })
                 | Ok(WorkerEvent::ApplicationsUndoResult { .. })
                 | Ok(WorkerEvent::PluginActionResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
@@ -1194,6 +1243,7 @@ params = {{}}
                 | Ok(WorkerEvent::ApplicationsInventoryAnalyzeResult { .. })
                 | Ok(WorkerEvent::ApplicationsPathsInspectResult { .. })
                 | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
+                | Ok(WorkerEvent::ApplicationsUpdateResult { .. })
                 | Ok(WorkerEvent::ApplicationsUndoResult { .. })
                 | Ok(WorkerEvent::PluginActionResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. }) => {}

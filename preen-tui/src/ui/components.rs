@@ -155,8 +155,8 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
     let header = Paragraph::new(vec![
         Line::from(localized(
             state,
-            "a analyze | r reanalyze | j/k move | space select | p paths | u uninstall(selected)",
-            "a Analyse | r erneut | j/k bewegen | Leertaste wählen | p Pfade | u deinstallieren",
+            "a analyze | r reanalyze | j/k move | space select | p paths | x update | u uninstall(selected)",
+            "a Analyse | r erneut | j/k bewegen | Leertaste wählen | p Pfade | x aktualisieren | u deinstallieren",
         )),
         Line::from(""),
     ])

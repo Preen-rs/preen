@@ -13,6 +13,7 @@ rust_i18n::i18n!("locales", fallback = "en-US");
 
 pub mod action_runtime;
 pub mod app_uninstall;
+pub mod app_update;
 pub mod check_list_view;
 pub mod dashboard;
 pub mod dashboard_facade;

@@ -94,6 +94,8 @@ pub enum TextKey {
     LoadingApplicationPathsDetail,
     UninstallingApplicationsTitle,
     UninstallingApplicationsDetail,
+    UpdatingApplicationsTitle,
+    UpdatingApplicationsDetail,
     UndoingApplicationsTitle,
     UndoingApplicationsDetail,
     CollectingSnapshot,
@@ -147,6 +149,10 @@ pub fn tr(language: Language, key: TextKey) -> &'static str {
             TextKey::UninstallingApplicationsTitle => "Uninstalling applications",
             TextKey::UninstallingApplicationsDetail => {
                 "Moving selected app files to Trash and writing undo metadata"
+            }
+            TextKey::UpdatingApplicationsTitle => "Updating applications",
+            TextKey::UpdatingApplicationsDetail => {
+                "Running supported package manager updates for selected apps"
             }
             TextKey::UndoingApplicationsTitle => "Restoring applications",
             TextKey::UndoingApplicationsDetail => {
@@ -204,6 +210,10 @@ pub fn tr(language: Language, key: TextKey) -> &'static str {
             TextKey::UninstallingApplicationsTitle => "Anwendungen werden deinstalliert",
             TextKey::UninstallingApplicationsDetail => {
                 "Ausgewählte App-Dateien werden in den Papierkorb bewegt und Undo-Metadaten werden geschrieben"
+            }
+            TextKey::UpdatingApplicationsTitle => "Anwendungen werden aktualisiert",
+            TextKey::UpdatingApplicationsDetail => {
+                "Unterstützte Paketmanager-Updates für ausgewählte Apps werden ausgeführt"
             }
             TextKey::UndoingApplicationsTitle => "Anwendungen werden wiederhergestellt",
             TextKey::UndoingApplicationsDetail => {

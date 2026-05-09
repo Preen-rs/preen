@@ -108,6 +108,13 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                     state.apply_applications_uninstall_result(lines, removed_apps);
                     state.last_error = None;
                 }
+                WorkerEvent::ApplicationsUpdateResult {
+                    lines,
+                    updated_apps,
+                } => {
+                    state.apply_applications_update_result(lines, updated_apps);
+                    state.last_error = None;
+                }
                 WorkerEvent::ApplicationsUndoResult {
                     lines,
                     restored_apps,
@@ -465,10 +472,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                                 if key.modifiers == KeyModifiers::NONE
                                     && matches!(state.active_view, ActiveView::Applications) =>
                             {
-                                state.last_error = Some(
-                                    "update flow is not ready yet; uninstall is available with 'u'"
-                                        .to_string(),
-                                );
+                                dispatch_applications_update(&mut state, &worker);
                             }
                             KeyCode::Char('x')
                                 if key.modifiers == KeyModifiers::NONE
@@ -847,6 +851,22 @@ fn dispatch_applications_uninstall(state: &mut AppState, worker: &StatusWorker) 
     };
     state.begin_applications_uninstall_action();
     worker.run_applications_uninstall(applications, state.sensitive_folders.clone());
+}
+
+fn dispatch_applications_update(state: &mut AppState, worker: &StatusWorker) {
+    if state.is_busy() || state.smart_care_action_running || state.plugin_action_running {
+        state.last_error = Some("background action already running".to_string());
+        return;
+    }
+    let applications = match state.applications_update_selected() {
+        Ok(applications) => applications,
+        Err(error) => {
+            state.last_error = Some(error);
+            return;
+        }
+    };
+    state.begin_applications_update_action();
+    worker.run_applications_update(applications);
 }
 
 fn dispatch_applications_undo(state: &mut AppState, worker: &StatusWorker) {

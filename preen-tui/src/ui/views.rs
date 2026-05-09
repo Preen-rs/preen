@@ -633,8 +633,8 @@ fn applications_lines(
     )));
     lines.push(Line::from(localized(
         state,
-        "Actions: j/k move | space select | p paths | r reanalyze | u uninstall(selected)",
-        "Aktionen: j/k bewegen | Leertaste wählen | p Pfade | r erneut | u deinstallieren",
+        "Actions: j/k move | space select | p paths | r reanalyze | x update | u uninstall(selected)",
+        "Aktionen: j/k bewegen | Leertaste wählen | p Pfade | r erneut | x aktualisieren | u deinstallieren",
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(localized(

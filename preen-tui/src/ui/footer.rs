@@ -270,8 +270,8 @@ fn footer_context_text(state: &AppState) -> String {
         }
         ActiveView::Applications => l(
             language,
-            "Applications: a analyze | r reanalyze | j/k move | space select | p paths | u uninstall(selected) | z undo | i info | ?: keys",
-            "Anwendungen: a analysieren | r erneut | j/k bewegen | Leertaste wählen | p Pfade | u deinstallieren | z rückgängig | i Info | ?: Tasten",
+            "Applications: a analyze | r reanalyze | j/k move | space select | p paths | x update | u uninstall(selected) | z undo | i info | ?: keys",
+            "Anwendungen: a analysieren | r erneut | j/k bewegen | Leertaste wählen | p Pfade | x aktualisieren | u deinstallieren | z rückgängig | i Info | ?: Tasten",
         )
         .to_string(),
         ActiveView::Cleanup | ActiveView::Protection | ActiveView::Performance => format!(
