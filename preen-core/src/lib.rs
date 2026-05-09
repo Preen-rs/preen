@@ -23,6 +23,7 @@ pub mod dashboard_service;
 pub mod dashboard_view;
 pub mod error;
 pub mod metrics;
+pub mod performance_view;
 pub mod plugin;
 pub mod plugin_list_view;
 pub mod plugin_loader;

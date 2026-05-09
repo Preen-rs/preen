@@ -5,6 +5,7 @@ use preen_core::app_uninstall::{
     AppUpdateAvailability, InstalledApplication,
 };
 use preen_core::check_list_view::CheckListView;
+use preen_core::performance_view::PerformanceViewModel;
 use preen_core::plugin_list_view::PluginListView;
 use preen_core::smart_care::{
     SmartCareCapability, SmartCareCapabilityStatus, SmartCarePreview,
@@ -1008,22 +1009,7 @@ fn capability_domain_lines(
             )));
         }
         SmartCareCapability::Performance => {
-            lines.push(Line::from(format!(
-                "- CPU total: {:.1}% | cores: {}",
-                metrics.cpu_usage_pct.unwrap_or(0.0),
-                metrics.cpu_cores.unwrap_or(0)
-            )));
-            lines.push(Line::from(format!(
-                "- Load avg: {:.2} / {:.2} / {:.2}",
-                metrics.load_avg_1m.unwrap_or(0.0),
-                metrics.load_avg_5m.unwrap_or(0.0),
-                metrics.load_avg_15m.unwrap_or(0.0)
-            )));
-            lines.push(Line::from(format!(
-                "- Memory used: {:.1}% | processes: {}",
-                metrics.memory_used_pct.unwrap_or(0.0),
-                metrics.process_count.unwrap_or(0)
-            )));
+            lines.extend(performance_domain_lines(snapshot, state));
         }
         SmartCareCapability::Applications => {
             lines.push(Line::from(format!(
@@ -1091,6 +1077,83 @@ fn capability_domain_lines(
         )));
     }
     lines
+}
+
+fn performance_domain_lines(snapshot: &DashboardSnapshot, state: &AppState) -> Vec<Line<'static>> {
+    let model = PerformanceViewModel::from_snapshot(snapshot);
+    let mut lines = vec![
+        Line::from(format!(
+            "- System pressure: {} | bottleneck: {}",
+            model.overall_level.label(),
+            model.primary_bottleneck
+        )),
+        Line::from(format!(
+            "- CPU: {} | load/core: {} | temp: {}",
+            optional_percent(model.cpu_usage_pct),
+            optional_decimal(model.load_per_core),
+            optional_temperature(model.cpu_temperature_c)
+        )),
+        Line::from(format!(
+            "- Memory: {} | pressure: {} | processes: {}",
+            optional_percent(model.memory_used_pct),
+            model.memory_pressure.as_deref().unwrap_or("n/a"),
+            model
+                .process_count
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
+        )),
+        Line::from(format!(
+            "- Disk I/O: {}",
+            model
+                .disk_io_rate_mbps
+                .map(|value| format!("{value:.2} MB/s"))
+                .unwrap_or_else(|| "n/a".to_string())
+        )),
+        Line::from(""),
+        Line::from("Top process pressure"),
+    ];
+
+    if model.top_processes.is_empty() {
+        lines.push(Line::from("- no process sample"));
+    } else {
+        for process in model.top_processes {
+            lines.push(Line::from(format!(
+                "- {:<18} cpu={:>5.1}% mem={:>5.1}%",
+                truncate_with_ellipsis(&process.name, 18),
+                process.cpu_pct,
+                process.memory_pct
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(localized(
+        state,
+        "Recommendations",
+        "Empfehlungen",
+    )));
+    for item in model.recommendations {
+        lines.push(Line::from(format!("- {item}")));
+    }
+    lines
+}
+
+fn optional_percent(value: Option<f64>) -> String {
+    value
+        .map(|item| format!("{item:.1}%"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn optional_decimal(value: Option<f64>) -> String {
+    value
+        .map(|item| format!("{item:.2}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn optional_temperature(value: Option<f64>) -> String {
+    value
+        .map(|item| format!("{item:.1}C"))
+        .unwrap_or_else(|| "n/a".to_string())
 }
 
 fn disk_used_pct(snapshot: &DashboardSnapshot) -> Option<f64> {
@@ -2169,7 +2232,8 @@ mod tests {
     };
     use preen_core::dashboard::{
         CheckSeverity, DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
-        DashboardMetrics, DashboardSnapshot, PluginRow, RegistrySummary, StatusCheck,
+        DashboardMetrics, DashboardSnapshot, PluginRow, ProcessMetric, RegistrySummary,
+        StatusCheck,
     };
     use preen_core::smart_care::{SmartCareCapability, SmartCarePluginDescriptor};
     use std::path::PathBuf;
@@ -2470,6 +2534,44 @@ mod tests {
         assert!(text.contains("preen-rs.cleanup.base@1.0.0"));
         assert!(text.contains("Plugins: matched=1 trusted=1 skipped=0"));
         assert!(text.contains("Plugin command: plugin install: unknown (details: i)"));
+    }
+
+    #[test]
+    fn performance_capability_lines_show_pressure_and_top_processes() {
+        let mut snapshot = base_snapshot();
+        snapshot.metrics = DashboardMetrics {
+            cpu_usage_pct: Some(91.0),
+            cpu_cores: Some(8),
+            load_avg_1m: Some(9.2),
+            memory_used_pct: Some(74.0),
+            memory_pressure: Some("elevated".to_string()),
+            process_count: Some(512),
+            disk_read_rate_mbps: Some(12.0),
+            disk_write_rate_mbps: Some(3.0),
+            top_processes: vec![ProcessMetric {
+                name: "Arc Helper".to_string(),
+                cpu_pct: 66.0,
+                memory_pct: 4.5,
+            }],
+            ..DashboardMetrics::default()
+        };
+        let state = AppState {
+            active_view: ActiveView::Performance,
+            ..AppState::default()
+        };
+
+        let lines = capability_lines(&state, &snapshot, 120);
+        let text = lines
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Performance capability"));
+        assert!(text.contains("System pressure: high | bottleneck: CPU (high)"));
+        assert!(text.contains("Top process pressure"));
+        assert!(text.contains("Arc Helper"));
+        assert!(text.contains("Recommendations"));
     }
 
     #[test]
