@@ -5,12 +5,14 @@ use crate::app_uninstall::{AppPackageManager, InstalledApplication};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppUpdatePlan {
     pub app_name: String,
+    pub app_path: String,
     pub package_id: String,
     pub manager: AppPackageManager,
     pub installed_version: Option<String>,
     pub latest_version: Option<String>,
     pub command_preview: Vec<String>,
     pub executable: bool,
+    pub confirms_update_on_success: bool,
     pub reason: Option<String>,
 }
 
@@ -40,27 +42,32 @@ pub fn build_update_plan_for_app(app: &InstalledApplication) -> AppUpdatePlan {
     let Some(package) = &app.package_metadata else {
         return AppUpdatePlan {
             app_name,
+            app_path: app.path.clone(),
             package_id: String::new(),
             manager: AppPackageManager::Unknown,
             installed_version: app.version.clone(),
             latest_version: None,
             command_preview: Vec::new(),
             executable: false,
+            confirms_update_on_success: false,
             reason: Some(
-                "no supported executable updater detected; executable now: Homebrew cask, Flatpak, Snap; Mac App Store and Sparkle detection are native"
+                "no supported updater detected; executable now: Homebrew cask, Flatpak, Snap, Mac App Store native flow, Sparkle native flow"
                     .to_string(),
             ),
         };
     };
 
-    let (command_preview, executable, reason) = update_command_for_package(
-        &package.manager,
-        &package.package_id,
-        package.update_command.as_deref(),
-    );
+    let (command_preview, executable, confirms_update_on_success, reason) =
+        update_command_for_package(
+            &package.manager,
+            &package.package_id,
+            &app.path,
+            package.update_command.as_deref(),
+        );
 
     AppUpdatePlan {
         app_name,
+        app_path: app.path.clone(),
         package_id: package.package_id.clone(),
         manager: package.manager.clone(),
         installed_version: package
@@ -70,6 +77,7 @@ pub fn build_update_plan_for_app(app: &InstalledApplication) -> AppUpdatePlan {
         latest_version: package.latest_version.clone(),
         command_preview,
         executable,
+        confirms_update_on_success,
         reason,
     }
 }
@@ -83,11 +91,13 @@ pub fn build_update_batch_plan(applications: &[InstalledApplication]) -> AppUpda
 fn update_command_for_package(
     manager: &AppPackageManager,
     package_id: &str,
+    app_path: &str,
     inventory_command: Option<&str>,
-) -> (Vec<String>, bool, Option<String>) {
+) -> (Vec<String>, bool, bool, Option<String>) {
     if package_id.trim().is_empty() {
         return (
             Vec::new(),
+            false,
             false,
             Some("package id is unavailable".to_string()),
         );
@@ -102,36 +112,23 @@ fn update_command_for_package(
                 package_id.to_string(),
             ],
             true,
+            true,
             None,
         ),
         AppPackageManager::MacAppStore => (
-            inventory_command
-                .map(split_command_preview)
-                .unwrap_or_else(|| {
-                    vec![
-                        "app-store".to_string(),
-                        "update".to_string(),
-                        package_id.to_string(),
-                    ]
-                }),
+            vec![
+                "open".to_string(),
+                "macappstore://showUpdatesPage".to_string(),
+            ],
+            true,
             false,
-            Some(
-                "Mac App Store update detection is native; execution needs the App Store update helper"
-                    .to_string(),
-            ),
+            None,
         ),
         AppPackageManager::Sparkle => (
-            inventory_command
-                .map(split_command_preview)
-                .unwrap_or_else(|| {
-                    vec![
-                        "sparkle".to_string(),
-                        "update".to_string(),
-                        package_id.to_string(),
-                    ]
-                }),
+            vec!["open".to_string(), app_path.to_string()],
+            true,
             false,
-            Some("Sparkle update detection is native; execution needs the Sparkle update helper".to_string()),
+            None,
         ),
         AppPackageManager::Flatpak => (
             vec![
@@ -140,6 +137,7 @@ fn update_command_for_package(
                 "-y".to_string(),
                 package_id.to_string(),
             ],
+            true,
             true,
             None,
         ),
@@ -150,6 +148,7 @@ fn update_command_for_package(
                 package_id.to_string(),
             ],
             true,
+            true,
             None,
         ),
         AppPackageManager::Apt | AppPackageManager::Dnf | AppPackageManager::Pacman => (
@@ -157,10 +156,12 @@ fn update_command_for_package(
                 .map(split_command_preview)
                 .unwrap_or_else(Vec::new),
             false,
+            false,
             Some("system package updates require an elevated update flow".to_string()),
         ),
         AppPackageManager::Unknown => (
             Vec::new(),
+            false,
             false,
             Some("package manager is unknown".to_string()),
         ),
@@ -209,6 +210,7 @@ mod tests {
         let plan = build_update_plan_for_app(&app_with_manager(AppPackageManager::HomebrewCask));
 
         assert!(plan.executable);
+        assert!(plan.confirms_update_on_success);
         assert_eq!(plan.command_preview, ["brew", "upgrade", "--cask", "demo"]);
         assert_eq!(plan.latest_version.as_deref(), Some("2.0"));
     }
@@ -222,20 +224,25 @@ mod tests {
     }
 
     #[test]
-    fn mac_app_store_plan_is_detectable_but_waits_for_native_helper() {
+    fn mac_app_store_plan_opens_native_update_flow() {
         let plan = build_update_plan_for_app(&app_with_manager(AppPackageManager::MacAppStore));
 
-        assert!(!plan.executable);
-        assert_eq!(plan.command_preview, ["app-store", "update", "demo"]);
-        assert!(plan.reason.unwrap().contains("App Store update helper"));
+        assert!(plan.executable);
+        assert!(!plan.confirms_update_on_success);
+        assert_eq!(
+            plan.command_preview,
+            ["open", "macappstore://showUpdatesPage"]
+        );
+        assert!(plan.reason.is_none());
     }
 
     #[test]
-    fn sparkle_plan_is_detectable_but_waits_for_native_helper() {
+    fn sparkle_plan_opens_native_update_flow() {
         let plan = build_update_plan_for_app(&app_with_manager(AppPackageManager::Sparkle));
 
-        assert!(!plan.executable);
-        assert_eq!(plan.command_preview, ["sparkle", "update", "demo"]);
-        assert!(plan.reason.unwrap().contains("Sparkle update helper"));
+        assert!(plan.executable);
+        assert!(!plan.confirms_update_on_success);
+        assert_eq!(plan.command_preview, ["open", "/Applications/Demo.app"]);
+        assert!(plan.reason.is_none());
     }
 }

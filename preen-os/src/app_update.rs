@@ -34,12 +34,21 @@ pub fn execute_application_updates(
 
         match execute_update_plan(&update) {
             Ok(output) if output.status.success() => {
-                updated_apps.push(update.app_name.clone());
-                lines.push(format!(
-                    "updated: {} via {}",
-                    update.app_name,
-                    update_manager_label(&update.manager)
-                ));
+                if update.confirms_update_on_success {
+                    updated_apps.push(update.app_name.clone());
+                    lines.push(format!(
+                        "updated: {} via {}",
+                        update.app_name,
+                        update_manager_label(&update.manager)
+                    ));
+                } else {
+                    lines.push(format!(
+                        "opened: {} native update flow via {}",
+                        update.app_name,
+                        update_manager_label(&update.manager)
+                    ));
+                    lines.push("  finish the updater prompt, then run reanalyze".to_string());
+                }
                 append_command_output(&mut lines, &output);
             }
             Ok(output) => {
@@ -106,6 +115,7 @@ fn executable_for_update_manager(
 ) -> Result<PathBuf, String> {
     let paths = match manager {
         AppPackageManager::HomebrewCask => &["/opt/homebrew/bin/brew", "/usr/local/bin/brew"][..],
+        AppPackageManager::MacAppStore | AppPackageManager::Sparkle => &["/usr/bin/open"][..],
         AppPackageManager::Flatpak => &["/usr/bin/flatpak", "/usr/local/bin/flatpak"][..],
         AppPackageManager::Snap => &["/usr/bin/snap", "/snap/bin/snap"][..],
         _ => &[][..],
