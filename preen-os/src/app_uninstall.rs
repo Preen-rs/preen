@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const APP_UNINSTALL_JOURNAL_SCHEMA_VERSION: u32 = 1;
 const APP_UNINSTALL_JOURNAL_FILE: &str = "app-uninstall-last.toml";
@@ -181,6 +184,12 @@ pub fn execute_app_uninstall_with_options(
 
     for application in applications {
         let app_name = application.identity.display_name.clone();
+        if is_application_running(&application) {
+            lines.push(format!(
+                "{app_name}: running application skipped; quit it before uninstall"
+            ));
+            continue;
+        }
         let plan = build_uninstall_plan_for_application_with_options(application, options);
         if plan.protected {
             lines.push(format!("{app_name}: protected system application skipped"));
@@ -241,6 +250,80 @@ pub fn execute_app_uninstall_with_options(
         lines,
         removed_apps,
         records,
+    })
+}
+
+fn is_application_running(application: &InstalledApplication) -> bool {
+    let Some(pgrep) = find_executable_in_common_paths("pgrep", &["/usr/bin/pgrep", "/bin/pgrep"])
+    else {
+        return false;
+    };
+    let display_name = application.identity.display_name.trim();
+    if display_name.is_empty() {
+        return false;
+    }
+
+    let exact_status = run_probe_command_with_timeout(
+        command_with_args(&pgrep, &["-x", display_name]),
+        Duration::from_millis(250),
+    );
+    if exact_status.is_some_and(|status| status) {
+        return true;
+    }
+
+    if !application.path.trim().is_empty() {
+        let path_status = run_probe_command_with_timeout(
+            command_with_args(&pgrep, &["-f", application.path.as_str()]),
+            Duration::from_millis(250),
+        );
+        return path_status.unwrap_or(false);
+    }
+    false
+}
+
+fn command_with_args(program: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command.args(args);
+    command
+}
+
+fn run_probe_command_with_timeout(mut command: Command, timeout: Duration) -> Option<bool> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn find_executable_in_common_paths(name: &str, absolute_paths: &[&str]) -> Option<PathBuf> {
+    for path in absolute_paths {
+        let candidate = PathBuf::from(path);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
     })
 }
 
@@ -584,6 +667,7 @@ mod tests {
             identity: AppIdentity::macos("Demo"),
             path: app_path.to_string_lossy().to_string(),
             version: None,
+            inventory_metadata: None,
             source: AppSource::System,
             estimated_size: 0,
             last_used_at: None,
@@ -699,6 +783,7 @@ mod tests {
                 identity: AppIdentity::macos("Demo"),
                 path: app_path.to_string_lossy().to_string(),
                 version: None,
+                inventory_metadata: None,
                 source: AppSource::User,
                 estimated_size: 0,
                 last_used_at: None,
@@ -741,6 +826,7 @@ mod tests {
                 identity: AppIdentity::macos("Chrome"),
                 path: app_path.to_string_lossy().to_string(),
                 version: None,
+                inventory_metadata: None,
                 source: AppSource::User,
                 estimated_size: 0,
                 last_used_at: None,

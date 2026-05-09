@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use preen_core::app_uninstall::{
-    AppIdentity, AppManagementSource, AppPackageDetectionConfidence, AppPackageManager,
-    AppPackageMetadata, AppSource, AppUpdateAvailability, InstalledApplication,
+    AppIdentity, AppInventoryMetadata, AppManagementSource, AppPackageDetectionConfidence,
+    AppPackageManager, AppPackageMetadata, AppSource, AppUpdateAvailability, InstalledApplication,
     normalize_app_match_key,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -102,6 +102,7 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                     .get("SUFeedURL")
                     .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
                     .cloned(),
+                plist,
                 source: source.clone(),
                 protected,
             });
@@ -149,6 +150,11 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
             identity: candidate.identity,
             path: path_string,
             version: candidate.version,
+            inventory_metadata: Some(macos_inventory_metadata(
+                &candidate.path,
+                &candidate.plist,
+                app_store_snapshot.as_ref(),
+            )),
             source: candidate.source,
             estimated_size: estimated_path_size(&candidate.path, include_sizes),
             last_used_at: if include_sizes {
@@ -172,6 +178,7 @@ struct MacosApplicationCandidate {
     path: PathBuf,
     version: Option<String>,
     sparkle_feed_url: Option<String>,
+    plist: BTreeMap<String, String>,
     source: AppSource,
     protected: bool,
 }
@@ -214,6 +221,7 @@ fn collect_linux_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                 identity,
                 path: path.to_string_lossy().to_string(),
                 version: desktop.get("X-Version").cloned(),
+                inventory_metadata: None,
                 source: source.clone(),
                 estimated_size: estimated_path_size(&path, include_sizes),
                 last_used_at: if include_sizes {
@@ -258,6 +266,54 @@ fn linux_application_dirs() -> Vec<(PathBuf, AppSource)> {
 }
 
 fn parse_macos_info_plist(path: &Path) -> BTreeMap<String, String> {
+    if let Some(values) = parse_macos_info_plist_with_plutil(path) {
+        return values;
+    }
+    parse_macos_info_plist_xml(path)
+}
+
+fn parse_macos_info_plist_with_plutil(path: &Path) -> Option<BTreeMap<String, String>> {
+    let plutil = find_executable_in_common_paths("plutil", &["/usr/bin/plutil"])?;
+    let output = run_inventory_command_with_timeout(
+        command_with_args(&plutil, &["-convert", "json", "-o", "-", path.to_str()?]),
+        METADATA_COMMAND_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_macos_info_plist_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_macos_info_plist_json(output: &str) -> Option<BTreeMap<String, String>> {
+    let root = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    let object = root.as_object()?;
+    let mut values = BTreeMap::new();
+    for (key, value) in object {
+        if let Some(value) = plist_json_value_to_string(value) {
+            values.insert(key.clone(), value);
+        }
+    }
+    Some(values)
+}
+
+fn plist_json_value_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Array(values) => {
+            let flattened = values
+                .iter()
+                .filter_map(plist_json_value_to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            (!flattened.is_empty()).then_some(flattened)
+        }
+        _ => None,
+    }
+}
+
+fn parse_macos_info_plist_xml(path: &Path) -> BTreeMap<String, String> {
     let Ok(content) = fs::read_to_string(path) else {
         return BTreeMap::new();
     };
@@ -269,13 +325,44 @@ fn parse_macos_info_plist(path: &Path) -> BTreeMap<String, String> {
             pending_key = Some(key);
             continue;
         }
-        if let Some(key) = pending_key.take()
-            && let Some(value) = extract_xml_tag_value(line, "string")
+        if let Some(key) = pending_key.as_ref()
+            && let Some(value) = extract_macos_plist_scalar_value(line)
         {
-            values.insert(key, value);
+            values.insert(key.clone(), value);
+            pending_key = None;
         }
     }
     values
+}
+
+fn macos_inventory_metadata(
+    path: &Path,
+    plist: &BTreeMap<String, String>,
+    app_store: Option<&MacAppStoreSnapshot>,
+) -> AppInventoryMetadata {
+    let short_version = plist.get("CFBundleShortVersionString").map(String::as_str);
+    let build_number = plist
+        .get("CFBundleVersion")
+        .filter(|value| Some(value.as_str()) != short_version)
+        .cloned();
+    AppInventoryMetadata {
+        build_number,
+        architecture: plist
+            .get("LSArchitecturePriority")
+            .or_else(|| plist.get("LSRequiresNativeExecution"))
+            .cloned(),
+        team_id: plist
+            .get("TeamIdentifier")
+            .or_else(|| plist.get("ApplicationIdentifierPrefix"))
+            .cloned(),
+        app_store_id: app_store.and_then(|snapshot| snapshot.adam_id_for_path(path)),
+        sparkle_feed_url: plist.get("SUFeedURL").cloned(),
+        bundle_package_type: plist.get("CFBundlePackageType").cloned(),
+        content_modified_at: fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .map(system_time_to_utc),
+    }
 }
 
 fn parse_desktop_entry(content: &str) -> BTreeMap<String, String> {
@@ -329,6 +416,14 @@ fn extract_xml_tag_value(line: &str, tag: &str) -> Option<String> {
     let start = line.find(&open)? + open.len();
     let end = line[start..].find(&close)? + start;
     Some(unescape_basic_xml(&line[start..end]))
+}
+
+fn extract_macos_plist_scalar_value(line: &str) -> Option<String> {
+    extract_xml_tag_value(line, "string")
+        .or_else(|| extract_xml_tag_value(line, "integer"))
+        .or_else(|| extract_xml_tag_value(line, "real"))
+        .or_else(|| line.contains("<true/>").then(|| "true".to_string()))
+        .or_else(|| line.contains("<false/>").then(|| "false".to_string()))
 }
 
 fn extract_xml_attribute_value(input: &str, name: &str) -> Option<String> {
@@ -574,6 +669,12 @@ struct MacAppStoreMetadata {
 }
 
 impl MacAppStoreSnapshot {
+    fn adam_id_for_path(&self, path: &Path) -> Option<String> {
+        self.apps_by_path
+            .get(&path_key(path))
+            .map(|metadata| metadata.adam_id.clone())
+    }
+
     fn app_update_availability(&self, path: &Path) -> AppUpdateAvailability {
         let Some(metadata) = self.apps_by_path.get(&path_key(path)) else {
             return AppUpdateAvailability::NotChecked;
@@ -1449,6 +1550,65 @@ mod tests {
         assert_eq!(
             values.get("CFBundleIdentifier").map(String::as_str),
             Some("com.example.demo")
+        );
+    }
+
+    #[test]
+    fn parses_info_plist_json_scalar_values() {
+        let values = parse_macos_info_plist_json(
+            r#"{
+  "CFBundleName": "Demo",
+  "CFBundleVersion": 42,
+  "LSRequiresNativeExecution": true,
+  "LSArchitecturePriority": ["arm64", "x86_64"]
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(values.get("CFBundleName").map(String::as_str), Some("Demo"));
+        assert_eq!(
+            values.get("CFBundleVersion").map(String::as_str),
+            Some("42")
+        );
+        assert_eq!(
+            values.get("LSRequiresNativeExecution").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            values.get("LSArchitecturePriority").map(String::as_str),
+            Some("arm64,x86_64")
+        );
+    }
+
+    #[test]
+    fn fallback_info_plist_parser_reads_non_string_scalars() {
+        let dir = tempfile::tempdir().unwrap();
+        let plist = dir.path().join("Info.plist");
+        fs::write(
+            &plist,
+            r#"<?xml version="1.0"?>
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>Demo</string>
+  <key>CFBundleVersion</key>
+  <integer>42</integer>
+  <key>LSRequiresNativeExecution</key>
+  <true/>
+</dict>
+</plist>"#,
+        )
+        .unwrap();
+
+        let values = parse_macos_info_plist_xml(&plist);
+        assert_eq!(values.get("CFBundleName").map(String::as_str), Some("Demo"));
+        assert_eq!(
+            values.get("CFBundleVersion").map(String::as_str),
+            Some("42")
+        );
+        assert_eq!(
+            values.get("LSRequiresNativeExecution").map(String::as_str),
+            Some("true")
         );
     }
 

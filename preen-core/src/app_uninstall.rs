@@ -63,6 +63,8 @@ pub struct InstalledApplication {
     pub identity: AppIdentity,
     pub path: String,
     pub version: Option<String>,
+    #[serde(default)]
+    pub inventory_metadata: Option<AppInventoryMetadata>,
     pub source: AppSource,
     pub estimated_size: u64,
     pub last_used_at: Option<DateTime<Utc>>,
@@ -70,6 +72,17 @@ pub struct InstalledApplication {
     pub update_availability: AppUpdateAvailability,
     pub package_metadata: Option<AppPackageMetadata>,
     pub protected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AppInventoryMetadata {
+    pub build_number: Option<String>,
+    pub architecture: Option<String>,
+    pub team_id: Option<String>,
+    pub app_store_id: Option<String>,
+    pub sparkle_feed_url: Option<String>,
+    pub bundle_package_type: Option<String>,
+    pub content_modified_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,6 +311,7 @@ mod tests {
             identity: AppIdentity::macos("Preview"),
             path: "/System/Applications/Preview.app".to_string(),
             version: Some("11.0".to_string()),
+            inventory_metadata: None,
             source: AppSource::System,
             estimated_size: 42,
             last_used_at: None,

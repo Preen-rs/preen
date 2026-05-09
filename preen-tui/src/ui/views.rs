@@ -438,6 +438,43 @@ fn push_application_detail_lines(
         localized(state, "Version", "Version"),
         application.version.as_deref().unwrap_or("n/a")
     )));
+    if let Some(metadata) = &application.inventory_metadata {
+        if let Some(build) = &metadata.build_number {
+            lines.push(Line::from(format!(
+                "- {}: {}",
+                localized(state, "Build", "Build"),
+                build
+            )));
+        }
+        if let Some(architecture) = &metadata.architecture {
+            lines.push(Line::from(format!(
+                "- {}: {}",
+                localized(state, "Architecture", "Architektur"),
+                architecture
+            )));
+        }
+        if let Some(team_id) = &metadata.team_id {
+            lines.push(Line::from(format!(
+                "- {}: {}",
+                localized(state, "Team id", "Team-ID"),
+                team_id
+            )));
+        }
+        if let Some(app_store_id) = &metadata.app_store_id {
+            lines.push(Line::from(format!(
+                "- {}: {}",
+                localized(state, "App Store id", "App-Store-ID"),
+                app_store_id
+            )));
+        }
+        if let Some(bundle_package_type) = &metadata.bundle_package_type {
+            lines.push(Line::from(format!(
+                "- {}: {}",
+                localized(state, "Bundle type", "Bundle-Typ"),
+                bundle_package_type
+            )));
+        }
+    }
     lines.push(Line::from(format!(
         "- {}: {}",
         localized(state, "Source", "Quelle"),
@@ -2227,8 +2264,9 @@ mod tests {
     use crate::i18n::LanguagePreference;
     use crate::model::{ActiveView, AppState, PluginActionKind};
     use preen_core::app_uninstall::{
-        AppIdentity, AppManagementSource, AppPackageDetectionConfidence, AppPackageManager,
-        AppPackageMetadata, AppSource, AppUpdateAvailability, InstalledApplication,
+        AppIdentity, AppInventoryMetadata, AppManagementSource, AppPackageDetectionConfidence,
+        AppPackageManager, AppPackageMetadata, AppSource, AppUpdateAvailability,
+        InstalledApplication,
     };
     use preen_core::dashboard::{
         CheckSeverity, DASHBOARD_SNAPSHOT_CONTRACT, DASHBOARD_SNAPSHOT_SCHEMA_VERSION,
@@ -2329,6 +2367,15 @@ mod tests {
                 identity: AppIdentity::macos("Affinity"),
                 path: "/Applications/Affinity.app".to_string(),
                 version: Some("2.6.0".to_string()),
+                inventory_metadata: Some(AppInventoryMetadata {
+                    build_number: Some("26042".to_string()),
+                    architecture: Some("arm64,x86_64".to_string()),
+                    team_id: Some("6LVTQB9699".to_string()),
+                    app_store_id: None,
+                    sparkle_feed_url: None,
+                    bundle_package_type: Some("APPL".to_string()),
+                    content_modified_at: None,
+                }),
                 source: AppSource::User,
                 estimated_size: 1_073_741_824,
                 last_used_at: None,
@@ -2362,6 +2409,9 @@ mod tests {
         assert!(text.starts_with("Application details"));
         assert!(!text.starts_with("Affinity\n"));
         assert!(text.contains("- Version: 2.6.0"));
+        assert!(text.contains("- Build: 26042"));
+        assert!(text.contains("- Architecture: arm64,x86_64"));
+        assert!(text.contains("- Team id: 6LVTQB9699"));
         assert!(text.contains("- Estimated size: 1.0GB"));
         assert!(text.contains("- Last used: unknown"));
         assert!(text.contains("- Managed by: manual/local"));

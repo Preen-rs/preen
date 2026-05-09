@@ -193,6 +193,7 @@ mod tests {
             identity: AppIdentity::macos("Demo"),
             path: "/Applications/Demo.app".to_string(),
             version: Some("1.0".to_string()),
+            inventory_metadata: None,
             source: AppSource::Local,
             estimated_size: 0,
             last_used_at: None,
