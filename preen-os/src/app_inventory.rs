@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 const MAX_DISCOVERED_APPS: usize = 400;
 const INVENTORY_COMMAND_TIMEOUT: Duration = Duration::from_millis(1_500);
 const METADATA_COMMAND_TIMEOUT: Duration = Duration::from_millis(300);
+const APP_STORE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(2_000);
 
 pub fn collect_installed_applications() -> Vec<InstalledApplication> {
     collect_installed_applications_with_options(true)
@@ -59,7 +60,7 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
         roots.push((home.join("Applications"), AppSource::User, false));
     }
 
-    let mut apps = Vec::new();
+    let mut discovered = Vec::new();
     let homebrew_casks = include_sizes.then(homebrew_cask_snapshot).flatten();
     for (root, source, protected) in roots {
         let Ok(entries) = fs::read_dir(&root) else {
@@ -87,50 +88,79 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                 .unwrap_or_else(|| fallback_name.to_string());
             let mut identity = AppIdentity::macos(display_name);
             identity.bundle_identifier = plist.get("CFBundleIdentifier").cloned();
-            let management_source = macos_management_source(
-                &path,
-                &source,
-                protected,
-                &identity,
-                homebrew_casks.as_ref(),
-            );
-            let update_availability = macos_update_availability(
-                &path,
-                &source,
-                protected,
-                &identity,
-                homebrew_casks.as_ref(),
-            );
-            let package_metadata = macos_package_metadata(
-                &path,
-                &source,
-                protected,
-                &identity,
-                homebrew_casks.as_ref(),
-            );
 
-            apps.push(InstalledApplication {
+            discovered.push(MacosApplicationCandidate {
                 identity,
-                path: path.to_string_lossy().to_string(),
+                path,
                 version: plist
                     .get("CFBundleShortVersionString")
                     .or_else(|| plist.get("CFBundleVersion"))
                     .cloned(),
                 source: source.clone(),
-                estimated_size: estimated_path_size(&path, include_sizes),
-                last_used_at: if include_sizes {
-                    macos_last_used_at(&path).or_else(|| filesystem_last_used_at(&path))
-                } else {
-                    None
-                },
-                management_source,
-                update_availability,
-                package_metadata,
                 protected,
             });
         }
     }
+    let app_store_snapshot = include_sizes
+        .then(|| mac_app_store_snapshot(&discovered))
+        .flatten();
+
+    let mut apps = Vec::new();
+    for candidate in discovered {
+        let management_source = macos_management_source(
+            &candidate.path,
+            &candidate.source,
+            candidate.protected,
+            &candidate.identity,
+            homebrew_casks.as_ref(),
+        );
+        let update_availability = macos_update_availability(
+            &candidate.path,
+            &candidate.source,
+            candidate.protected,
+            &candidate.identity,
+            homebrew_casks.as_ref(),
+            app_store_snapshot.as_ref(),
+        );
+        let package_metadata = macos_package_metadata(
+            &candidate.path,
+            &candidate.source,
+            candidate.protected,
+            &candidate.identity,
+            candidate.version.as_deref(),
+            homebrew_casks.as_ref(),
+            app_store_snapshot.as_ref(),
+        );
+        let path_string = candidate.path.to_string_lossy().to_string();
+
+        apps.push(InstalledApplication {
+            identity: candidate.identity,
+            path: path_string,
+            version: candidate.version,
+            source: candidate.source,
+            estimated_size: estimated_path_size(&candidate.path, include_sizes),
+            last_used_at: if include_sizes {
+                macos_last_used_at(&candidate.path)
+                    .or_else(|| filesystem_last_used_at(&candidate.path))
+            } else {
+                None
+            },
+            management_source,
+            update_availability,
+            package_metadata,
+            protected: candidate.protected,
+        });
+    }
     apps
+}
+
+#[derive(Debug, Clone)]
+struct MacosApplicationCandidate {
+    identity: AppIdentity,
+    path: PathBuf,
+    version: Option<String>,
+    source: AppSource,
+    protected: bool,
 }
 
 fn collect_linux_applications(include_sizes: bool) -> Vec<InstalledApplication> {
@@ -359,10 +389,13 @@ fn macos_update_availability(
     protected: bool,
     identity: &AppIdentity,
     casks: Option<&HomebrewCaskSnapshot>,
+    app_store: Option<&MacAppStoreSnapshot>,
 ) -> AppUpdateAvailability {
     match macos_management_source(path, source, protected, identity, casks) {
         AppManagementSource::System => AppUpdateAvailability::Unsupported,
-        AppManagementSource::AppStore => AppUpdateAvailability::NotChecked,
+        AppManagementSource::AppStore => app_store
+            .map(|snapshot| snapshot.app_update_availability(path))
+            .unwrap_or(AppUpdateAvailability::NotChecked),
         AppManagementSource::PackageManager => casks
             .map(|snapshot| {
                 if snapshot.app_has_update(identity, path) {
@@ -382,10 +415,15 @@ fn macos_package_metadata(
     source: &AppSource,
     protected: bool,
     identity: &AppIdentity,
+    installed_version: Option<&str>,
     casks: Option<&HomebrewCaskSnapshot>,
+    app_store: Option<&MacAppStoreSnapshot>,
 ) -> Option<AppPackageMetadata> {
     if protected || matches!(source, AppSource::System) {
         return None;
+    }
+    if path.join("Contents/_MASReceipt/receipt").is_file() {
+        return app_store.and_then(|snapshot| snapshot.package_metadata(path, installed_version));
     }
     casks.and_then(|snapshot| snapshot.package_metadata(identity, path))
 }
@@ -460,6 +498,205 @@ fn linux_package_metadata(
         });
     }
     package_updates.and_then(|snapshot| snapshot.package_metadata(identity, desktop))
+}
+
+#[derive(Debug, Clone, Default)]
+struct MacAppStoreSnapshot {
+    apps_by_path: BTreeMap<String, MacAppStoreMetadata>,
+}
+
+#[derive(Debug, Clone)]
+struct MacAppStoreMetadata {
+    adam_id: String,
+    installed_version: Option<String>,
+    latest_version: Option<String>,
+}
+
+impl MacAppStoreSnapshot {
+    fn app_update_availability(&self, path: &Path) -> AppUpdateAvailability {
+        let Some(metadata) = self.apps_by_path.get(&path_key(path)) else {
+            return AppUpdateAvailability::NotChecked;
+        };
+        match (
+            metadata.installed_version.as_deref(),
+            metadata.latest_version.as_deref(),
+        ) {
+            (Some(installed), Some(latest)) if app_store_version_is_newer(installed, latest) => {
+                AppUpdateAvailability::UpdateAvailable
+            }
+            (Some(_), Some(_)) => AppUpdateAvailability::UpToDate,
+            _ => AppUpdateAvailability::NotChecked,
+        }
+    }
+
+    fn package_metadata(
+        &self,
+        path: &Path,
+        installed_version: Option<&str>,
+    ) -> Option<AppPackageMetadata> {
+        let metadata = self.apps_by_path.get(&path_key(path))?;
+        Some(AppPackageMetadata {
+            manager: AppPackageManager::MacAppStore,
+            package_id: metadata.adam_id.clone(),
+            installed_version: metadata
+                .installed_version
+                .clone()
+                .or_else(|| installed_version.map(ToOwned::to_owned)),
+            latest_version: metadata.latest_version.clone(),
+            update_command: Some(format!("app-store update {}", metadata.adam_id)),
+            detection_confidence: AppPackageDetectionConfidence::Exact,
+        })
+    }
+}
+
+fn mac_app_store_snapshot(apps: &[MacosApplicationCandidate]) -> Option<MacAppStoreSnapshot> {
+    let mut apps_by_path = BTreeMap::new();
+    let mut adam_ids = BTreeSet::new();
+    for app in apps
+        .iter()
+        .filter(|app| !app.protected && app.path.join("Contents/_MASReceipt/receipt").is_file())
+    {
+        let Some(adam_id) = mac_app_store_adam_id(&app.path) else {
+            continue;
+        };
+        adam_ids.insert(adam_id.clone());
+        apps_by_path.insert(
+            path_key(&app.path),
+            MacAppStoreMetadata {
+                adam_id,
+                installed_version: app.version.clone(),
+                latest_version: None,
+            },
+        );
+    }
+    if apps_by_path.is_empty() {
+        return None;
+    }
+
+    let latest_versions = mac_app_store_latest_versions(&adam_ids).unwrap_or_default();
+    for metadata in apps_by_path.values_mut() {
+        metadata.latest_version = latest_versions.get(&metadata.adam_id).cloned();
+    }
+    Some(MacAppStoreSnapshot { apps_by_path })
+}
+
+fn mac_app_store_adam_id(path: &Path) -> Option<String> {
+    let output = run_inventory_command_with_timeout(
+        command_with_args(
+            Path::new("/usr/bin/mdls"),
+            &["-raw", "-name", "kMDItemAppStoreAdamID", path.to_str()?],
+        ),
+        METADATA_COMMAND_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_macos_app_store_adam_id(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_macos_app_store_adam_id(output: &str) -> Option<String> {
+    let value = output.trim().trim_matches('"');
+    if value.is_empty() || value == "(null)" || value == "0" {
+        return None;
+    }
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_digit())
+        .then(|| value.to_string())
+}
+
+fn mac_app_store_latest_versions(adam_ids: &BTreeSet<String>) -> Option<BTreeMap<String, String>> {
+    if adam_ids.is_empty() {
+        return None;
+    }
+    let curl = find_executable_in_common_paths("curl", &["/usr/bin/curl"])?;
+    let country = std::env::var("PREEN_APP_STORE_COUNTRY")
+        .ok()
+        .filter(|value| value.len() == 2)
+        .unwrap_or_else(|| "us".to_string());
+    let ids = adam_ids.iter().cloned().collect::<Vec<_>>().join(",");
+    let url = format!(
+        "https://itunes.apple.com/lookup?media=software&entity=desktopSoftware&country={country}&id={ids}"
+    );
+    let mut command = Command::new(curl);
+    command.args([
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        "2",
+        &url,
+    ]);
+    let output = run_inventory_command_with_timeout(command, APP_STORE_LOOKUP_TIMEOUT)?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_app_store_lookup_versions(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_app_store_lookup_versions(output: &str) -> Option<BTreeMap<String, String>> {
+    let root = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    let results = root.get("results")?.as_array()?;
+    let mut versions = BTreeMap::new();
+    for app in results {
+        let Some(adam_id) = app.get("trackId").and_then(|value| match value {
+            serde_json::Value::Number(number) => Some(number.to_string()),
+            serde_json::Value::String(value) => Some(value.clone()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let Some(version) = app
+            .get("version")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        versions.insert(adam_id, version.to_string());
+    }
+    Some(versions)
+}
+
+fn app_store_version_is_newer(installed: &str, latest: &str) -> bool {
+    let installed = installed.trim();
+    let latest = latest.trim();
+    if installed.is_empty() || latest.is_empty() || installed == latest {
+        return false;
+    }
+    compare_version_segments(installed, latest)
+        .map(|ordering| ordering.is_lt())
+        .unwrap_or(true)
+}
+
+fn compare_version_segments(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let left_segments = version_segments(left)?;
+    let right_segments = version_segments(right)?;
+    let len = left_segments.len().max(right_segments.len());
+    for index in 0..len {
+        let left = left_segments.get(index).copied().unwrap_or(0);
+        let right = right_segments.get(index).copied().unwrap_or(0);
+        match left.cmp(&right) {
+            std::cmp::Ordering::Equal => {}
+            ordering => return Some(ordering),
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
+}
+
+fn version_segments(value: &str) -> Option<Vec<u64>> {
+    let mut segments = Vec::new();
+    for part in value.split(|ch: char| !ch.is_ascii_digit()) {
+        if part.is_empty() {
+            continue;
+        }
+        segments.push(part.parse::<u64>().ok()?);
+    }
+    (!segments.is_empty()).then_some(segments)
+}
+
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy().to_string()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1102,7 +1339,7 @@ Name=Docs
             AppManagementSource::AppStore
         );
         assert_eq!(
-            macos_update_availability(&app_bundle, &AppSource::Local, false, &identity, None),
+            macos_update_availability(&app_bundle, &AppSource::Local, false, &identity, None, None,),
             AppUpdateAvailability::NotChecked
         );
         assert_eq!(
@@ -1110,7 +1347,7 @@ Name=Docs
             AppManagementSource::System
         );
         assert_eq!(
-            macos_update_availability(&app_bundle, &AppSource::System, true, &identity, None),
+            macos_update_availability(&app_bundle, &AppSource::System, true, &identity, None, None,),
             AppUpdateAvailability::Unsupported
         );
     }
@@ -1174,7 +1411,8 @@ raycast
                 &AppSource::Local,
                 false,
                 &identity,
-                Some(&snapshot)
+                Some(&snapshot),
+                None,
             ),
             AppUpdateAvailability::UpdateAvailable
         );
@@ -1183,7 +1421,9 @@ raycast
             &AppSource::Local,
             false,
             &identity,
+            None,
             Some(&snapshot),
+            None,
         )
         .unwrap();
         assert_eq!(package.manager, AppPackageManager::HomebrewCask);
@@ -1238,7 +1478,8 @@ raycast
                 &AppSource::Local,
                 false,
                 &identity,
-                Some(&snapshot)
+                Some(&snapshot),
+                None,
             ),
             AppUpdateAvailability::UpdateAvailable
         );
@@ -1248,7 +1489,9 @@ raycast
                 &AppSource::Local,
                 false,
                 &identity,
+                None,
                 Some(&snapshot),
+                None,
             )
             .unwrap()
             .package_id,
@@ -1279,10 +1522,64 @@ raycast
                 &AppSource::Local,
                 false,
                 &identity,
-                Some(&snapshot)
+                Some(&snapshot),
+                None,
             ),
             AppUpdateAvailability::UpToDate
         );
+    }
+
+    #[test]
+    fn parses_app_store_adam_id_from_mdls_output() {
+        assert_eq!(
+            parse_macos_app_store_adam_id("123456789\n").as_deref(),
+            Some("123456789")
+        );
+        assert!(parse_macos_app_store_adam_id("(null)\n").is_none());
+        assert!(parse_macos_app_store_adam_id("not-an-id\n").is_none());
+    }
+
+    #[test]
+    fn parses_app_store_lookup_versions() {
+        let versions = parse_app_store_lookup_versions(
+            r#"{
+  "resultCount": 1,
+  "results": [
+    { "trackId": 123456789, "version": "2.4.1" }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(versions.get("123456789").map(String::as_str), Some("2.4.1"));
+        assert!(app_store_version_is_newer("2.4.0", "2.4.1"));
+        assert!(!app_store_version_is_newer("2.4.1", "2.4.1"));
+    }
+
+    #[test]
+    fn app_store_snapshot_provides_package_metadata_and_update_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_bundle = dir.path().join("Store Demo.app");
+        fs::create_dir_all(&app_bundle).unwrap();
+        let snapshot = MacAppStoreSnapshot {
+            apps_by_path: BTreeMap::from([(
+                app_bundle.to_string_lossy().to_string(),
+                MacAppStoreMetadata {
+                    adam_id: "123456789".to_string(),
+                    installed_version: Some("1.0".to_string()),
+                    latest_version: Some("1.1".to_string()),
+                },
+            )]),
+        };
+
+        assert_eq!(
+            snapshot.app_update_availability(&app_bundle),
+            AppUpdateAvailability::UpdateAvailable
+        );
+        let package = snapshot.package_metadata(&app_bundle, Some("1.0")).unwrap();
+        assert_eq!(package.manager, AppPackageManager::MacAppStore);
+        assert_eq!(package.package_id, "123456789");
+        assert_eq!(package.latest_version.as_deref(), Some("1.1"));
     }
 
     #[test]

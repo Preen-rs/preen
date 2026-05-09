@@ -129,6 +129,7 @@ fn append_command_output(lines: &mut Vec<String>, output: &Output) {
 fn update_manager_label(manager: &AppPackageManager) -> &'static str {
     match manager {
         AppPackageManager::HomebrewCask => "Homebrew cask",
+        AppPackageManager::MacAppStore => "Mac App Store",
         AppPackageManager::Apt => "APT",
         AppPackageManager::Dnf => "DNF",
         AppPackageManager::Pacman => "pacman",

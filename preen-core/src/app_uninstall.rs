@@ -103,6 +103,7 @@ pub struct AppPackageMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppPackageManager {
     HomebrewCask,
+    MacAppStore,
     Apt,
     Dnf,
     Pacman,

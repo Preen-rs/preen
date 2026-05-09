@@ -1388,7 +1388,7 @@ fn application_update_status_line(app: &InstalledApplication) -> String {
         }
         AppUpdateAvailability::Unsupported => {
             format!(
-                "{name}: no supported updater detected; supported now: Homebrew cask, Flatpak, Snap"
+                "{name}: no supported executable updater detected; executable now: Homebrew cask, Flatpak, Snap; Mac App Store detection is native"
             )
         }
         AppUpdateAvailability::Unknown => {
