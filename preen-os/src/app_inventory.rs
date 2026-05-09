@@ -483,10 +483,12 @@ impl HomebrewCaskSnapshot {
     }
 
     fn app_has_update(&self, identity: &AppIdentity, path: &Path) -> bool {
-        let candidates = macos_app_match_candidates(identity, path);
-        candidates
-            .iter()
-            .any(|candidate| self.outdated.contains(candidate))
+        self.matching_cask(identity, path)
+            .map(|(_, cask)| {
+                self.outdated
+                    .contains(&normalize_app_match_key(&cask.token))
+            })
+            .unwrap_or(false)
     }
 
     fn package_metadata(&self, identity: &AppIdentity, path: &Path) -> Option<AppPackageMetadata> {
@@ -528,6 +530,15 @@ fn homebrew_cask_snapshot() -> Option<HomebrewCaskSnapshot> {
     }
     let installed =
         parse_homebrew_installed_casks(&String::from_utf8_lossy(&installed_output.stdout));
+    let installed = run_inventory_command_with_timeout(
+        homebrew_command_with_args(&brew, &["info", "--cask", "--json=v2", "--installed"]),
+        INVENTORY_COMMAND_TIMEOUT,
+    )
+    .filter(|output| output.status.success())
+    .map(|output| {
+        parse_homebrew_cask_info_json(&String::from_utf8_lossy(&output.stdout), installed.clone())
+    })
+    .unwrap_or(installed);
     if installed.is_empty() {
         return None;
     }
@@ -575,6 +586,90 @@ fn parse_homebrew_installed_casks(output: &str) -> BTreeMap<String, HomebrewCask
             ))
         })
         .collect()
+}
+
+fn parse_homebrew_cask_info_json(
+    output: &str,
+    installed: BTreeMap<String, HomebrewCaskMetadata>,
+) -> BTreeMap<String, HomebrewCaskMetadata> {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(output) else {
+        return installed;
+    };
+    let Some(casks) = root.get("casks").and_then(|value| value.as_array()) else {
+        return installed;
+    };
+
+    let mut enriched = installed.clone();
+    for cask in casks {
+        let Some(token) = cask.get("token").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let token_key = normalize_app_match_key(token);
+        if token_key.is_empty() {
+            continue;
+        }
+        let metadata = enriched
+            .get(&token_key)
+            .cloned()
+            .or_else(|| installed.get(&token_key).cloned())
+            .unwrap_or_else(|| HomebrewCaskMetadata {
+                token: token.to_string(),
+                installed_version: cask
+                    .get("version")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned),
+            });
+
+        enriched.insert(token_key, metadata.clone());
+        for alias in homebrew_cask_json_aliases(cask) {
+            let alias_key = normalize_app_match_key(&alias);
+            if !alias_key.is_empty() {
+                enriched.insert(alias_key, metadata.clone());
+            }
+        }
+    }
+    enriched
+}
+
+fn homebrew_cask_json_aliases(cask: &serde_json::Value) -> BTreeSet<String> {
+    let mut aliases = BTreeSet::new();
+    for key in ["name", "aliases", "old_tokens"] {
+        if let Some(values) = cask.get(key).and_then(|value| value.as_array()) {
+            for value in values.iter().filter_map(|value| value.as_str()) {
+                aliases.insert(value.to_string());
+            }
+        }
+    }
+    if let Some(artifacts) = cask.get("artifacts").and_then(|value| value.as_array()) {
+        for artifact in artifacts {
+            collect_homebrew_artifact_aliases(artifact, &mut aliases);
+        }
+    }
+    aliases
+}
+
+fn collect_homebrew_artifact_aliases(artifact: &serde_json::Value, aliases: &mut BTreeSet<String>) {
+    if let Some(value) = artifact.as_str() {
+        push_homebrew_artifact_alias(value, aliases);
+        return;
+    }
+    if let Some(values) = artifact.get("app").and_then(|value| value.as_array()) {
+        for value in values.iter().filter_map(|value| value.as_str()) {
+            push_homebrew_artifact_alias(value, aliases);
+        }
+    }
+    if let Some(value) = artifact.get("app").and_then(|value| value.as_str()) {
+        push_homebrew_artifact_alias(value, aliases);
+    }
+}
+
+fn push_homebrew_artifact_alias(value: &str, aliases: &mut BTreeSet<String>) {
+    let path = Path::new(value);
+    if let Some(file_name) = path.file_name().and_then(|value| value.to_str()) {
+        aliases.insert(file_name.to_string());
+        aliases.insert(file_name.trim_end_matches(".app").to_string());
+    }
 }
 
 fn homebrew_detection_confidence(
@@ -1097,6 +1192,67 @@ raycast
         assert_eq!(
             package.update_command.as_deref(),
             Some("brew upgrade --cask google-chrome")
+        );
+    }
+
+    #[test]
+    fn detects_homebrew_cask_from_json_artifact_alias() {
+        let installed = parse_homebrew_installed_casks("anaconda 2024.10-1\n");
+        let enriched = parse_homebrew_cask_info_json(
+            r#"{
+  "casks": [
+    {
+      "token": "anaconda",
+      "name": ["Anaconda Distribution"],
+      "version": "2024.10-1",
+      "artifacts": [
+        { "app": ["Anaconda-Navigator.app"] }
+      ]
+    }
+  ]
+}"#,
+            installed,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let app_bundle = dir.path().join("Anaconda-Navigator.app");
+        fs::create_dir_all(&app_bundle).unwrap();
+        let identity = AppIdentity::macos("Anaconda Navigator".to_string());
+        let snapshot = HomebrewCaskSnapshot {
+            installed: enriched,
+            outdated: BTreeSet::from([normalize_app_match_key("anaconda")]),
+        };
+
+        assert_eq!(
+            macos_management_source(
+                &app_bundle,
+                &AppSource::Local,
+                false,
+                &identity,
+                Some(&snapshot)
+            ),
+            AppManagementSource::PackageManager
+        );
+        assert_eq!(
+            macos_update_availability(
+                &app_bundle,
+                &AppSource::Local,
+                false,
+                &identity,
+                Some(&snapshot)
+            ),
+            AppUpdateAvailability::UpdateAvailable
+        );
+        assert_eq!(
+            macos_package_metadata(
+                &app_bundle,
+                &AppSource::Local,
+                false,
+                &identity,
+                Some(&snapshot),
+            )
+            .unwrap()
+            .package_id,
+            "anaconda"
         );
     }
 

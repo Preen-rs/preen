@@ -666,20 +666,11 @@ impl AppState {
     }
 
     fn applications_update_targets(&self) -> Vec<String> {
-        let mut targets = self
-            .applications_selected_items
+        self.applications_selected_items
             .iter()
             .filter(|app_name| self.applications_can_update(app_name))
             .cloned()
-            .collect::<Vec<_>>();
-        if targets.is_empty()
-            && let Some(current) = self
-                .applications_selected_app()
-                .filter(|app_name| self.applications_can_update(app_name))
-        {
-            targets.push(current);
-        }
-        targets
+            .collect::<Vec<_>>()
     }
 
     fn applications_can_update(&self, app_name: &str) -> bool {
@@ -760,18 +751,13 @@ impl AppState {
     }
 
     pub fn applications_update_status_lines(&self) -> Vec<String> {
-        let mut targets = self
+        let targets = self
             .applications_selected_items
             .iter()
             .cloned()
             .collect::<Vec<_>>();
-        if targets.is_empty()
-            && let Some(current) = self.applications_selected_app()
-        {
-            targets.push(current);
-        }
         if targets.is_empty() {
-            return vec!["run analyze first, then press x to update apps".to_string()];
+            return vec!["select one or more apps with space, then press x to update".to_string()];
         }
 
         targets
@@ -1645,7 +1631,7 @@ mod tests {
 
     #[test]
     fn applications_update_status_lines_explain_when_no_update_runs() {
-        let state = AppState {
+        let mut state = AppState {
             applications_inventory: vec!["Demo".to_string()],
             applications_inventory_metadata: vec![InstalledApplication {
                 identity: AppIdentity::macos("Demo"),
@@ -1669,6 +1655,13 @@ mod tests {
             ..AppState::default()
         };
 
+        assert!(state.applications_update_selected().is_err());
+        assert_eq!(
+            state.applications_update_status_lines(),
+            vec!["select one or more apps with space, then press x to update".to_string()]
+        );
+
+        state.applications_toggle_selected();
         assert!(state.applications_update_selected().is_err());
         assert_eq!(
             state.applications_update_status_lines(),
