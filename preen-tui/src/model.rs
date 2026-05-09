@@ -759,6 +759,32 @@ impl AppState {
         Ok(applications)
     }
 
+    pub fn applications_update_status_lines(&self) -> Vec<String> {
+        let mut targets = self
+            .applications_selected_items
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if targets.is_empty()
+            && let Some(current) = self.applications_selected_app()
+        {
+            targets.push(current);
+        }
+        if targets.is_empty() {
+            return vec!["run analyze first, then press x to update apps".to_string()];
+        }
+
+        targets
+            .into_iter()
+            .map(
+                |app_name| match self.applications_metadata_for_name(&app_name) {
+                    Some(app) => application_update_status_line(&app),
+                    None => format!("{app_name}: application metadata is unavailable"),
+                },
+            )
+            .collect()
+    }
+
     pub fn begin_applications_uninstall_action(&mut self) {
         self.begin_busy_view(
             BusyViewKind::Applications,
@@ -843,6 +869,11 @@ impl AppState {
         }
         self.applications_last_action_lines = lines;
         self.clear_busy_view_kind(BusyViewKind::Applications);
+    }
+
+    pub fn apply_applications_update_status_lines(&mut self, lines: Vec<String>) {
+        self.applications_last_action_lines = lines;
+        self.last_error = None;
     }
 
     pub fn scroll_info_popup_down(&mut self, amount: u16) {
@@ -1319,6 +1350,48 @@ impl AppState {
     }
 }
 
+fn application_update_status_line(app: &InstalledApplication) -> String {
+    let name = &app.identity.display_name;
+    if app.protected {
+        return format!("{name}: protected system application; updates are managed by the OS");
+    }
+    match app.update_availability {
+        AppUpdateAvailability::UpdateAvailable => {
+            if let Some(package) = &app.package_metadata {
+                match package.latest_version.as_deref() {
+                    Some(latest) if !latest.trim().is_empty() => {
+                        format!("{name}: update available ({latest})")
+                    }
+                    _ => format!("{name}: update available"),
+                }
+            } else {
+                format!("{name}: update available, but package metadata is unavailable")
+            }
+        }
+        AppUpdateAvailability::UpToDate => {
+            let version = app
+                .package_metadata
+                .as_ref()
+                .and_then(|package| package.installed_version.as_deref())
+                .or(app.version.as_deref())
+                .filter(|value| !value.trim().is_empty());
+            match version {
+                Some(version) => format!("{name}: already up to date ({version})"),
+                None => format!("{name}: already up to date"),
+            }
+        }
+        AppUpdateAvailability::NotChecked => {
+            format!("{name}: update status was not checked yet; run reanalyze")
+        }
+        AppUpdateAvailability::Unsupported => {
+            format!("{name}: update is not supported for this app source yet")
+        }
+        AppUpdateAvailability::Unknown => {
+            format!("{name}: update status is unknown")
+        }
+    }
+}
+
 fn extract_plugin_diagnostics(lines: &[String], language: &str) -> Vec<String> {
     for line in lines {
         let trimmed = line.trim();
@@ -1375,7 +1448,8 @@ fn clamp_diagnostic_line(line: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use preen_core::app_uninstall::{
-        AppIdentity, AppManagementSource, AppSource, AppUpdateAvailability,
+        AppIdentity, AppManagementSource, AppPackageDetectionConfidence, AppPackageManager,
+        AppPackageMetadata, AppSource, AppUpdateAvailability,
     };
     use preen_core::smart_care::{SmartCareCapabilitySelection, SmartCareCapabilityStatus};
     use std::collections::BTreeSet;
@@ -1567,6 +1641,39 @@ mod tests {
         assert_eq!(applications.len(), 1);
         assert_eq!(applications[0].identity.display_name, "Demo");
         assert_eq!(applications[0].path, "/Applications/Demo.app");
+    }
+
+    #[test]
+    fn applications_update_status_lines_explain_when_no_update_runs() {
+        let state = AppState {
+            applications_inventory: vec!["Demo".to_string()],
+            applications_inventory_metadata: vec![InstalledApplication {
+                identity: AppIdentity::macos("Demo"),
+                path: "/Applications/Demo.app".to_string(),
+                version: Some("2.0".to_string()),
+                source: AppSource::User,
+                estimated_size: 0,
+                last_used_at: None,
+                management_source: AppManagementSource::PackageManager,
+                update_availability: AppUpdateAvailability::UpToDate,
+                package_metadata: Some(AppPackageMetadata {
+                    manager: AppPackageManager::HomebrewCask,
+                    package_id: "demo".to_string(),
+                    installed_version: Some("2.0".to_string()),
+                    latest_version: Some("2.0".to_string()),
+                    update_command: Some("brew upgrade --cask demo".to_string()),
+                    detection_confidence: AppPackageDetectionConfidence::Exact,
+                }),
+                protected: false,
+            }],
+            ..AppState::default()
+        };
+
+        assert!(state.applications_update_selected().is_err());
+        assert_eq!(
+            state.applications_update_status_lines(),
+            vec!["Demo: already up to date (2.0)".to_string()]
+        );
     }
 
     #[test]

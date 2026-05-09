@@ -860,8 +860,8 @@ fn dispatch_applications_update(state: &mut AppState, worker: &StatusWorker) {
     }
     let applications = match state.applications_update_selected() {
         Ok(applications) => applications,
-        Err(error) => {
-            state.last_error = Some(error);
+        Err(_) => {
+            state.apply_applications_update_status_lines(state.applications_update_status_lines());
             return;
         }
     };
