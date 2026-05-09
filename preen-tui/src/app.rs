@@ -902,6 +902,7 @@ enum MouseScrollTarget {
     Keybindings,
     SmartCareReview,
     Info,
+    Applications,
     Main,
 }
 
@@ -910,6 +911,7 @@ struct MouseScrollDeltas {
     keybindings: i16,
     smart_care_review: i16,
     info: i16,
+    applications: i16,
     main: i16,
 }
 
@@ -919,6 +921,7 @@ impl MouseScrollDeltas {
             MouseScrollTarget::Keybindings => &mut self.keybindings,
             MouseScrollTarget::SmartCareReview => &mut self.smart_care_review,
             MouseScrollTarget::Info => &mut self.info,
+            MouseScrollTarget::Applications => &mut self.applications,
             MouseScrollTarget::Main => &mut self.main,
         };
         *slot = slot.saturating_add(delta);
@@ -941,6 +944,16 @@ impl MouseScrollDeltas {
             state.scroll_info_popup_down(self.info.unsigned_abs());
         } else if self.info < 0 {
             state.scroll_info_popup_up(self.info.unsigned_abs());
+        }
+
+        if self.applications > 0 {
+            for _ in 0..self.applications.unsigned_abs() {
+                state.applications_select_next();
+            }
+        } else if self.applications < 0 {
+            for _ in 0..self.applications.unsigned_abs() {
+                state.applications_select_previous();
+            }
         }
 
         if self.main > 0 {
@@ -978,6 +991,11 @@ fn mouse_scroll_target(
         return None;
     }
     if rect_contains(ui::main_container_area(root), column, row) {
+        if matches!(state.active_view, ActiveView::Applications)
+            && state.smart_care_has_analyze_result
+        {
+            return Some(MouseScrollTarget::Applications);
+        }
         return Some(MouseScrollTarget::Main);
     }
     None

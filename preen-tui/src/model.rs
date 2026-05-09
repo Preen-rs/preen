@@ -642,7 +642,7 @@ impl AppState {
             .and_then(|package| package.latest_version.as_deref())
             .filter(|value| !value.trim().is_empty());
         Some(match latest {
-            Some(version) => format!("update {version}"),
+            Some(version) => format!("update {}", compact_update_version(version)),
             None => "update".to_string(),
         })
     }
@@ -1384,6 +1384,15 @@ impl AppState {
     }
 }
 
+fn compact_update_version(version: &str) -> String {
+    version
+        .split_whitespace()
+        .next()
+        .unwrap_or(version)
+        .trim_matches(|ch| ch == '(' || ch == ')')
+        .to_string()
+}
+
 fn application_update_status_line(app: &InstalledApplication) -> String {
     let name = &app.identity.display_name;
     if app.protected {
@@ -1765,6 +1774,38 @@ mod tests {
             Some("[update 1.2]")
         );
         assert!(state.applications_update_badge("Keep").is_none());
+    }
+
+    #[test]
+    fn applications_update_badge_compacts_build_metadata() {
+        let state = AppState {
+            applications_inventory: vec!["Demo".to_string()],
+            applications_inventory_metadata: vec![InstalledApplication {
+                identity: AppIdentity::macos("Demo"),
+                path: "/Applications/Demo.app".to_string(),
+                version: Some("1.0".to_string()),
+                source: AppSource::User,
+                estimated_size: 0,
+                last_used_at: None,
+                management_source: AppManagementSource::PackageManager,
+                update_availability: AppUpdateAvailability::UpdateAvailable,
+                package_metadata: Some(AppPackageMetadata {
+                    manager: AppPackageManager::HomebrewCask,
+                    package_id: "demo".to_string(),
+                    installed_version: Some("1.0".to_string()),
+                    latest_version: Some("1.146.0 (80402)".to_string()),
+                    update_command: Some("brew upgrade --cask demo".to_string()),
+                    detection_confidence: AppPackageDetectionConfidence::Exact,
+                }),
+                protected: false,
+            }],
+            ..AppState::default()
+        };
+
+        assert_eq!(
+            state.applications_update_badge("Demo").as_deref(),
+            Some("[update 1.146.0]")
+        );
     }
 
     #[test]

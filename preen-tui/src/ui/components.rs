@@ -158,7 +158,7 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
         .borders(Borders::ALL)
         .border_style(Style::default().fg(PALETTE_LINE))
         .inner(vertical[1]);
-    let row_width = list_inner.width as usize;
+    let row_width = list_inner.width.saturating_sub(2) as usize;
     let app_items = state.applications_items();
     let list_items = if app_items.is_empty() {
         vec![ListItem::new(localized(
@@ -256,8 +256,13 @@ fn right_aligned_status_line(left: &str, right: &str, width: usize) -> String {
         return left.to_string();
     }
     let min_gap = 2;
-    let right = format!("[{right}]");
+    let mut right = format!("[{right}]");
     let left_len = left.chars().count();
+    let available_right = width.saturating_sub(left_len + min_gap);
+    if available_right == 0 {
+        return left.to_string();
+    }
+    right = truncate_end(&right, available_right);
     let right_len = right.chars().count();
     if left_len + min_gap + right_len >= width {
         return format!("{left} {right}");
@@ -267,6 +272,22 @@ fn right_aligned_status_line(left: &str, right: &str, width: usize) -> String {
         "",
         gap = width.saturating_sub(left_len + right_len)
     )
+}
+
+fn truncate_end(value: &str, max_width: usize) -> String {
+    let len = value.chars().count();
+    if len <= max_width {
+        return value.to_string();
+    }
+    if max_width <= 1 {
+        return "…".to_string();
+    }
+    let mut output = value
+        .chars()
+        .take(max_width.saturating_sub(1))
+        .collect::<String>();
+    output.push('…');
+    output
 }
 
 pub(super) fn render_smart_care_review_popup(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -728,7 +749,7 @@ fn vertical_scrollbar_area(inner: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::scrollbar_thumb;
+    use super::{right_aligned_status_line, scrollbar_thumb};
 
     #[test]
     fn scrollbar_thumb_reaches_track_edges() {
@@ -748,5 +769,13 @@ mod tests {
         let thumb = scrollbar_thumb(24, 18, 36, 0).unwrap();
 
         assert_eq!(thumb.1, 12);
+    }
+
+    #[test]
+    fn right_aligned_status_line_stays_inside_row_width() {
+        let line = right_aligned_status_line(" [ ] Arc", "update 1.146.0 (80402)", 24);
+
+        assert!(line.chars().count() <= 24);
+        assert!(line.contains("[update"));
     }
 }
