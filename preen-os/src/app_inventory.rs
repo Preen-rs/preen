@@ -177,20 +177,9 @@ struct MacosApplicationCandidate {
 }
 
 fn collect_linux_applications(include_sizes: bool) -> Vec<InstalledApplication> {
-    let mut dirs = vec![
-        (PathBuf::from("/usr/share/applications"), AppSource::System),
-        (
-            PathBuf::from("/usr/local/share/applications"),
-            AppSource::Local,
-        ),
-    ];
-    if let Some(home) = home_dir() {
-        dirs.push((home.join(".local/share/applications"), AppSource::User));
-    }
-
     let mut apps = Vec::new();
     let package_updates = include_sizes.then(linux_package_update_snapshot).flatten();
-    for (dir, source) in dirs {
+    for (dir, source) in linux_application_dirs() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
@@ -240,6 +229,32 @@ fn collect_linux_applications(include_sizes: bool) -> Vec<InstalledApplication> 
         }
     }
     apps
+}
+
+fn linux_application_dirs() -> Vec<(PathBuf, AppSource)> {
+    let mut dirs = vec![
+        (PathBuf::from("/usr/share/applications"), AppSource::System),
+        (
+            PathBuf::from("/usr/local/share/applications"),
+            AppSource::Local,
+        ),
+        (
+            PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+            AppSource::System,
+        ),
+        (
+            PathBuf::from("/var/lib/snapd/desktop/applications"),
+            AppSource::System,
+        ),
+    ];
+    if let Some(home) = home_dir() {
+        dirs.push((home.join(".local/share/applications"), AppSource::User));
+        dirs.push((
+            home.join(".local/share/flatpak/exports/share/applications"),
+            AppSource::User,
+        ));
+    }
+    dirs
 }
 
 fn parse_macos_info_plist(path: &Path) -> BTreeMap<String, String> {
@@ -919,6 +934,12 @@ impl HomebrewCaskSnapshot {
         identity: &AppIdentity,
         path: &Path,
     ) -> Option<(&str, &HomebrewCaskMetadata)> {
+        if let Some(token) = homebrew_caskroom_token_for_path(path)
+            && let Some((key, value)) = self.installed.get_key_value(&token)
+        {
+            return Some((key.as_str(), value));
+        }
+
         let candidates = macos_app_match_candidates(identity, path);
         candidates
             .iter()
@@ -1088,6 +1109,10 @@ fn homebrew_detection_confidence(
     path: &Path,
     matched_key: &str,
 ) -> AppPackageDetectionConfidence {
+    if homebrew_caskroom_token_for_path(path).as_deref() == Some(matched_key) {
+        return AppPackageDetectionConfidence::Exact;
+    }
+
     let path_key = path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1103,6 +1128,19 @@ fn homebrew_detection_confidence(
         return AppPackageDetectionConfidence::Strong;
     }
     AppPackageDetectionConfidence::Fallback
+}
+
+fn homebrew_caskroom_token_for_path(path: &Path) -> Option<String> {
+    let canonical = fs::canonicalize(path).ok()?;
+    let mut components = canonical.components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == "Caskroom" {
+            let token = components.next()?.as_os_str().to_str()?;
+            let normalized = normalize_app_match_key(token);
+            return (!normalized.is_empty()).then_some(normalized);
+        }
+    }
+    None
 }
 
 fn macos_app_match_candidates(identity: &AppIdentity, path: &Path) -> BTreeSet<String> {
@@ -1695,6 +1733,64 @@ raycast
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn detects_homebrew_cask_from_caskroom_symlink_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let cask_app = dir
+            .path()
+            .join("Caskroom")
+            .join("arc")
+            .join("1.146.0")
+            .join("Arc.app");
+        fs::create_dir_all(&cask_app).unwrap();
+        let applications = dir.path().join("Applications");
+        fs::create_dir_all(&applications).unwrap();
+        let app_link = applications.join("Arc.app");
+        std::os::unix::fs::symlink(&cask_app, &app_link).unwrap();
+
+        let identity = AppIdentity::macos("Arc".to_string());
+        let snapshot = HomebrewCaskSnapshot {
+            installed: BTreeMap::from([(
+                normalize_app_match_key("arc"),
+                HomebrewCaskMetadata {
+                    token: "arc".to_string(),
+                    installed_version: Some("1.146.0".to_string()),
+                },
+            )]),
+            outdated: BTreeSet::new(),
+        };
+
+        assert_eq!(
+            macos_management_source(
+                &app_link,
+                &AppSource::Local,
+                false,
+                &identity,
+                Some(&snapshot),
+                None,
+            ),
+            AppManagementSource::PackageManager
+        );
+        let package = macos_package_metadata(
+            &app_link,
+            &AppSource::Local,
+            false,
+            &identity,
+            None,
+            Some(&snapshot),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(package.manager, AppPackageManager::HomebrewCask);
+        assert_eq!(package.package_id, "arc");
+        assert_eq!(
+            package.detection_confidence,
+            AppPackageDetectionConfidence::Exact
+        );
+    }
+
     #[test]
     fn detects_homebrew_cask_up_to_date_when_installed_not_outdated() {
         let dir = tempfile::tempdir().unwrap();
@@ -1848,6 +1944,25 @@ Exec=/usr/bin/code --unity-launch
             package.detection_confidence,
             AppPackageDetectionConfidence::Fallback
         );
+    }
+
+    #[test]
+    fn linux_application_dirs_include_package_manager_exports() {
+        let dirs = linux_application_dirs()
+            .into_iter()
+            .map(|(path, source)| (path.to_string_lossy().to_string(), source))
+            .collect::<Vec<_>>();
+
+        assert!(dirs.iter().any(|(path, source)| {
+            path == "/var/lib/flatpak/exports/share/applications" && *source == AppSource::System
+        }));
+        assert!(dirs.iter().any(|(path, source)| {
+            path == "/var/lib/snapd/desktop/applications" && *source == AppSource::System
+        }));
+        assert!(dirs.iter().any(|(path, source)| {
+            path.ends_with(".local/share/flatpak/exports/share/applications")
+                && *source == AppSource::User
+        }));
     }
 
     #[cfg(unix)]
