@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
             state,
         );
     }
-    if state.busy_view.is_some() {
+    if state.should_render_busy_overlay() {
         components::render_busy_overlay(frame, layout.main_container, state);
     }
 

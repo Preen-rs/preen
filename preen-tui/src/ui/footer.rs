@@ -202,6 +202,12 @@ fn footer_context_text(state: &AppState) -> String {
         )
         .to_string();
     }
+    if let Some(summary) = state.background_busy_summary() {
+        return match language {
+            Language::English => format!("Background: {summary}... | Tab menu | ?: keys"),
+            Language::German => format!("Hintergrund: {summary}... | Tab Menü | ?: Tasten"),
+        };
+    }
     if state.smart_care_action_running && state.active_view.supports_smart_care_controls() {
         let action = state
             .smart_care_action_label
@@ -717,5 +723,22 @@ mod tests {
             .join("\n");
         assert!(popup.contains("Tastenbelegung") || popup.contains("Aktuelles Menü"));
         assert!(popup.contains("Spracheinstellung wechseln"));
+    }
+
+    #[test]
+    fn footer_shows_background_busy_when_overlay_is_scoped_elsewhere() {
+        let mut state = AppState {
+            active_view: ActiveView::Dashboard,
+            ..AppState::default()
+        };
+        state.begin_busy_view(
+            crate::model::BusyViewKind::Applications,
+            "Analyzing applications",
+            "Scanning metadata",
+            "Applications",
+        );
+
+        let text = footer_context_text(&state);
+        assert!(text.contains("Background: Analyzing applications"));
     }
 }

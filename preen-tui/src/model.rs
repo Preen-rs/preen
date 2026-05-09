@@ -169,6 +169,19 @@ pub enum BusyViewKind {
     SmartCareAction,
 }
 
+impl BusyViewKind {
+    pub const fn is_visible_for_view(self, view: ActiveView) -> bool {
+        match self {
+            Self::Dashboard => true,
+            Self::Applications | Self::ApplicationsPaths => {
+                matches!(view, ActiveView::Applications)
+            }
+            Self::PluginAction => matches!(view, ActiveView::Plugins),
+            Self::SmartCareAction => view.supports_smart_care_controls(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BusyViewState {
     pub kind: BusyViewKind,
@@ -412,6 +425,17 @@ impl AppState {
 
     pub fn is_busy(&self) -> bool {
         self.busy_view.is_some()
+    }
+
+    pub fn should_render_busy_overlay(&self) -> bool {
+        self.busy_view
+            .as_ref()
+            .is_some_and(|busy| busy.kind.is_visible_for_view(self.active_view))
+    }
+
+    pub fn background_busy_summary(&self) -> Option<String> {
+        let busy = self.busy_view.as_ref()?;
+        (!busy.kind.is_visible_for_view(self.active_view)).then(|| busy.title.clone())
     }
 
     pub fn set_active_view(&mut self, next: ActiveView) {
@@ -1590,6 +1614,28 @@ mod tests {
         state.clear_busy_view_kind(BusyViewKind::Applications);
 
         assert!(!state.is_busy());
+    }
+
+    #[test]
+    fn busy_overlay_is_scoped_to_the_owning_view() {
+        let mut state = AppState::default();
+        state.begin_busy_view(
+            BusyViewKind::Applications,
+            "Analyzing applications",
+            "Scanning metadata",
+            "Applications",
+        );
+
+        state.active_view = ActiveView::Applications;
+        assert!(state.should_render_busy_overlay());
+        assert!(state.background_busy_summary().is_none());
+
+        state.active_view = ActiveView::Dashboard;
+        assert!(!state.should_render_busy_overlay());
+        assert_eq!(
+            state.background_busy_summary().as_deref(),
+            Some("Analyzing applications")
+        );
     }
 
     fn create_temp_state_dir(prefix: &str) -> PathBuf {
