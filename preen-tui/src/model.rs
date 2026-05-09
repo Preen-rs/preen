@@ -624,6 +624,11 @@ impl AppState {
     }
 
     pub fn applications_update_badge(&self, app_name: &str) -> Option<String> {
+        self.applications_update_label(app_name)
+            .map(|label| format!("[{label}]"))
+    }
+
+    pub fn applications_update_label(&self, app_name: &str) -> Option<String> {
         let app = self
             .applications_inventory_metadata
             .iter()
@@ -637,8 +642,8 @@ impl AppState {
             .and_then(|package| package.latest_version.as_deref())
             .filter(|value| !value.trim().is_empty());
         Some(match latest {
-            Some(version) => format!("[update {version}]"),
-            None => "[update]".to_string(),
+            Some(version) => format!("update {version}"),
+            None => "update".to_string(),
         })
     }
 

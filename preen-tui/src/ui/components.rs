@@ -153,6 +153,12 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
     .style(Style::default().fg(PALETTE_TEXT));
     frame.render_widget(header, vertical[0]);
 
+    let list_inner = Block::default()
+        .title("")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(PALETTE_LINE))
+        .inner(vertical[1]);
+    let row_width = list_inner.width as usize;
     let app_items = state.applications_items();
     let list_items = if app_items.is_empty() {
         vec![ListItem::new(localized(
@@ -169,20 +175,23 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
                 } else {
                     "[ ]"
                 };
-                let badge = state
-                    .applications_update_badge(app_name)
-                    .map(|badge| format!(" {badge}"))
-                    .unwrap_or_default();
-                ListItem::new(format!(" {selected} {app_name}{badge}"))
+                let left = format!(" {selected} {app_name}");
+                let has_update = state.applications_update_label(app_name).is_some();
+                let line = state
+                    .applications_update_label(app_name)
+                    .map(|label| right_aligned_status_line(&left, &label, row_width))
+                    .unwrap_or(left);
+                let style = if has_update {
+                    Style::default()
+                        .fg(PALETTE_WARN)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(PALETTE_TEXT)
+                };
+                ListItem::new(line).style(style)
             })
             .collect::<Vec<_>>()
     };
-
-    let list_inner = Block::default()
-        .title("")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(PALETTE_LINE))
-        .inner(vertical[1]);
     let viewport_height = list_inner.height as usize;
     let content_length = app_items.len().max(1);
     let max_scroll = content_length.saturating_sub(viewport_height);
@@ -240,6 +249,24 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
         content_length,
         list_scroll_offset,
     );
+}
+
+fn right_aligned_status_line(left: &str, right: &str, width: usize) -> String {
+    if width == 0 {
+        return left.to_string();
+    }
+    let min_gap = 2;
+    let right = format!("[{right}]");
+    let left_len = left.chars().count();
+    let right_len = right.chars().count();
+    if left_len + min_gap + right_len >= width {
+        return format!("{left} {right}");
+    }
+    format!(
+        "{left}{:gap$}{right}",
+        "",
+        gap = width.saturating_sub(left_len + right_len)
+    )
 }
 
 pub(super) fn render_smart_care_review_popup(frame: &mut Frame<'_>, area: Rect, state: &AppState) {

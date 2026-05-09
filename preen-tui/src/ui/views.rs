@@ -749,13 +749,12 @@ fn applications_lines(
             } else {
                 "[ ]"
             };
-            let badge = state
-                .applications_update_badge(app_name)
-                .map(|badge| format!(" {badge}"))
-                .unwrap_or_default();
-            lines.push(Line::from(format!(
-                "  {marker} {selected} {app_name}{badge}"
-            )));
+            let left = format!("  {marker} {selected} {app_name}");
+            let line = state
+                .applications_update_label(app_name)
+                .map(|label| right_aligned_text(&left, &format!("[{label}]"), content_width))
+                .unwrap_or(left);
+            lines.push(Line::from(line));
         }
     }
 
@@ -790,6 +789,20 @@ fn applications_lines(
     }
 
     lines
+}
+
+fn right_aligned_text(left: &str, right: &str, width: usize) -> String {
+    let min_gap = 2;
+    let left_len = left.chars().count();
+    let right_len = right.chars().count();
+    if width == 0 || left_len + min_gap + right_len >= width {
+        return format!("{left} {right}");
+    }
+    format!(
+        "{left}{:gap$}{right}",
+        "",
+        gap = width.saturating_sub(left_len + right_len)
+    )
 }
 
 fn localized(state: &AppState, en: &'static str, de: &'static str) -> &'static str {
