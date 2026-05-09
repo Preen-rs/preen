@@ -104,6 +104,7 @@ pub struct AppPackageMetadata {
 pub enum AppPackageManager {
     HomebrewCask,
     MacAppStore,
+    Sparkle,
     Apt,
     Dnf,
     Pacman,

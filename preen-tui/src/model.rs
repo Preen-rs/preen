@@ -616,6 +616,32 @@ impl AppState {
         self.applications_selected_items.len()
     }
 
+    pub fn applications_update_count(&self) -> usize {
+        self.applications_inventory_metadata
+            .iter()
+            .filter(|app| app.update_availability == AppUpdateAvailability::UpdateAvailable)
+            .count()
+    }
+
+    pub fn applications_update_badge(&self, app_name: &str) -> Option<String> {
+        let app = self
+            .applications_inventory_metadata
+            .iter()
+            .find(|app| app.identity.display_name == app_name)?;
+        if app.update_availability != AppUpdateAvailability::UpdateAvailable {
+            return None;
+        }
+        let latest = app
+            .package_metadata
+            .as_ref()
+            .and_then(|package| package.latest_version.as_deref())
+            .filter(|value| !value.trim().is_empty());
+        Some(match latest {
+            Some(version) => format!("[update {version}]"),
+            None => "[update]".to_string(),
+        })
+    }
+
     pub fn begin_applications_paths_inspect(&mut self, app_name: &str) {
         self.begin_busy_view(
             BusyViewKind::ApplicationsPaths,
@@ -1388,7 +1414,7 @@ fn application_update_status_line(app: &InstalledApplication) -> String {
         }
         AppUpdateAvailability::Unsupported => {
             format!(
-                "{name}: no supported executable updater detected; executable now: Homebrew cask, Flatpak, Snap; Mac App Store detection is native"
+                "{name}: no supported executable updater detected; executable now: Homebrew cask, Flatpak, Snap; Mac App Store and Sparkle detection are native"
             )
         }
         AppUpdateAvailability::Unknown => {
@@ -1686,6 +1712,54 @@ mod tests {
             state.applications_update_status_lines(),
             vec!["Demo: already up to date (2.0)".to_string()]
         );
+    }
+
+    #[test]
+    fn applications_update_badge_marks_rows_with_available_updates() {
+        let state = AppState {
+            applications_inventory: vec!["Demo".to_string(), "Keep".to_string()],
+            applications_inventory_metadata: vec![
+                InstalledApplication {
+                    identity: AppIdentity::macos("Demo"),
+                    path: "/Applications/Demo.app".to_string(),
+                    version: Some("1.0".to_string()),
+                    source: AppSource::User,
+                    estimated_size: 0,
+                    last_used_at: None,
+                    management_source: AppManagementSource::PackageManager,
+                    update_availability: AppUpdateAvailability::UpdateAvailable,
+                    package_metadata: Some(AppPackageMetadata {
+                        manager: AppPackageManager::HomebrewCask,
+                        package_id: "demo".to_string(),
+                        installed_version: Some("1.0".to_string()),
+                        latest_version: Some("1.2".to_string()),
+                        update_command: Some("brew upgrade --cask demo".to_string()),
+                        detection_confidence: AppPackageDetectionConfidence::Exact,
+                    }),
+                    protected: false,
+                },
+                InstalledApplication {
+                    identity: AppIdentity::macos("Keep"),
+                    path: "/Applications/Keep.app".to_string(),
+                    version: Some("1.0".to_string()),
+                    source: AppSource::User,
+                    estimated_size: 0,
+                    last_used_at: None,
+                    management_source: AppManagementSource::Manual,
+                    update_availability: AppUpdateAvailability::Unsupported,
+                    package_metadata: None,
+                    protected: false,
+                },
+            ],
+            ..AppState::default()
+        };
+
+        assert_eq!(state.applications_update_count(), 1);
+        assert_eq!(
+            state.applications_update_badge("Demo").as_deref(),
+            Some("[update 1.2]")
+        );
+        assert!(state.applications_update_badge("Keep").is_none());
     }
 
     #[test]

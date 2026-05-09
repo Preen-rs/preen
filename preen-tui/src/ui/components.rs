@@ -169,7 +169,11 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
                 } else {
                     "[ ]"
                 };
-                ListItem::new(format!(" {selected} {app_name}"))
+                let badge = state
+                    .applications_update_badge(app_name)
+                    .map(|badge| format!(" {badge}"))
+                    .unwrap_or_default();
+                ListItem::new(format!(" {selected} {app_name}{badge}"))
             })
             .collect::<Vec<_>>()
     };
@@ -214,10 +218,11 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
         .block(
             Block::default()
                 .title(format!(
-                    " {} ({}/{}){} ",
+                    " {} ({}/{}) · updates {}{} ",
                     localized(state, "Installed applications", "Installierte Anwendungen"),
                     state.applications_selected_count(),
                     app_items.len(),
+                    state.applications_update_count(),
                     scan_suffix
                 ))
                 .borders(Borders::ALL)

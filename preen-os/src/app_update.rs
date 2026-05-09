@@ -130,6 +130,7 @@ fn update_manager_label(manager: &AppPackageManager) -> &'static str {
     match manager {
         AppPackageManager::HomebrewCask => "Homebrew cask",
         AppPackageManager::MacAppStore => "Mac App Store",
+        AppPackageManager::Sparkle => "Sparkle",
         AppPackageManager::Apt => "APT",
         AppPackageManager::Dnf => "DNF",
         AppPackageManager::Pacman => "pacman",

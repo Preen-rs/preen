@@ -224,6 +224,7 @@ pub(super) fn build_info_popup_lines(state: &AppState) -> Vec<Line<'static>> {
             )));
             lines.push(Line::from("- Homebrew cask"));
             lines.push(Line::from("- Mac App Store detection"));
+            lines.push(Line::from("- Sparkle detection"));
             lines.push(Line::from("- Flatpak"));
             lines.push(Line::from("- Snap"));
             lines.push(Line::from(""));
@@ -558,6 +559,7 @@ fn application_package_manager_label(
     match manager {
         AppPackageManager::HomebrewCask => localized(state, "Homebrew cask", "Homebrew Cask"),
         AppPackageManager::MacAppStore => localized(state, "Mac App Store", "Mac App Store"),
+        AppPackageManager::Sparkle => localized(state, "Sparkle", "Sparkle"),
         AppPackageManager::Apt => localized(state, "APT", "APT"),
         AppPackageManager::Dnf => localized(state, "DNF", "DNF"),
         AppPackageManager::Pacman => localized(state, "pacman", "pacman"),
@@ -747,7 +749,13 @@ fn applications_lines(
             } else {
                 "[ ]"
             };
-            lines.push(Line::from(format!("  {marker} {selected} {app_name}")));
+            let badge = state
+                .applications_update_badge(app_name)
+                .map(|badge| format!(" {badge}"))
+                .unwrap_or_default();
+            lines.push(Line::from(format!(
+                "  {marker} {selected} {app_name}{badge}"
+            )));
         }
     }
 
@@ -2293,7 +2301,7 @@ mod tests {
             active_view: ActiveView::Applications,
             applications_show_action_details: true,
             applications_last_action_lines: vec![
-                "Affinity: no supported executable updater detected; executable now: Homebrew cask, Flatpak, Snap; Mac App Store detection is native"
+                "Affinity: no supported executable updater detected; executable now: Homebrew cask, Flatpak, Snap; Mac App Store and Sparkle detection are native"
                     .to_string(),
                 "Anaconda Navigator: update available".to_string(),
             ],

@@ -12,9 +12,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 const MAX_DISCOVERED_APPS: usize = 400;
+const MAX_SPARKLE_FEEDS: usize = 25;
 const INVENTORY_COMMAND_TIMEOUT: Duration = Duration::from_millis(1_500);
 const METADATA_COMMAND_TIMEOUT: Duration = Duration::from_millis(300);
 const APP_STORE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(2_000);
+const SPARKLE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 pub fn collect_installed_applications() -> Vec<InstalledApplication> {
     collect_installed_applications_with_options(true)
@@ -96,6 +98,10 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                     .get("CFBundleShortVersionString")
                     .or_else(|| plist.get("CFBundleVersion"))
                     .cloned(),
+                sparkle_feed_url: plist
+                    .get("SUFeedURL")
+                    .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+                    .cloned(),
                 source: source.clone(),
                 protected,
             });
@@ -103,6 +109,9 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
     }
     let app_store_snapshot = include_sizes
         .then(|| mac_app_store_snapshot(&discovered))
+        .flatten();
+    let sparkle_snapshot = include_sizes
+        .then(|| sparkle_update_snapshot(&discovered, homebrew_casks.as_ref()))
         .flatten();
 
     let mut apps = Vec::new();
@@ -113,6 +122,7 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
             candidate.protected,
             &candidate.identity,
             homebrew_casks.as_ref(),
+            sparkle_snapshot.as_ref(),
         );
         let update_availability = macos_update_availability(
             &candidate.path,
@@ -121,6 +131,7 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
             &candidate.identity,
             homebrew_casks.as_ref(),
             app_store_snapshot.as_ref(),
+            sparkle_snapshot.as_ref(),
         );
         let package_metadata = macos_package_metadata(
             &candidate.path,
@@ -130,6 +141,7 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
             candidate.version.as_deref(),
             homebrew_casks.as_ref(),
             app_store_snapshot.as_ref(),
+            sparkle_snapshot.as_ref(),
         );
         let path_string = candidate.path.to_string_lossy().to_string();
 
@@ -159,6 +171,7 @@ struct MacosApplicationCandidate {
     identity: AppIdentity,
     path: PathBuf,
     version: Option<String>,
+    sparkle_feed_url: Option<String>,
     source: AppSource,
     protected: bool,
 }
@@ -303,6 +316,18 @@ fn extract_xml_tag_value(line: &str, tag: &str) -> Option<String> {
     Some(unescape_basic_xml(&line[start..end]))
 }
 
+fn extract_xml_attribute_value(input: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=");
+    let start = input.find(&needle)? + needle.len();
+    let quote = input[start..].chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let value_start = start + quote.len_utf8();
+    let value_end = input[value_start..].find(quote)? + value_start;
+    Some(unescape_basic_xml(&input[value_start..value_end]))
+}
+
 fn unescape_basic_xml(value: &str) -> String {
     value
         .replace("&amp;", "&")
@@ -370,6 +395,7 @@ fn macos_management_source(
     protected: bool,
     identity: &AppIdentity,
     casks: Option<&HomebrewCaskSnapshot>,
+    sparkle: Option<&SparkleUpdateSnapshot>,
 ) -> AppManagementSource {
     if protected || matches!(source, AppSource::System) {
         return AppManagementSource::System;
@@ -378,6 +404,9 @@ fn macos_management_source(
         return AppManagementSource::AppStore;
     }
     if casks.is_some_and(|snapshot| snapshot.matches_app(identity, path)) {
+        return AppManagementSource::PackageManager;
+    }
+    if sparkle.is_some_and(|snapshot| snapshot.matches_app(path)) {
         return AppManagementSource::PackageManager;
     }
     AppManagementSource::Manual
@@ -390,22 +419,36 @@ fn macos_update_availability(
     identity: &AppIdentity,
     casks: Option<&HomebrewCaskSnapshot>,
     app_store: Option<&MacAppStoreSnapshot>,
+    sparkle: Option<&SparkleUpdateSnapshot>,
 ) -> AppUpdateAvailability {
-    match macos_management_source(path, source, protected, identity, casks) {
+    match macos_management_source(path, source, protected, identity, casks, sparkle) {
         AppManagementSource::System => AppUpdateAvailability::Unsupported,
         AppManagementSource::AppStore => app_store
             .map(|snapshot| snapshot.app_update_availability(path))
             .unwrap_or(AppUpdateAvailability::NotChecked),
         AppManagementSource::PackageManager => casks
-            .map(|snapshot| {
-                if snapshot.app_has_update(identity, path) {
-                    AppUpdateAvailability::UpdateAvailable
-                } else {
-                    AppUpdateAvailability::UpToDate
-                }
+            .and_then(|snapshot| {
+                snapshot.matches_app(identity, path).then(|| {
+                    if snapshot.app_has_update(identity, path) {
+                        AppUpdateAvailability::UpdateAvailable
+                    } else {
+                        AppUpdateAvailability::UpToDate
+                    }
+                })
+            })
+            .or_else(|| {
+                sparkle.map(|snapshot| {
+                    if snapshot.app_has_update(path) {
+                        AppUpdateAvailability::UpdateAvailable
+                    } else {
+                        snapshot.app_update_availability(path)
+                    }
+                })
             })
             .unwrap_or(AppUpdateAvailability::NotChecked),
-        AppManagementSource::Manual => AppUpdateAvailability::Unsupported,
+        AppManagementSource::Manual => sparkle
+            .map(|snapshot| snapshot.app_update_availability(path))
+            .unwrap_or(AppUpdateAvailability::Unsupported),
         AppManagementSource::Unknown => AppUpdateAvailability::Unknown,
     }
 }
@@ -418,6 +461,7 @@ fn macos_package_metadata(
     installed_version: Option<&str>,
     casks: Option<&HomebrewCaskSnapshot>,
     app_store: Option<&MacAppStoreSnapshot>,
+    sparkle: Option<&SparkleUpdateSnapshot>,
 ) -> Option<AppPackageMetadata> {
     if protected || matches!(source, AppSource::System) {
         return None;
@@ -425,7 +469,9 @@ fn macos_package_metadata(
     if path.join("Contents/_MASReceipt/receipt").is_file() {
         return app_store.and_then(|snapshot| snapshot.package_metadata(path, installed_version));
     }
-    casks.and_then(|snapshot| snapshot.package_metadata(identity, path))
+    casks
+        .and_then(|snapshot| snapshot.package_metadata(identity, path))
+        .or_else(|| sparkle.and_then(|snapshot| snapshot.package_metadata(path, installed_version)))
 }
 
 fn linux_management_source(
@@ -697,6 +743,134 @@ fn version_segments(value: &str) -> Option<Vec<u64>> {
 
 fn path_key(path: &Path) -> String {
     path.to_string_lossy().to_string()
+}
+
+#[derive(Debug, Clone, Default)]
+struct SparkleUpdateSnapshot {
+    apps_by_path: BTreeMap<String, SparkleUpdateMetadata>,
+}
+
+#[derive(Debug, Clone)]
+struct SparkleUpdateMetadata {
+    feed_url: String,
+    installed_version: Option<String>,
+    latest_version: Option<String>,
+}
+
+impl SparkleUpdateSnapshot {
+    fn matches_app(&self, path: &Path) -> bool {
+        self.apps_by_path.contains_key(&path_key(path))
+    }
+
+    fn app_has_update(&self, path: &Path) -> bool {
+        self.app_update_availability(path) == AppUpdateAvailability::UpdateAvailable
+    }
+
+    fn app_update_availability(&self, path: &Path) -> AppUpdateAvailability {
+        let Some(metadata) = self.apps_by_path.get(&path_key(path)) else {
+            return AppUpdateAvailability::Unsupported;
+        };
+        match (
+            metadata.installed_version.as_deref(),
+            metadata.latest_version.as_deref(),
+        ) {
+            (Some(installed), Some(latest)) if app_store_version_is_newer(installed, latest) => {
+                AppUpdateAvailability::UpdateAvailable
+            }
+            (Some(_), Some(_)) => AppUpdateAvailability::UpToDate,
+            _ => AppUpdateAvailability::NotChecked,
+        }
+    }
+
+    fn package_metadata(
+        &self,
+        path: &Path,
+        installed_version: Option<&str>,
+    ) -> Option<AppPackageMetadata> {
+        let metadata = self.apps_by_path.get(&path_key(path))?;
+        Some(AppPackageMetadata {
+            manager: AppPackageManager::Sparkle,
+            package_id: metadata.feed_url.clone(),
+            installed_version: metadata
+                .installed_version
+                .clone()
+                .or_else(|| installed_version.map(ToOwned::to_owned)),
+            latest_version: metadata.latest_version.clone(),
+            update_command: Some(format!("sparkle update {}", metadata.feed_url)),
+            detection_confidence: AppPackageDetectionConfidence::Exact,
+        })
+    }
+}
+
+fn sparkle_update_snapshot(
+    apps: &[MacosApplicationCandidate],
+    casks: Option<&HomebrewCaskSnapshot>,
+) -> Option<SparkleUpdateSnapshot> {
+    let mut apps_by_path = BTreeMap::new();
+    for app in apps
+        .iter()
+        .filter(|app| !app.protected)
+        .filter(|app| {
+            !app.path.join("Contents/_MASReceipt/receipt").is_file()
+                && !casks.is_some_and(|snapshot| snapshot.matches_app(&app.identity, &app.path))
+        })
+        .filter_map(|app| app.sparkle_feed_url.as_ref().map(|feed| (app, feed)))
+        .take(MAX_SPARKLE_FEEDS)
+    {
+        let (app, feed_url) = app;
+        let latest_version = sparkle_latest_version(feed_url);
+        apps_by_path.insert(
+            path_key(&app.path),
+            SparkleUpdateMetadata {
+                feed_url: feed_url.clone(),
+                installed_version: app.version.clone(),
+                latest_version,
+            },
+        );
+    }
+    (!apps_by_path.is_empty()).then_some(SparkleUpdateSnapshot { apps_by_path })
+}
+
+fn sparkle_latest_version(feed_url: &str) -> Option<String> {
+    let curl = find_executable_in_common_paths("curl", &["/usr/bin/curl"])?;
+    let mut command = Command::new(curl);
+    command.args([
+        "--fail",
+        "--location",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        "2",
+        feed_url,
+    ]);
+    let output = run_inventory_command_with_timeout(command, SPARKLE_LOOKUP_TIMEOUT)?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_sparkle_latest_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_sparkle_latest_version(appcast: &str) -> Option<String> {
+    let item = appcast
+        .split("<item")
+        .nth(1)
+        .and_then(|value| value.split("</item>").next())
+        .unwrap_or(appcast);
+    for key in [
+        "sparkle:shortVersionString",
+        "sparkle:version",
+        "shortVersionString",
+        "version",
+    ] {
+        if let Some(value) = extract_xml_attribute_value(item, key)
+            .or_else(|| extract_xml_tag_value(item, key))
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Some(value);
+        }
+    }
+    extract_xml_tag_value(item, "title")
+        .and_then(|title| title.split_whitespace().last().map(ToOwned::to_owned))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1335,19 +1509,35 @@ Name=Docs
         let identity = AppIdentity::macos("Demo".to_string());
 
         assert_eq!(
-            macos_management_source(&app_bundle, &AppSource::Local, false, &identity, None),
+            macos_management_source(&app_bundle, &AppSource::Local, false, &identity, None, None),
             AppManagementSource::AppStore
         );
         assert_eq!(
-            macos_update_availability(&app_bundle, &AppSource::Local, false, &identity, None, None,),
+            macos_update_availability(
+                &app_bundle,
+                &AppSource::Local,
+                false,
+                &identity,
+                None,
+                None,
+                None,
+            ),
             AppUpdateAvailability::NotChecked
         );
         assert_eq!(
-            macos_management_source(&app_bundle, &AppSource::System, true, &identity, None),
+            macos_management_source(&app_bundle, &AppSource::System, true, &identity, None, None),
             AppManagementSource::System
         );
         assert_eq!(
-            macos_update_availability(&app_bundle, &AppSource::System, true, &identity, None, None,),
+            macos_update_availability(
+                &app_bundle,
+                &AppSource::System,
+                true,
+                &identity,
+                None,
+                None,
+                None,
+            ),
             AppUpdateAvailability::Unsupported
         );
     }
@@ -1401,7 +1591,8 @@ raycast
                 &AppSource::Local,
                 false,
                 &identity,
-                Some(&snapshot)
+                Some(&snapshot),
+                None,
             ),
             AppManagementSource::PackageManager
         );
@@ -1413,6 +1604,7 @@ raycast
                 &identity,
                 Some(&snapshot),
                 None,
+                None,
             ),
             AppUpdateAvailability::UpdateAvailable
         );
@@ -1423,6 +1615,7 @@ raycast
             &identity,
             None,
             Some(&snapshot),
+            None,
             None,
         )
         .unwrap();
@@ -1468,7 +1661,8 @@ raycast
                 &AppSource::Local,
                 false,
                 &identity,
-                Some(&snapshot)
+                Some(&snapshot),
+                None,
             ),
             AppManagementSource::PackageManager
         );
@@ -1479,6 +1673,7 @@ raycast
                 false,
                 &identity,
                 Some(&snapshot),
+                None,
                 None,
             ),
             AppUpdateAvailability::UpdateAvailable
@@ -1491,6 +1686,7 @@ raycast
                 &identity,
                 None,
                 Some(&snapshot),
+                None,
                 None,
             )
             .unwrap()
@@ -1523,6 +1719,7 @@ raycast
                 false,
                 &identity,
                 Some(&snapshot),
+                None,
                 None,
             ),
             AppUpdateAvailability::UpToDate

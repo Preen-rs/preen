@@ -47,7 +47,7 @@ pub fn build_update_plan_for_app(app: &InstalledApplication) -> AppUpdatePlan {
             command_preview: Vec::new(),
             executable: false,
             reason: Some(
-                "no supported executable updater detected; executable now: Homebrew cask, Flatpak, Snap; Mac App Store detection is native"
+                "no supported executable updater detected; executable now: Homebrew cask, Flatpak, Snap; Mac App Store and Sparkle detection are native"
                     .to_string(),
             ),
         };
@@ -119,6 +119,19 @@ fn update_command_for_package(
                 "Mac App Store update detection is native; execution needs the App Store update helper"
                     .to_string(),
             ),
+        ),
+        AppPackageManager::Sparkle => (
+            inventory_command
+                .map(split_command_preview)
+                .unwrap_or_else(|| {
+                    vec![
+                        "sparkle".to_string(),
+                        "update".to_string(),
+                        package_id.to_string(),
+                    ]
+                }),
+            false,
+            Some("Sparkle update detection is native; execution needs the Sparkle update helper".to_string()),
         ),
         AppPackageManager::Flatpak => (
             vec![
@@ -215,5 +228,14 @@ mod tests {
         assert!(!plan.executable);
         assert_eq!(plan.command_preview, ["app-store", "update", "demo"]);
         assert!(plan.reason.unwrap().contains("App Store update helper"));
+    }
+
+    #[test]
+    fn sparkle_plan_is_detectable_but_waits_for_native_helper() {
+        let plan = build_update_plan_for_app(&app_with_manager(AppPackageManager::Sparkle));
+
+        assert!(!plan.executable);
+        assert_eq!(plan.command_preview, ["sparkle", "update", "demo"]);
+        assert!(plan.reason.unwrap().contains("Sparkle update helper"));
     }
 }
