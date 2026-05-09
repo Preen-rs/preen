@@ -115,7 +115,6 @@ fn executable_for_update_manager(
 ) -> Result<PathBuf, String> {
     let paths = match manager {
         AppPackageManager::HomebrewCask => &["/opt/homebrew/bin/brew", "/usr/local/bin/brew"][..],
-        AppPackageManager::MacAppStore | AppPackageManager::Sparkle => &["/usr/bin/open"][..],
         AppPackageManager::Flatpak => &["/usr/bin/flatpak", "/usr/local/bin/flatpak"][..],
         AppPackageManager::Snap => &["/usr/bin/snap", "/snap/bin/snap"][..],
         _ => &[][..],

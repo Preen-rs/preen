@@ -51,7 +51,7 @@ pub fn build_update_plan_for_app(app: &InstalledApplication) -> AppUpdatePlan {
             executable: false,
             confirms_update_on_success: false,
             reason: Some(
-                "no supported updater detected; executable now: Homebrew cask, Flatpak, Snap, Mac App Store native flow, Sparkle native flow"
+                "no supported direct updater detected; direct updates now: Homebrew cask, Flatpak, Snap; Mac App Store and Sparkle need native installer backends"
                     .to_string(),
             ),
         };
@@ -61,7 +61,6 @@ pub fn build_update_plan_for_app(app: &InstalledApplication) -> AppUpdatePlan {
         update_command_for_package(
             &package.manager,
             &package.package_id,
-            &app.path,
             package.update_command.as_deref(),
         );
 
@@ -91,7 +90,6 @@ pub fn build_update_batch_plan(applications: &[InstalledApplication]) -> AppUpda
 fn update_command_for_package(
     manager: &AppPackageManager,
     package_id: &str,
-    app_path: &str,
     inventory_command: Option<&str>,
 ) -> (Vec<String>, bool, bool, Option<String>) {
     if package_id.trim().is_empty() {
@@ -116,19 +114,26 @@ fn update_command_for_package(
             None,
         ),
         AppPackageManager::MacAppStore => (
-            vec![
-                "open".to_string(),
-                "macappstore://showUpdatesPage".to_string(),
-            ],
-            true,
+            inventory_command
+                .map(split_command_preview)
+                .unwrap_or_else(Vec::new),
             false,
-            None,
+            false,
+            Some(
+                "Mac App Store update is detected, but direct execution needs a StoreKit/storeagent backend"
+                    .to_string(),
+            ),
         ),
         AppPackageManager::Sparkle => (
-            vec!["open".to_string(), app_path.to_string()],
-            true,
+            inventory_command
+                .map(split_command_preview)
+                .unwrap_or_else(Vec::new),
             false,
-            None,
+            false,
+            Some(
+                "Sparkle update is detected, but direct execution needs a Sparkle installer backend"
+                    .to_string(),
+            ),
         ),
         AppPackageManager::Flatpak => (
             vec![
@@ -224,25 +229,22 @@ mod tests {
     }
 
     #[test]
-    fn mac_app_store_plan_opens_native_update_flow() {
+    fn mac_app_store_plan_is_detectable_but_not_directly_executable() {
         let plan = build_update_plan_for_app(&app_with_manager(AppPackageManager::MacAppStore));
 
-        assert!(plan.executable);
+        assert!(!plan.executable);
         assert!(!plan.confirms_update_on_success);
-        assert_eq!(
-            plan.command_preview,
-            ["open", "macappstore://showUpdatesPage"]
-        );
-        assert!(plan.reason.is_none());
+        assert!(plan.command_preview.is_empty());
+        assert!(plan.reason.unwrap().contains("StoreKit"));
     }
 
     #[test]
-    fn sparkle_plan_opens_native_update_flow() {
+    fn sparkle_plan_is_detectable_but_not_directly_executable() {
         let plan = build_update_plan_for_app(&app_with_manager(AppPackageManager::Sparkle));
 
-        assert!(plan.executable);
+        assert!(!plan.executable);
         assert!(!plan.confirms_update_on_success);
-        assert_eq!(plan.command_preview, ["open", "/Applications/Demo.app"]);
-        assert!(plan.reason.is_none());
+        assert!(plan.command_preview.is_empty());
+        assert!(plan.reason.unwrap().contains("Sparkle installer"));
     }
 }
