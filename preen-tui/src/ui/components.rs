@@ -426,7 +426,7 @@ pub(super) fn render_busy_overlay(frame: &mut Frame<'_>, area: Rect, state: &App
         return;
     };
     let popup_width = area.width.saturating_sub(4).min((area.width / 2).max(52));
-    let popup_height = 11u16.min(area.height.saturating_sub(4).max(9));
+    let popup_height = 8u16.min(area.height.saturating_sub(4).max(7));
     let popup_area = Rect {
         x: area
             .x
