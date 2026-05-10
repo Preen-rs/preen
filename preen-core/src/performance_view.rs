@@ -24,6 +24,51 @@ pub struct PerformanceTopProcess {
     pub memory_pct: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerformanceTaskKind {
+    Inspect,
+    SafeMaintenance,
+    AdminMaintenance,
+}
+
+impl PerformanceTaskKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Inspect => "inspect",
+            Self::SafeMaintenance => "safe",
+            Self::AdminMaintenance => "admin",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PerformanceTaskRisk {
+    Low,
+    Medium,
+    High,
+}
+
+impl PerformanceTaskRisk {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerformanceOptimizationTask {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub kind: PerformanceTaskKind,
+    pub risk: PerformanceTaskRisk,
+    pub recommended: bool,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerformanceViewModel {
     pub overall_level: PerformanceLevel,
@@ -36,6 +81,7 @@ pub struct PerformanceViewModel {
     pub process_count: Option<u64>,
     pub disk_io_rate_mbps: Option<f64>,
     pub top_processes: Vec<PerformanceTopProcess>,
+    pub optimization_tasks: Vec<PerformanceOptimizationTask>,
     pub recommendations: Vec<String>,
 }
 
@@ -82,6 +128,14 @@ impl PerformanceViewModel {
             process_count: metrics.process_count,
             disk_io_rate_mbps,
             top_processes: top_processes(&metrics.top_processes),
+            optimization_tasks: optimization_tasks(
+                cpu_level,
+                memory_level,
+                load_level,
+                temperature_level,
+                disk_level,
+                metrics,
+            ),
             recommendations: recommendations(
                 cpu_level,
                 memory_level,
@@ -142,6 +196,156 @@ fn top_processes(processes: &[ProcessMetric]) -> Vec<PerformanceTopProcess> {
     });
     rows.truncate(5);
     rows
+}
+
+fn optimization_tasks(
+    cpu: PerformanceLevel,
+    memory: PerformanceLevel,
+    load: PerformanceLevel,
+    temperature: PerformanceLevel,
+    disk: PerformanceLevel,
+    metrics: &crate::dashboard::DashboardMetrics,
+) -> Vec<PerformanceOptimizationTask> {
+    let mut tasks = vec![
+        PerformanceOptimizationTask {
+            id: "inspect_top_processes".to_string(),
+            label: "Inspect top processes".to_string(),
+            description: "Review the highest CPU and memory processes before applying changes"
+                .to_string(),
+            kind: PerformanceTaskKind::Inspect,
+            risk: PerformanceTaskRisk::Low,
+            recommended: cpu >= PerformanceLevel::Elevated
+                || memory >= PerformanceLevel::Elevated
+                || load >= PerformanceLevel::Elevated,
+            reason: process_pressure_reason(cpu, memory, load),
+        },
+        PerformanceOptimizationTask {
+            id: "flush_dns_cache".to_string(),
+            label: "Flush DNS cache".to_string(),
+            description: "Refresh local DNS cache when network state looks stale or proxy settings changed"
+                .to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: metrics
+                .network_proxy
+                .as_deref()
+                .map(|proxy| !proxy.trim().is_empty() && proxy != "none")
+                .unwrap_or(false),
+            reason: "network maintenance only; does not change user data".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "sync_filesystem_buffers".to_string(),
+            label: "Sync filesystem buffers".to_string(),
+            description: "Ask the OS to flush filesystem buffers before heavy cleanup or shutdown"
+                .to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: disk >= PerformanceLevel::Elevated,
+            reason: if disk >= PerformanceLevel::Elevated {
+                "disk I/O is elevated".to_string()
+            } else {
+                "optional before long cleanup runs".to_string()
+            },
+        },
+        PerformanceOptimizationTask {
+            id: "memory_pressure_relief".to_string(),
+            label: "Relieve memory pressure".to_string(),
+            description: "Use OS-native memory pressure relief only after inspecting memory-heavy apps"
+                .to_string(),
+            kind: PerformanceTaskKind::AdminMaintenance,
+            risk: PerformanceTaskRisk::Medium,
+            recommended: memory >= PerformanceLevel::High
+                || memory_pressure_is_elevated(metrics.memory_pressure.as_deref()),
+            reason: memory_pressure_reason(memory, metrics.memory_pressure.as_deref()),
+        },
+        PerformanceOptimizationTask {
+            id: "defer_heavy_maintenance".to_string(),
+            label: "Defer heavy maintenance".to_string(),
+            description: "Avoid long-running cleanup while temperature, CPU, or disk pressure is high"
+                .to_string(),
+            kind: PerformanceTaskKind::Inspect,
+            risk: PerformanceTaskRisk::Low,
+            recommended: temperature >= PerformanceLevel::Elevated
+                || cpu >= PerformanceLevel::High
+                || disk >= PerformanceLevel::High,
+            reason: defer_reason(cpu, temperature, disk),
+        },
+    ];
+
+    tasks.sort_by(|left, right| {
+        right
+            .recommended
+            .cmp(&left.recommended)
+            .then_with(|| task_priority(&left.id).cmp(&task_priority(&right.id)))
+            .then_with(|| left.risk.cmp(&right.risk))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    tasks
+}
+
+fn task_priority(id: &str) -> u8 {
+    match id {
+        "inspect_top_processes" => 0,
+        "memory_pressure_relief" => 1,
+        "flush_dns_cache" => 2,
+        "sync_filesystem_buffers" => 3,
+        "defer_heavy_maintenance" => 4,
+        _ => 9,
+    }
+}
+
+fn process_pressure_reason(
+    cpu: PerformanceLevel,
+    memory: PerformanceLevel,
+    load: PerformanceLevel,
+) -> String {
+    if cpu >= PerformanceLevel::Elevated {
+        return format!("CPU pressure is {}", cpu.label());
+    }
+    if load >= PerformanceLevel::Elevated {
+        return format!("load per core is {}", load.label());
+    }
+    if memory >= PerformanceLevel::Elevated {
+        return format!("memory pressure is {}", memory.label());
+    }
+    "baseline visibility task".to_string()
+}
+
+fn memory_pressure_is_elevated(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::to_ascii_lowercase).as_deref(),
+        Some("warn" | "warning" | "elevated" | "critical" | "high")
+    )
+}
+
+fn memory_pressure_reason(level: PerformanceLevel, pressure: Option<&str>) -> String {
+    if memory_pressure_is_elevated(pressure) {
+        return format!(
+            "OS reports memory pressure {}",
+            pressure.unwrap_or("elevated")
+        );
+    }
+    if level >= PerformanceLevel::High {
+        return "memory usage is high".to_string();
+    }
+    "only useful when memory pressure is elevated".to_string()
+}
+
+fn defer_reason(
+    cpu: PerformanceLevel,
+    temperature: PerformanceLevel,
+    disk: PerformanceLevel,
+) -> String {
+    if temperature >= PerformanceLevel::Elevated {
+        return format!("temperature is {}", temperature.label());
+    }
+    if cpu >= PerformanceLevel::High {
+        return "CPU is already saturated".to_string();
+    }
+    if disk >= PerformanceLevel::High {
+        return "disk I/O is already saturated".to_string();
+    }
+    "system can run maintenance now".to_string()
 }
 
 fn recommendations(
@@ -226,6 +430,8 @@ mod tests {
         assert_eq!(model.primary_bottleneck, "CPU (high)");
         assert_eq!(model.load_per_core, Some(1.15));
         assert_eq!(model.top_processes[0].name, "Arc");
+        assert_eq!(model.optimization_tasks[0].id, "inspect_top_processes");
+        assert!(model.optimization_tasks[0].recommended);
         assert!(
             model
                 .recommendations
@@ -250,5 +456,28 @@ mod tests {
             model.recommendations,
             vec!["System load looks normal; performance actions are optional"]
         );
+        assert!(
+            model
+                .optimization_tasks
+                .iter()
+                .any(|task| task.id == "flush_dns_cache" && !task.recommended)
+        );
+    }
+
+    #[test]
+    fn performance_view_model_recommends_memory_relief_for_pressure() {
+        let model = PerformanceViewModel::from_snapshot(&snapshot(DashboardMetrics {
+            memory_used_pct: Some(68.0),
+            memory_pressure: Some("critical".to_string()),
+            ..DashboardMetrics::default()
+        }));
+
+        let task = model
+            .optimization_tasks
+            .iter()
+            .find(|task| task.id == "memory_pressure_relief")
+            .expect("memory pressure task");
+        assert!(task.recommended);
+        assert_eq!(task.kind, PerformanceTaskKind::AdminMaintenance);
     }
 }

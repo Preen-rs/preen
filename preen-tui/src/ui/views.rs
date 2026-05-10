@@ -1159,6 +1159,25 @@ fn performance_domain_lines(snapshot: &DashboardSnapshot, state: &AppState) -> V
     for item in model.recommendations {
         lines.push(Line::from(format!("- {item}")));
     }
+    lines.push(Line::from(""));
+    lines.push(Line::from(localized(
+        state,
+        "Optimization tasks",
+        "Optimierungsaufgaben",
+    )));
+    for task in model.optimization_tasks.iter().take(5) {
+        let state_label = if task.recommended { "run" } else { "watch" };
+        lines.push(Line::from(format!(
+            "- [{state_label}] {} ({}, risk={})",
+            task.label,
+            task.kind.label(),
+            task.risk.label()
+        )));
+        lines.push(Line::from(format!(
+            "  {}",
+            truncate_with_ellipsis(&task.reason, 72)
+        )));
+    }
     lines
 }
 
@@ -2646,6 +2665,8 @@ mod tests {
         assert!(text.contains("Top process pressure"));
         assert!(text.contains("Arc Helper"));
         assert!(text.contains("Recommendations"));
+        assert!(text.contains("Optimization tasks"));
+        assert!(text.contains("[run] Inspect top processes"));
     }
 
     #[test]
