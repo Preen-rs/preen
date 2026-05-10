@@ -13,7 +13,7 @@ do {
     case "update-app":
         let input = FileHandle.standardInput.readDataToEndOfFile()
         let request = try JSONDecoder().decode(UpdateRequest.self, from: input)
-        let status = try await runUpdate(request, elevateMacAppStore: true, exitOnFailure: true)
+        let status = try await runUpdate(request, writer: writer, elevateMacAppStore: true, exitOnFailure: true)
         exit(status)
     case "update-app-root":
         guard let payload = CommandLine.arguments.dropFirst(2).first,
@@ -23,7 +23,9 @@ do {
             exit(65)
         }
         let request = try JSONDecoder().decode(UpdateRequest.self, from: input)
-        _ = try await runUpdate(request, elevateMacAppStore: false, exitOnFailure: false)
+        let eventWriter = CommandLine.arguments.dropFirst(3).first
+            .map { EventWriter(fileURL: URL(fileURLWithPath: $0)) } ?? writer
+        _ = try await runUpdate(request, writer: eventWriter, elevateMacAppStore: false, exitOnFailure: false)
         exit(0)
     default:
         writer.write(UpdateEvent("failed", message: "unsupported command"))
@@ -34,7 +36,7 @@ do {
     exit(1)
 }
 
-private func runUpdate(_ request: UpdateRequest, elevateMacAppStore: Bool, exitOnFailure: Bool) async throws -> Int32 {
+private func runUpdate(_ request: UpdateRequest, writer: EventWriter, elevateMacAppStore: Bool, exitOnFailure: Bool) async throws -> Int32 {
     guard request.schemaVersion == 1 else {
         writer.write(UpdateEvent("failed", app: request.appName, message: "unsupported schema version"))
         return exitOnFailure ? 65 : 0
@@ -46,7 +48,7 @@ private func runUpdate(_ request: UpdateRequest, elevateMacAppStore: Bool, exitO
     }
 
     do {
-        try await runProviderUpdate(request)
+        try await runProviderUpdate(request, writer: writer)
         return 0
     } catch {
         writer.write(UpdateEvent("failed", app: request.appName, message: error.localizedDescription))
@@ -54,7 +56,7 @@ private func runUpdate(_ request: UpdateRequest, elevateMacAppStore: Bool, exitO
     }
 }
 
-private func runProviderUpdate(_ request: UpdateRequest) async throws {
+private func runProviderUpdate(_ request: UpdateRequest, writer: EventWriter) async throws {
     switch request.provider {
     case .macAppStore:
         try await MacAppStoreUpdater(writer: writer).update(request)

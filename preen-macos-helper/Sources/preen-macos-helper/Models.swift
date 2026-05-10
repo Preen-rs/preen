@@ -57,7 +57,12 @@ struct UpdateEvent: Codable {
 }
 
 struct EventWriter {
+    let fileURL: URL?
     private let encoder = JSONEncoder()
+
+    init(fileURL: URL? = nil) {
+        self.fileURL = fileURL
+    }
 
     func write(_ event: UpdateEvent) {
         guard let data = try? encoder.encode(event),
@@ -65,13 +70,33 @@ struct EventWriter {
         else {
             return
         }
-        print(line)
-        fflush(stdout)
+        writeLine(line)
     }
 
     func writeRaw(_ text: String) {
         guard !text.isEmpty else { return }
-        print(text, terminator: text.hasSuffix("\n") ? "" : "\n")
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            writeLine(String(line))
+        }
+    }
+
+    private func writeLine(_ line: String) {
+        if let fileURL {
+            append(line, to: fileURL)
+            return
+        }
+        print(line)
         fflush(stdout)
+    }
+
+    private func append(_ line: String, to fileURL: URL) {
+        let data = Data((line + "\n").utf8)
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: fileURL) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        _ = try? handle.write(contentsOf: data)
     }
 }
