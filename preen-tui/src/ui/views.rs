@@ -224,14 +224,10 @@ pub(super) fn build_info_popup_lines(state: &AppState) -> Vec<Line<'static>> {
                 "Unterstuetzte Update-Quellen",
             )));
             lines.push(Line::from("- Homebrew cask"));
+            lines.push(Line::from("- Mac App Store (native helper)"));
+            lines.push(Line::from("- Sparkle (native helper)"));
             lines.push(Line::from("- Flatpak"));
             lines.push(Line::from("- Snap"));
-            lines.push(Line::from(""));
-            lines.push(Line::from(localized(
-                state,
-                "Detected only: Mac App Store, Sparkle",
-                "Nur erkannt: Mac App Store, Sparkle",
-            )));
             lines.push(Line::from(""));
             lines.push(Line::from(localized(
                 state,
@@ -2432,8 +2428,7 @@ mod tests {
             active_view: ActiveView::Applications,
             applications_show_action_details: true,
             applications_last_action_lines: vec![
-                "Affinity: no supported direct updater detected; direct updates now: Homebrew cask, Flatpak, Snap; Mac App Store and Sparkle need native installer backends"
-                    .to_string(),
+                "Affinity: no update executor is available for this app source".to_string(),
                 "Anaconda Navigator: update available".to_string(),
             ],
             ..AppState::default()
@@ -2449,7 +2444,8 @@ mod tests {
         assert!(text.contains("Anaconda Navigator: update available"));
         assert!(text.contains("Supported update providers"));
         assert!(text.contains("Homebrew cask"));
-        assert!(text.contains("Detected only: Mac App Store, Sparkle"));
+        assert!(text.contains("Mac App Store (native helper)"));
+        assert!(text.contains("Sparkle (native helper)"));
     }
 
     #[test]

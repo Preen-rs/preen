@@ -1,5 +1,9 @@
 use preen_core::app_uninstall::{AppPackageManager, AppUpdateAvailability, InstalledApplication};
-use preen_core::app_update::{AppUpdateBatchResult, AppUpdatePlan, build_update_batch_plan};
+use preen_core::app_update::{
+    AppUpdateBatchResult, AppUpdateExecutionMode, AppUpdatePlan, build_update_batch_plan,
+};
+use serde::Deserialize;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -86,6 +90,9 @@ pub fn applications_with_available_updates(
 }
 
 fn execute_update_plan(plan: &AppUpdatePlan) -> Result<Output, String> {
+    if matches!(plan.execution_mode, AppUpdateExecutionMode::NativeHelper) {
+        return execute_native_helper_update(plan);
+    }
     let Some(program_name) = plan.command_preview.first() else {
         return Err("update command is empty".to_string());
     };
@@ -107,6 +114,83 @@ fn execute_update_plan(plan: &AppUpdatePlan) -> Result<Output, String> {
     }
     run_command_with_timeout(command, APP_UPDATE_COMMAND_TIMEOUT)
         .ok_or_else(|| "update command timed out".to_string())
+}
+
+fn execute_native_helper_update(plan: &AppUpdatePlan) -> Result<Output, String> {
+    let request = plan
+        .native_request
+        .as_ref()
+        .ok_or_else(|| "native helper request is missing".to_string())?;
+    let helper = native_helper_executable()?;
+    let mut command = Command::new(helper);
+    command.arg("update-app");
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start native update helper: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let payload = serde_json::to_vec(request)
+            .map_err(|error| format!("failed to encode native update request: {error}"))?;
+        stdin
+            .write_all(&payload)
+            .map_err(|error| format!("failed to write native update request: {error}"))?;
+    }
+    let output = wait_child_with_timeout(child, APP_UPDATE_COMMAND_TIMEOUT)
+        .ok_or_else(|| "native update helper timed out".to_string())?;
+    let events = parse_native_helper_events(&output);
+    if !events.is_empty() {
+        let stdout = events
+            .into_iter()
+            .map(|event| {
+                format!(
+                    "{}: {}",
+                    event.event,
+                    event
+                        .message
+                        .unwrap_or_else(|| event.app.unwrap_or_default())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(Output {
+            status: output.status,
+            stdout: stdout.into_bytes(),
+            stderr: output.stderr,
+        });
+    }
+    Ok(output)
+}
+
+fn native_helper_executable() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("PREEN_MACOS_UPDATE_HELPER").map(PathBuf::from)
+        && is_executable_file(&path)
+    {
+        return Ok(path);
+    }
+    find_executable_in_common_paths(
+        "preen-macos-helper",
+        &[
+            "/usr/local/bin/preen-macos-helper",
+            "/opt/homebrew/bin/preen-macos-helper",
+        ],
+    )
+    .ok_or_else(|| "preen macOS update helper executable not found".to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeHelperEvent {
+    event: String,
+    message: Option<String>,
+    app: Option<String>,
+}
+
+fn parse_native_helper_events(output: &Output) -> Vec<NativeHelperEvent> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<NativeHelperEvent>(line).ok())
+        .collect()
 }
 
 fn executable_for_update_manager(
@@ -168,7 +252,11 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
-    let mut child = command.spawn().ok()?;
+    let child = command.spawn().ok()?;
+    wait_child_with_timeout(child, timeout)
+}
+
+fn wait_child_with_timeout(mut child: std::process::Child, timeout: Duration) -> Option<Output> {
     let start = Instant::now();
     loop {
         match child.try_wait() {
@@ -195,6 +283,44 @@ mod tests {
         AppIdentity, AppManagementSource, AppPackageDetectionConfidence, AppPackageMetadata,
         AppSource,
     };
+    use std::fs;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe {
+                    std::env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
 
     fn updateable_app(name: &str) -> InstalledApplication {
         InstalledApplication {
@@ -228,5 +354,47 @@ mod tests {
 
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].identity.display_name, "Demo");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mac_app_store_updates_run_through_native_helper_protocol() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("preen-macos-helper");
+        fs::write(
+            &helper,
+            r#"#!/bin/sh
+cat >/tmp/preen-native-helper-request.json
+printf '%s\n' '{"event":"checking","message":"Checking Demo"}'
+printf '%s\n' '{"event":"completed","app":"Demo","message":"Updated Demo"}'
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&helper).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&helper, permissions).unwrap();
+        let _helper_env = EnvVarGuard::set("PREEN_MACOS_UPDATE_HELPER", &helper);
+
+        let mut app = updateable_app("Demo");
+        app.package_metadata.as_mut().unwrap().manager = AppPackageManager::MacAppStore;
+        app.package_metadata.as_mut().unwrap().package_id = "123456789".to_string();
+
+        let output = execute_application_updates(vec![app]).unwrap();
+
+        assert_eq!(output.updated_apps, vec!["Demo".to_string()]);
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.contains("updated: Demo via Mac App Store"))
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.contains("checking: Checking Demo"))
+        );
     }
 }

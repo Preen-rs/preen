@@ -1451,9 +1451,7 @@ fn application_update_status_line(app: &InstalledApplication) -> String {
             format!("{name}: update status is not checked for this provider yet")
         }
         AppUpdateAvailability::Unsupported => {
-            format!(
-                "{name}: no supported direct updater detected; direct updates now: Homebrew cask, Flatpak, Snap; Mac App Store and Sparkle need native installer backends"
-            )
+            format!("{name}: no update executor is available for this app source")
         }
         AppUpdateAvailability::Unknown => {
             format!("{name}: update status is unknown")
