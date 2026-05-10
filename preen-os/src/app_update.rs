@@ -169,6 +169,16 @@ fn native_helper_executable() -> Result<PathBuf, String> {
     {
         return Ok(path);
     }
+    if let Ok(current_dir) = std::env::current_dir() {
+        let dev_helper = current_dir
+            .join("preen-macos-helper")
+            .join(".build")
+            .join("debug")
+            .join("preen-macos-helper");
+        if is_executable_file(&dev_helper) {
+            return Ok(dev_helper);
+        }
+    }
     find_executable_in_common_paths(
         "preen-macos-helper",
         &[
