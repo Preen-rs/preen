@@ -122,6 +122,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                     state.apply_applications_undo_result(lines, restored_apps);
                     state.last_error = None;
                 }
+                WorkerEvent::PerformanceAnalyzeResult { output } => {
+                    state.apply_performance_analyze_result(output);
+                    state.last_error = None;
+                }
+                WorkerEvent::PerformanceOptimizeResult { result } => {
+                    state.apply_performance_optimize_result(result);
+                    state.last_error = None;
+                }
                 WorkerEvent::SmartCareAnalyzeResult { preview, lines } => {
                     state.apply_smart_care_analyze_result(preview, lines);
                     state.last_error = None;
@@ -177,6 +185,21 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                         {
                             match key.code {
                                 KeyCode::Esc | KeyCode::Char('i') => state.close_info_popup(),
+                                KeyCode::Char('v')
+                                    if key.modifiers == KeyModifiers::NONE
+                                        && matches!(state.active_view, ActiveView::Performance) =>
+                                {
+                                    state.close_info_popup();
+                                }
+                                KeyCode::Char(' ')
+                                    if key.modifiers == KeyModifiers::NONE
+                                        && matches!(state.active_view, ActiveView::Performance)
+                                        && state
+                                            .performance_detail()
+                                            .is_some_and(|detail| !detail.targets.is_empty()) =>
+                                {
+                                    state.performance_detail_toggle_target();
+                                }
                                 KeyCode::Char('p')
                                     if key.modifiers == KeyModifiers::NONE
                                         && matches!(
@@ -196,6 +219,22 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                                 {
                                     state.close_info_popup();
                                     dispatch_applications_inventory_analyze(&mut state, &worker);
+                                }
+                                KeyCode::Char('j') | KeyCode::Down
+                                    if matches!(state.active_view, ActiveView::Performance)
+                                        && state
+                                            .performance_detail()
+                                            .is_some_and(|detail| !detail.targets.is_empty()) =>
+                                {
+                                    state.performance_detail_select_next_target();
+                                }
+                                KeyCode::Char('k') | KeyCode::Up
+                                    if matches!(state.active_view, ActiveView::Performance)
+                                        && state
+                                            .performance_detail()
+                                            .is_some_and(|detail| !detail.targets.is_empty()) =>
+                                {
+                                    state.performance_detail_select_previous_target();
                                 }
                                 KeyCode::Char('j') | KeyCode::Down => {
                                     state.scroll_info_popup_down(1)
@@ -321,6 +360,61 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                             KeyCode::Char('q') | KeyCode::Esc => {
                                 worker.shutdown();
                                 return Ok(());
+                            }
+                            KeyCode::Char('a')
+                                if key.modifiers == KeyModifiers::NONE
+                                    && matches!(state.active_view, ActiveView::Performance) =>
+                            {
+                                dispatch_performance_analyze(&mut state, &worker);
+                            }
+                            KeyCode::Char('r')
+                                if key.modifiers == KeyModifiers::NONE
+                                    && matches!(state.active_view, ActiveView::Performance) =>
+                            {
+                                if state.performance_has_analyze_result {
+                                    dispatch_performance_analyze(&mut state, &worker);
+                                } else {
+                                    state.last_error = Some(
+                                        "run analyze with 'a' first, then press 'r' to reanalyze"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                            KeyCode::Char('j') | KeyCode::Down
+                                if key.modifiers == KeyModifiers::NONE
+                                    && matches!(state.active_view, ActiveView::Performance)
+                                    && state.performance_has_analyze_result =>
+                            {
+                                state.performance_select_next();
+                            }
+                            KeyCode::Char('k') | KeyCode::Up
+                                if key.modifiers == KeyModifiers::NONE
+                                    && matches!(state.active_view, ActiveView::Performance)
+                                    && state.performance_has_analyze_result =>
+                            {
+                                state.performance_select_previous();
+                            }
+                            KeyCode::Char(' ')
+                                if key.modifiers == KeyModifiers::NONE
+                                    && matches!(state.active_view, ActiveView::Performance)
+                                    && state.performance_has_analyze_result =>
+                            {
+                                state.performance_toggle_selected();
+                            }
+                            KeyCode::Char('v')
+                                if key.modifiers == KeyModifiers::NONE
+                                    && matches!(state.active_view, ActiveView::Performance)
+                                    && state.performance_has_analyze_result =>
+                            {
+                                if let Err(error) = state.performance_open_selected_detail() {
+                                    state.last_error = Some(error);
+                                }
+                            }
+                            KeyCode::Char('x')
+                                if key.modifiers == KeyModifiers::NONE
+                                    && matches!(state.active_view, ActiveView::Performance) =>
+                            {
+                                dispatch_performance_optimize(&mut state, &worker);
                             }
                             KeyCode::Char('p')
                                 if key.modifiers == KeyModifiers::NONE
@@ -878,6 +972,39 @@ fn dispatch_applications_undo(state: &mut AppState, worker: &StatusWorker) {
     worker.run_applications_undo();
 }
 
+fn dispatch_performance_analyze(state: &mut AppState, worker: &StatusWorker) {
+    if state.is_busy() || state.smart_care_action_running || state.plugin_action_running {
+        state.last_error = Some("background action already running".to_string());
+        return;
+    }
+    state.begin_performance_analyze();
+    worker.run_performance_analyze();
+}
+
+fn dispatch_performance_optimize(state: &mut AppState, worker: &StatusWorker) {
+    if state.is_busy() || state.smart_care_action_running || state.plugin_action_running {
+        state.last_error = Some("background action already running".to_string());
+        return;
+    }
+    if !state.performance_has_analyze_result {
+        state.last_error =
+            Some("run analyze with 'a' first, then choose optimization tasks".to_string());
+        return;
+    }
+    let selections = state.performance_build_optimize_selections();
+    if selections.is_empty() {
+        state.last_error = Some("select one or more optimization tasks with space".to_string());
+        return;
+    }
+    let details = state
+        .performance_task_details
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    state.begin_performance_optimize();
+    worker.run_performance_optimize(details, selections);
+}
+
 fn default_state_dir() -> Option<PathBuf> {
     match std::env::consts::OS {
         "macos" => std::env::var_os("HOME").map(PathBuf::from).map(|home| {
@@ -903,6 +1030,7 @@ enum MouseScrollTarget {
     SmartCareReview,
     Info,
     Applications,
+    Performance,
     Main,
 }
 
@@ -912,6 +1040,7 @@ struct MouseScrollDeltas {
     smart_care_review: i16,
     info: i16,
     applications: i16,
+    performance: i16,
     main: i16,
 }
 
@@ -922,6 +1051,7 @@ impl MouseScrollDeltas {
             MouseScrollTarget::SmartCareReview => &mut self.smart_care_review,
             MouseScrollTarget::Info => &mut self.info,
             MouseScrollTarget::Applications => &mut self.applications,
+            MouseScrollTarget::Performance => &mut self.performance,
             MouseScrollTarget::Main => &mut self.main,
         };
         *slot = slot.saturating_add(delta);
@@ -953,6 +1083,16 @@ impl MouseScrollDeltas {
         } else if self.applications < 0 {
             for _ in 0..self.applications.unsigned_abs() {
                 state.applications_select_previous();
+            }
+        }
+
+        if self.performance > 0 {
+            for _ in 0..self.performance.unsigned_abs() {
+                state.performance_select_next();
+            }
+        } else if self.performance < 0 {
+            for _ in 0..self.performance.unsigned_abs() {
+                state.performance_select_previous();
             }
         }
 
@@ -995,6 +1135,11 @@ fn mouse_scroll_target(
             && state.smart_care_has_analyze_result
         {
             return Some(MouseScrollTarget::Applications);
+        }
+        if matches!(state.active_view, ActiveView::Performance)
+            && state.performance_has_analyze_result
+        {
+            return Some(MouseScrollTarget::Performance);
         }
         return Some(MouseScrollTarget::Main);
     }

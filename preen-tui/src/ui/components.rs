@@ -1,5 +1,5 @@
 use crate::i18n::{Language, TextKey, tr};
-use crate::model::{ActiveView, AppState};
+use crate::model::{APPLICATIONS_VISIBLE_ROWS, ActiveView, AppState};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -160,6 +160,29 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
         .inner(vertical[1]);
     let row_width = list_inner.width.saturating_sub(2) as usize;
     let app_items = state.applications_items();
+    let viewport_height = list_inner.height as usize;
+    let content_length = app_items.len().max(1);
+    let max_scroll = content_length.saturating_sub(viewport_height);
+    let mut list_scroll_offset = 0usize;
+    let mut relative_selection = None;
+    let visible_app_items = if app_items.is_empty() {
+        Vec::new()
+    } else {
+        let selected = state
+            .applications_selected_row
+            .min(app_items.len().saturating_sub(1));
+        let visible_rows = viewport_height.max(1).min(APPLICATIONS_VISIBLE_ROWS);
+        let computed_offset = selected
+            .saturating_sub(visible_rows.saturating_sub(1))
+            .min(max_scroll);
+        list_scroll_offset = computed_offset;
+        relative_selection = Some(selected.saturating_sub(computed_offset));
+        app_items
+            .iter()
+            .skip(computed_offset)
+            .take(visible_rows)
+            .collect::<Vec<_>>()
+    };
     let list_items = if app_items.is_empty() {
         vec![ListItem::new(localized(
             state,
@@ -167,8 +190,8 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
             "  keine Anwendung gefunden",
         ))]
     } else {
-        app_items
-            .iter()
+        visible_app_items
+            .into_iter()
             .map(|app_name| {
                 let selected = if state.applications_is_selected(app_name) {
                     "[x]"
@@ -176,9 +199,9 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
                     "[ ]"
                 };
                 let left = format!(" {selected} {app_name}");
-                let has_update = state.applications_update_label(app_name).is_some();
-                let line = state
-                    .applications_update_label(app_name)
+                let update_label = state.applications_update_label(app_name);
+                let has_update = update_label.is_some();
+                let line = update_label
                     .map(|label| right_aligned_status_line(&left, &label, row_width))
                     .unwrap_or(left);
                 let style = if has_update {
@@ -192,25 +215,12 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
             })
             .collect::<Vec<_>>()
     };
-    let viewport_height = list_inner.height as usize;
-    let content_length = app_items.len().max(1);
-    let max_scroll = content_length.saturating_sub(viewport_height);
 
     let mut list_state = ListState::default();
-    let mut list_scroll_offset = 0usize;
     if app_items.is_empty() {
         list_state.select(None);
     } else {
-        let selected = state
-            .applications_selected_row
-            .min(app_items.len().saturating_sub(1));
-        // Deterministic offset avoids jumpy list behavior near boundaries.
-        let computed_offset = selected
-            .saturating_sub(viewport_height.saturating_sub(1))
-            .min(max_scroll);
-        list_scroll_offset = computed_offset;
-        list_state.select(Some(selected));
-        list_state = list_state.with_offset(computed_offset);
+        list_state.select(relative_selection);
     }
 
     let scan_suffix = if state.applications_inventory_revision > 0 {

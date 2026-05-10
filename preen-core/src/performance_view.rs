@@ -69,6 +69,44 @@ pub struct PerformanceOptimizationTask {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerformanceTaskTarget {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub path: Option<String>,
+    pub selected_by_default: bool,
+    pub requires_admin: bool,
+    pub risk: PerformanceTaskRisk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerformanceTaskDetail {
+    pub task_id: String,
+    pub title: String,
+    pub summary: String,
+    pub notes: Vec<String>,
+    pub targets: Vec<PerformanceTaskTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerformanceAnalyzeOutput {
+    pub model: PerformanceViewModel,
+    pub details: Vec<PerformanceTaskDetail>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerformanceOptimizeSelection {
+    pub task_id: String,
+    pub target_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerformanceOptimizeResult {
+    pub lines: Vec<String>,
+    pub completed_task_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerformanceViewModel {
     pub overall_level: PerformanceLevel,
@@ -222,8 +260,9 @@ fn optimization_tasks(
         PerformanceOptimizationTask {
             id: "flush_dns_cache".to_string(),
             label: "Flush DNS cache".to_string(),
-            description: "Refresh local DNS cache when network state looks stale or proxy settings changed"
-                .to_string(),
+            description:
+                "Refresh local DNS cache when network state looks stale or proxy settings changed"
+                    .to_string(),
             kind: PerformanceTaskKind::SafeMaintenance,
             risk: PerformanceTaskRisk::Low,
             recommended: metrics
@@ -232,6 +271,21 @@ fn optimization_tasks(
                 .map(|proxy| !proxy.trim().is_empty() && proxy != "none")
                 .unwrap_or(false),
             reason: "network maintenance only; does not change user data".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "inspect_login_items".to_string(),
+            label: "Inspect login items".to_string(),
+            description:
+                "Review startup agents and choose which items should stop launching at login"
+                    .to_string(),
+            kind: PerformanceTaskKind::Inspect,
+            risk: PerformanceTaskRisk::Low,
+            recommended: metrics.process_count.is_some_and(|count| count > 300),
+            reason: if metrics.process_count.is_some_and(|count| count > 300) {
+                "many processes are running; login items may contribute".to_string()
+            } else {
+                "optional startup review".to_string()
+            },
         },
         PerformanceOptimizationTask {
             id: "sync_filesystem_buffers".to_string(),
@@ -250,8 +304,9 @@ fn optimization_tasks(
         PerformanceOptimizationTask {
             id: "memory_pressure_relief".to_string(),
             label: "Relieve memory pressure".to_string(),
-            description: "Use OS-native memory pressure relief only after inspecting memory-heavy apps"
-                .to_string(),
+            description:
+                "Use OS-native memory pressure relief only after inspecting memory-heavy apps"
+                    .to_string(),
             kind: PerformanceTaskKind::AdminMaintenance,
             risk: PerformanceTaskRisk::Medium,
             recommended: memory >= PerformanceLevel::High
@@ -261,8 +316,9 @@ fn optimization_tasks(
         PerformanceOptimizationTask {
             id: "defer_heavy_maintenance".to_string(),
             label: "Defer heavy maintenance".to_string(),
-            description: "Avoid long-running cleanup while temperature, CPU, or disk pressure is high"
-                .to_string(),
+            description:
+                "Avoid long-running cleanup while temperature, CPU, or disk pressure is high"
+                    .to_string(),
             kind: PerformanceTaskKind::Inspect,
             risk: PerformanceTaskRisk::Low,
             recommended: temperature >= PerformanceLevel::Elevated
@@ -288,8 +344,9 @@ fn task_priority(id: &str) -> u8 {
         "inspect_top_processes" => 0,
         "memory_pressure_relief" => 1,
         "flush_dns_cache" => 2,
-        "sync_filesystem_buffers" => 3,
-        "defer_heavy_maintenance" => 4,
+        "inspect_login_items" => 3,
+        "sync_filesystem_buffers" => 4,
+        "defer_heavy_maintenance" => 5,
         _ => 9,
     }
 }

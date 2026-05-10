@@ -2,6 +2,10 @@ use crate::model::{DashboardSnapshot, PluginActionKind};
 use preen_core::app_uninstall::InstalledApplication;
 use preen_core::dashboard_provider::DashboardProvider;
 use preen_core::dashboard_service::DashboardApplicationService;
+use preen_core::performance_view::{
+    PerformanceAnalyzeOutput, PerformanceOptimizeResult, PerformanceOptimizeSelection,
+    PerformanceTaskDetail,
+};
 use preen_core::smart_care::{SmartCarePluginDescriptor, SmartCarePreview, SmartCareProfile};
 use preen_os::dashboard::SnapshotCollector;
 use preen_os::plugin_command::{PluginCommandOutput, run_plugin_cli_command};
@@ -53,6 +57,12 @@ pub enum WorkerEvent {
         lines: Vec<String>,
         restored_apps: Vec<String>,
     },
+    PerformanceAnalyzeResult {
+        output: PerformanceAnalyzeOutput,
+    },
+    PerformanceOptimizeResult {
+        result: PerformanceOptimizeResult,
+    },
     SmartCareAnalyzeResult {
         preview: SmartCarePreview,
         lines: Vec<String>,
@@ -85,6 +95,11 @@ pub enum WorkerCommand {
         applications: Vec<InstalledApplication>,
     },
     ApplicationsUndo,
+    PerformanceAnalyze,
+    PerformanceOptimize {
+        details: Vec<PerformanceTaskDetail>,
+        selections: Vec<PerformanceOptimizeSelection>,
+    },
     SmartCareAnalyze {
         profile: SmartCareProfile,
         descriptors: Vec<SmartCarePluginDescriptor>,
@@ -192,6 +207,21 @@ impl StatusWorker {
         let _ = self.command_tx.send(WorkerCommand::ApplicationsUndo);
     }
 
+    pub fn run_performance_analyze(&self) {
+        let _ = self.command_tx.send(WorkerCommand::PerformanceAnalyze);
+    }
+
+    pub fn run_performance_optimize(
+        &self,
+        details: Vec<PerformanceTaskDetail>,
+        selections: Vec<PerformanceOptimizeSelection>,
+    ) {
+        let _ = self.command_tx.send(WorkerCommand::PerformanceOptimize {
+            details,
+            selections,
+        });
+    }
+
     pub fn run_smart_care_analyze(
         &self,
         profile: SmartCareProfile,
@@ -242,10 +272,12 @@ fn run_worker_loop(
     let mut service = DashboardApplicationService::new(provider);
     let background_action_running = Arc::new(AtomicBool::new(false));
     let mut latest_state_dir: Option<PathBuf> = None;
+    let mut latest_snapshot: Option<DashboardSnapshot> = None;
     loop {
         match service.next_snapshot() {
             Ok(snapshot) => {
                 latest_state_dir = Some(snapshot.state_dir.clone());
+                latest_snapshot = Some(snapshot.clone());
                 let (
                     descriptors,
                     smart_care_error,
@@ -464,6 +496,69 @@ fn run_worker_loop(
                             let _ = event_tx_for_action.send(WorkerEvent::Error(error));
                         }
                     }
+                });
+                continue;
+            }
+            Ok(WorkerCommand::PerformanceAnalyze) => {
+                if background_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "background action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_action = event_tx.clone();
+                let background_action_running = Arc::clone(&background_action_running);
+                let snapshot = latest_snapshot.clone();
+                thread::spawn(move || {
+                    let event = snapshot
+                        .as_ref()
+                        .map(preen_os::performance_optimization::analyze)
+                        .map(|output| WorkerEvent::PerformanceAnalyzeResult { output })
+                        .unwrap_or_else(|| {
+                            WorkerEvent::Error("snapshot is unavailable".to_string())
+                        });
+                    background_action_running.store(false, Ordering::SeqCst);
+                    let _ = event_tx_for_action.send(event);
+                });
+                continue;
+            }
+            Ok(WorkerCommand::PerformanceOptimize {
+                details,
+                selections,
+            }) => {
+                if background_action_running.swap(true, Ordering::SeqCst) {
+                    if event_tx
+                        .send(WorkerEvent::Error(
+                            "background action already running".to_string(),
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                let event_tx_for_action = event_tx.clone();
+                let background_action_running = Arc::clone(&background_action_running);
+                let snapshot = latest_snapshot.clone();
+                thread::spawn(move || {
+                    let event = snapshot
+                        .as_ref()
+                        .map(|snapshot| {
+                            preen_os::performance_optimization::execute(
+                                snapshot, &details, selections,
+                            )
+                        })
+                        .map(|result| WorkerEvent::PerformanceOptimizeResult { result })
+                        .unwrap_or_else(|| {
+                            WorkerEvent::Error("snapshot is unavailable".to_string())
+                        });
+                    background_action_running.store(false, Ordering::SeqCst);
+                    let _ = event_tx_for_action.send(event);
                 });
                 continue;
             }
@@ -982,6 +1077,8 @@ params = {{}}
                 | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
                 | Ok(WorkerEvent::ApplicationsUpdateResult { .. })
                 | Ok(WorkerEvent::ApplicationsUndoResult { .. })
+                | Ok(WorkerEvent::PerformanceAnalyzeResult { .. })
+                | Ok(WorkerEvent::PerformanceOptimizeResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -1092,6 +1189,8 @@ params = {{}}
                 | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
                 | Ok(WorkerEvent::ApplicationsUpdateResult { .. })
                 | Ok(WorkerEvent::ApplicationsUndoResult { .. })
+                | Ok(WorkerEvent::PerformanceAnalyzeResult { .. })
+                | Ok(WorkerEvent::PerformanceOptimizeResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -1148,6 +1247,8 @@ params = {{}}
                 | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
                 | Ok(WorkerEvent::ApplicationsUpdateResult { .. })
                 | Ok(WorkerEvent::ApplicationsUndoResult { .. })
+                | Ok(WorkerEvent::PerformanceAnalyzeResult { .. })
+                | Ok(WorkerEvent::PerformanceOptimizeResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -1192,6 +1293,8 @@ params = {{}}
                 | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
                 | Ok(WorkerEvent::ApplicationsUpdateResult { .. })
                 | Ok(WorkerEvent::ApplicationsUndoResult { .. })
+                | Ok(WorkerEvent::PerformanceAnalyzeResult { .. })
+                | Ok(WorkerEvent::PerformanceOptimizeResult { .. })
                 | Ok(WorkerEvent::PluginActionResult { .. })
                 | Ok(WorkerEvent::SmartCareRunResult { .. })
                 | Ok(WorkerEvent::SmartCareUndoResult { .. }) => {}
@@ -1245,6 +1348,8 @@ params = {{}}
                 | Ok(WorkerEvent::ApplicationsUninstallResult { .. })
                 | Ok(WorkerEvent::ApplicationsUpdateResult { .. })
                 | Ok(WorkerEvent::ApplicationsUndoResult { .. })
+                | Ok(WorkerEvent::PerformanceAnalyzeResult { .. })
+                | Ok(WorkerEvent::PerformanceOptimizeResult { .. })
                 | Ok(WorkerEvent::PluginActionResult { .. })
                 | Ok(WorkerEvent::SmartCareAnalyzeResult { .. }) => {}
                 Ok(WorkerEvent::Error(error)) => panic!("unexpected worker error: {error}"),

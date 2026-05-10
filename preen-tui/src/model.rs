@@ -2,17 +2,23 @@ use crate::i18n::{Language, LanguagePreference, TextKey, detect_system_language,
 use crate::plugin_status::{parse_summary_from_cli_json, render_summary_lines_with_language};
 use preen_core::app_uninstall::{AppUpdateAvailability, InstalledApplication};
 pub use preen_core::dashboard::DashboardSnapshot;
+use preen_core::performance_view::{
+    PerformanceAnalyzeOutput, PerformanceOptimizationTask, PerformanceOptimizeResult,
+    PerformanceOptimizeSelection, PerformanceTaskDetail,
+};
 pub use preen_core::smart_care::{
     SmartCareCapability, SmartCarePluginDescriptor, SmartCarePreview, SmartCareProfile,
     build_preview_from_descriptors,
 };
 pub use preen_os::plugin_command::PluginCommandKind as PluginActionKind;
 use preen_os::smart_care_runtime;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const TUI_CONFIG_FILE: &str = "tui.conf";
+pub const APPLICATIONS_VISIBLE_ROWS: usize = 36;
+pub const PERFORMANCE_VISIBLE_ROWS: usize = 28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveView {
@@ -165,6 +171,7 @@ pub enum BusyViewKind {
     Dashboard,
     Applications,
     ApplicationsPaths,
+    Performance,
     PluginAction,
     SmartCareAction,
 }
@@ -176,6 +183,7 @@ impl BusyViewKind {
             Self::Applications | Self::ApplicationsPaths => {
                 matches!(view, ActiveView::Applications)
             }
+            Self::Performance => matches!(view, ActiveView::Performance),
             Self::PluginAction => matches!(view, ActiveView::Plugins),
             Self::SmartCareAction => view.supports_smart_care_controls(),
         }
@@ -262,6 +270,18 @@ pub struct AppState {
     pub applications_show_paths_in_info: bool,
     pub applications_uninstall_confirm: bool,
     pub applications_pending_uninstall: Vec<String>,
+    pub performance_has_analyze_result: bool,
+    pub performance_tasks: Vec<PerformanceOptimizationTask>,
+    pub performance_task_details: BTreeMap<String, PerformanceTaskDetail>,
+    pub performance_selected_row: usize,
+    pub performance_list_offset: usize,
+    pub performance_selected_tasks: BTreeSet<String>,
+    pub performance_selected_target_ids: BTreeSet<String>,
+    pub performance_detail_task_id: Option<String>,
+    pub performance_detail_selected_row: usize,
+    pub performance_last_action_lines: Vec<String>,
+    pub performance_show_action_details: bool,
+    pub performance_scan_revision: u64,
 }
 
 impl Default for AppState {
@@ -321,6 +341,18 @@ impl Default for AppState {
             applications_show_paths_in_info: false,
             applications_uninstall_confirm: false,
             applications_pending_uninstall: Vec::new(),
+            performance_has_analyze_result: false,
+            performance_tasks: Vec::new(),
+            performance_task_details: BTreeMap::new(),
+            performance_selected_row: 0,
+            performance_list_offset: 0,
+            performance_selected_tasks: BTreeSet::new(),
+            performance_selected_target_ids: BTreeSet::new(),
+            performance_detail_task_id: None,
+            performance_detail_selected_row: 0,
+            performance_last_action_lines: Vec::new(),
+            performance_show_action_details: false,
+            performance_scan_revision: 0,
         }
     }
 }
@@ -504,6 +536,8 @@ impl AppState {
         self.info_popup_scroll = 0;
         self.applications_show_action_details = false;
         self.applications_show_paths_in_info = false;
+        self.performance_show_action_details = false;
+        self.performance_detail_task_id = None;
     }
 
     pub fn applications_close_paths_popup_if_open(&mut self) -> bool {
@@ -522,6 +556,15 @@ impl AppState {
             return Vec::new();
         };
         snapshot.metrics.installed_applications.clone()
+    }
+
+    pub fn applications_items_len(&self) -> usize {
+        if !self.applications_inventory.is_empty() {
+            return self.applications_inventory.len();
+        }
+        self.snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.metrics.installed_applications.len())
     }
 
     pub fn apply_applications_inventory_analyze_result(
@@ -571,21 +614,20 @@ impl AppState {
     }
 
     pub fn applications_select_next(&mut self) {
-        let items = self.applications_items();
-        if items.is_empty() {
+        let item_count = self.applications_items_len();
+        if item_count == 0 {
             self.applications_selected_row = 0;
             self.applications_list_offset = 0;
             return;
         }
-        if self.applications_selected_row + 1 < items.len() {
+        if self.applications_selected_row + 1 < item_count {
             self.applications_selected_row += 1;
         }
         self.applications_sync_main_scroll_with_selection();
     }
 
     pub fn applications_select_previous(&mut self) {
-        let items = self.applications_items();
-        if items.is_empty() {
+        if self.applications_items_len() == 0 {
             self.applications_selected_row = 0;
             self.applications_list_offset = 0;
             return;
@@ -695,9 +737,19 @@ impl AppState {
     }
 
     fn applications_sync_main_scroll_with_selection(&mut self) {
-        // Main scroll is kept for legacy paragraph rendering paths.
-        const APP_LIST_HEADER_LINES: usize = 18;
-        self.main_scroll = APP_LIST_HEADER_LINES as u16;
+        if self.applications_selected_row < self.applications_list_offset {
+            self.applications_list_offset = self.applications_selected_row;
+        }
+        let visible_end = self
+            .applications_list_offset
+            .saturating_add(APPLICATIONS_VISIBLE_ROWS);
+        if self.applications_selected_row >= visible_end {
+            self.applications_list_offset = self
+                .applications_selected_row
+                .saturating_add(1)
+                .saturating_sub(APPLICATIONS_VISIBLE_ROWS);
+        }
+        self.main_scroll = 0;
     }
 
     fn applications_uninstall_targets(&self) -> Vec<String> {
@@ -953,6 +1005,223 @@ impl AppState {
         self.show_info_popup = self.applications_show_action_details;
         self.info_popup_scroll = 0;
         self.last_error = None;
+    }
+
+    pub fn begin_performance_analyze(&mut self) {
+        self.begin_busy_view(
+            BusyViewKind::Performance,
+            self.tr(TextKey::AnalyzingPerformanceTitle),
+            self.tr(TextKey::AnalyzingPerformanceDetail),
+            self.tr(TextKey::Performance),
+        );
+        self.last_error = None;
+    }
+
+    pub fn begin_performance_optimize(&mut self) {
+        self.begin_busy_view(
+            BusyViewKind::Performance,
+            self.tr(TextKey::OptimizingPerformanceTitle),
+            self.tr(TextKey::OptimizingPerformanceDetail),
+            self.tr(TextKey::Performance),
+        );
+        self.last_error = None;
+    }
+
+    pub fn apply_performance_analyze_result(&mut self, output: PerformanceAnalyzeOutput) {
+        self.performance_tasks = output.model.optimization_tasks;
+        self.performance_task_details = output
+            .details
+            .into_iter()
+            .map(|detail| (detail.task_id.clone(), detail))
+            .collect();
+        self.performance_has_analyze_result = true;
+        self.performance_selected_row = 0;
+        self.performance_list_offset = 0;
+        self.performance_selected_tasks.clear();
+        self.performance_selected_target_ids.clear();
+        for task in &self.performance_tasks {
+            if task.recommended {
+                self.performance_selected_tasks.insert(task.id.clone());
+            }
+        }
+        for detail in self.performance_task_details.values() {
+            for target in &detail.targets {
+                if target.selected_by_default {
+                    self.performance_selected_target_ids
+                        .insert(target.id.clone());
+                }
+            }
+        }
+        self.performance_last_action_lines.clear();
+        self.performance_show_action_details = false;
+        self.performance_detail_task_id = None;
+        self.performance_scan_revision = self.performance_scan_revision.saturating_add(1);
+        self.close_info_popup();
+        self.performance_sync_selection();
+        self.clear_busy_view_kind(BusyViewKind::Performance);
+    }
+
+    pub fn apply_performance_optimize_result(&mut self, result: PerformanceOptimizeResult) {
+        for task_id in result.completed_task_ids {
+            self.performance_selected_tasks.remove(&task_id);
+        }
+        self.performance_last_action_lines = result.lines;
+        self.performance_show_action_details = !self.performance_last_action_lines.is_empty();
+        self.show_info_popup = self.performance_show_action_details;
+        self.info_popup_scroll = 0;
+        self.clear_busy_view_kind(BusyViewKind::Performance);
+        self.last_error = None;
+    }
+
+    pub fn performance_select_next(&mut self) {
+        let total = self.performance_tasks.len();
+        if total == 0 {
+            self.performance_selected_row = 0;
+            self.performance_list_offset = 0;
+            return;
+        }
+        if self.performance_selected_row + 1 < total {
+            self.performance_selected_row += 1;
+        }
+        self.performance_sync_selection();
+    }
+
+    pub fn performance_select_previous(&mut self) {
+        if self.performance_tasks.is_empty() {
+            self.performance_selected_row = 0;
+            self.performance_list_offset = 0;
+            return;
+        }
+        self.performance_selected_row = self.performance_selected_row.saturating_sub(1);
+        self.performance_sync_selection();
+    }
+
+    pub fn performance_toggle_selected(&mut self) {
+        let Some(task) = self.performance_selected_task() else {
+            return;
+        };
+        if !self.performance_selected_tasks.insert(task.id.clone()) {
+            self.performance_selected_tasks.remove(&task.id);
+        }
+    }
+
+    pub fn performance_open_selected_detail(&mut self) -> Result<(), String> {
+        let Some(task) = self.performance_selected_task() else {
+            return Err("no optimization task selected".to_string());
+        };
+        self.performance_detail_task_id = Some(task.id.clone());
+        self.performance_show_action_details = false;
+        self.performance_detail_selected_row = 0;
+        self.show_info_popup = true;
+        self.info_popup_scroll = 0;
+        Ok(())
+    }
+
+    pub fn performance_selected_task(&self) -> Option<PerformanceOptimizationTask> {
+        self.performance_tasks
+            .get(self.performance_selected_row)
+            .cloned()
+    }
+
+    pub fn performance_detail(&self) -> Option<&PerformanceTaskDetail> {
+        let task_id = self.performance_detail_task_id.as_deref()?;
+        self.performance_task_details.get(task_id)
+    }
+
+    pub fn performance_detail_select_next_target(&mut self) {
+        let target_count = self
+            .performance_detail()
+            .map_or(0, |detail| detail.targets.len());
+        if target_count == 0 {
+            self.scroll_info_popup_down(1);
+            return;
+        }
+        if self.performance_detail_selected_row + 1 < target_count {
+            self.performance_detail_selected_row += 1;
+        }
+    }
+
+    pub fn performance_detail_select_previous_target(&mut self) {
+        let target_count = self
+            .performance_detail()
+            .map_or(0, |detail| detail.targets.len());
+        if target_count == 0 {
+            self.scroll_info_popup_up(1);
+            return;
+        }
+        self.performance_detail_selected_row =
+            self.performance_detail_selected_row.saturating_sub(1);
+    }
+
+    pub fn performance_detail_toggle_target(&mut self) {
+        let Some(target_id) = self
+            .performance_detail()
+            .and_then(|detail| detail.targets.get(self.performance_detail_selected_row))
+            .map(|target| target.id.clone())
+        else {
+            return;
+        };
+        if !self
+            .performance_selected_target_ids
+            .insert(target_id.clone())
+        {
+            self.performance_selected_target_ids.remove(&target_id);
+        }
+    }
+
+    pub fn performance_selected_count(&self) -> usize {
+        self.performance_selected_tasks.len()
+    }
+
+    pub fn performance_build_optimize_selections(&self) -> Vec<PerformanceOptimizeSelection> {
+        self.performance_selected_tasks
+            .iter()
+            .map(|task_id| {
+                let target_ids = self
+                    .performance_task_details
+                    .get(task_id)
+                    .map(|detail| {
+                        detail
+                            .targets
+                            .iter()
+                            .filter(|target| {
+                                self.performance_selected_target_ids.contains(&target.id)
+                            })
+                            .map(|target| target.id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                PerformanceOptimizeSelection {
+                    task_id: task_id.clone(),
+                    target_ids,
+                }
+            })
+            .collect()
+    }
+
+    fn performance_sync_selection(&mut self) {
+        if self.performance_tasks.is_empty() {
+            self.performance_selected_row = 0;
+            self.performance_list_offset = 0;
+            self.main_scroll = 0;
+            return;
+        }
+        if self.performance_selected_row >= self.performance_tasks.len() {
+            self.performance_selected_row = self.performance_tasks.len().saturating_sub(1);
+        }
+        if self.performance_selected_row < self.performance_list_offset {
+            self.performance_list_offset = self.performance_selected_row;
+        }
+        let visible_end = self
+            .performance_list_offset
+            .saturating_add(PERFORMANCE_VISIBLE_ROWS);
+        if self.performance_selected_row >= visible_end {
+            self.performance_list_offset = self
+                .performance_selected_row
+                .saturating_add(1)
+                .saturating_sub(PERFORMANCE_VISIBLE_ROWS);
+        }
+        self.main_scroll = 0;
     }
 
     pub fn scroll_info_popup_down(&mut self, amount: u16) {

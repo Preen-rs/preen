@@ -98,6 +98,10 @@ pub enum TextKey {
     UpdatingApplicationsDetail,
     UndoingApplicationsTitle,
     UndoingApplicationsDetail,
+    AnalyzingPerformanceTitle,
+    AnalyzingPerformanceDetail,
+    OptimizingPerformanceTitle,
+    OptimizingPerformanceDetail,
     CollectingSnapshot,
     SnapshotWorkerRunning,
     SettingsTitle,
@@ -157,6 +161,14 @@ pub fn tr(language: Language, key: TextKey) -> &'static str {
             TextKey::UndoingApplicationsTitle => "Restoring applications",
             TextKey::UndoingApplicationsDetail => {
                 "Restoring files from the last application uninstall journal"
+            }
+            TextKey::AnalyzingPerformanceTitle => "Analyzing optimization tasks",
+            TextKey::AnalyzingPerformanceDetail => {
+                "Inspecting performance signals and preparing safe optimization actions"
+            }
+            TextKey::OptimizingPerformanceTitle => "Running optimization tasks",
+            TextKey::OptimizingPerformanceDetail => {
+                "Applying selected optimization actions and collecting results"
             }
             TextKey::CollectingSnapshot => "Collecting realtime snapshot...",
             TextKey::SnapshotWorkerRunning => "State worker is running in background.",
@@ -218,6 +230,14 @@ pub fn tr(language: Language, key: TextKey) -> &'static str {
             TextKey::UndoingApplicationsTitle => "Anwendungen werden wiederhergestellt",
             TextKey::UndoingApplicationsDetail => {
                 "Dateien aus dem letzten Deinstallations-Journal werden wiederhergestellt"
+            }
+            TextKey::AnalyzingPerformanceTitle => "Optimierungsaufgaben werden analysiert",
+            TextKey::AnalyzingPerformanceDetail => {
+                "Leistungsdaten werden geprüft und sichere Optimierungsaktionen werden vorbereitet"
+            }
+            TextKey::OptimizingPerformanceTitle => "Optimierungsaufgaben werden ausgeführt",
+            TextKey::OptimizingPerformanceDetail => {
+                "Ausgewählte Optimierungsaktionen werden angewendet und Ergebnisse werden gesammelt"
             }
             TextKey::CollectingSnapshot => "Echtzeit-Snapshot wird gesammelt...",
             TextKey::SnapshotWorkerRunning => "Status-Worker läuft im Hintergrund.",

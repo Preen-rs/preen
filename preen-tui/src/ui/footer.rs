@@ -195,6 +195,18 @@ fn footer_context_text(state: &AppState) -> String {
         .to_string();
     }
     if state.show_info_popup && state.active_view.supports_smart_care_controls() {
+        if matches!(state.active_view, ActiveView::Performance)
+            && state
+                .performance_detail()
+                .is_some_and(|detail| !detail.targets.is_empty())
+        {
+            return l(
+                language,
+                "Optimization details: j/k item | space select item | close: v/i/Esc",
+                "Optimierungsdetails: j/k Eintrag | Leertaste waehlen | schliessen: v/i/Esc",
+            )
+            .to_string();
+        }
         return l(
             language,
             "Info: j/k or Up/Down or wheel scroll | Close: i / Esc",
@@ -280,7 +292,13 @@ fn footer_context_text(state: &AppState) -> String {
             "Anwendungen: a analysieren | r erneut | j/k bewegen | Leertaste wählen | p Pfade | x aktualisieren | u deinstallieren | z rückgängig | i Info | ?: Tasten",
         )
         .to_string(),
-        ActiveView::Cleanup | ActiveView::Protection | ActiveView::Performance => format!(
+        ActiveView::Performance => l(
+            language,
+            "Optimization: a analyze | r reanalyze | j/k move | space select | v details | x optimize | i result | ?: keys",
+            "Optimierung: a analysieren | r erneut | j/k bewegen | Leertaste wählen | v Details | x optimieren | i Ergebnis | ?: Tasten",
+        )
+        .to_string(),
+        ActiveView::Cleanup | ActiveView::Protection => format!(
             "{}: {} | {} | a {} | v review | n/f/t plugin | Shift+X {} | {} | u {} | i info | ?: {}",
             state.active_view.title_for_language(state.effective_language()),
             l(language, "h/l select", "h/l wählen"),

@@ -25,6 +25,7 @@ pub mod app_inventory;
 pub mod app_uninstall;
 pub mod app_update;
 pub mod dashboard;
+pub mod performance_optimization;
 pub mod plugin_command;
 pub mod smart_care;
 pub mod smart_care_runtime;

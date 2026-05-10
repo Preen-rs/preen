@@ -1,5 +1,8 @@
 use crate::i18n::{Language, TextKey};
-use crate::model::{ActiveView, AppState, DashboardSnapshot, PluginActionKind};
+use crate::model::{
+    APPLICATIONS_VISIBLE_ROWS, ActiveView, AppState, DashboardSnapshot, PERFORMANCE_VISIBLE_ROWS,
+    PluginActionKind,
+};
 use preen_core::app_uninstall::{
     AppManagementSource, AppPackageDetectionConfidence, AppPackageManager, AppSource,
     AppUpdateAvailability, InstalledApplication,
@@ -35,7 +38,8 @@ pub(super) fn build_main_lines(state: &AppState, content_width: usize) -> Vec<Li
         ActiveView::Dashboard => dashboard::dashboard_lines(snapshot, content_width),
         ActiveView::SmartCare => smart_care_lines(state, snapshot, content_width),
         ActiveView::Applications => applications_lines(state, snapshot, content_width),
-        ActiveView::Cleanup | ActiveView::Protection | ActiveView::Performance => {
+        ActiveView::Performance => performance_lines(state, snapshot, content_width),
+        ActiveView::Cleanup | ActiveView::Protection => {
             capability_lines(state, snapshot, content_width)
         }
         ActiveView::Plugins => plugin_lines(state, snapshot, content_width),
@@ -198,6 +202,101 @@ pub(super) fn build_smart_care_review_popup_lines(state: &AppState) -> Vec<Line<
 
 pub(super) fn build_info_popup_lines(state: &AppState, content_width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+
+    if matches!(state.active_view, ActiveView::Performance) {
+        if state.performance_show_action_details {
+            lines.push(Line::from(localized(
+                state,
+                "Optimization result",
+                "Optimierungsergebnis",
+            )));
+            lines.push(Line::from(""));
+            if state.performance_last_action_lines.is_empty() {
+                lines.push(Line::from("- no result yet"));
+            } else {
+                for item in &state.performance_last_action_lines {
+                    for wrapped in wrap_with_prefix("- ", item, content_width) {
+                        lines.push(Line::from(wrapped));
+                    }
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(localized(
+                state,
+                "Close: i / Esc | Scroll: j/k / PgUp/PgDn / mouse wheel",
+                "Schliessen: i / Esc | Scroll: j/k / PgUp/PgDn / Mausrad",
+            )));
+            return lines;
+        }
+
+        if let Some(detail) = state.performance_detail() {
+            lines.push(Line::from(detail.title.clone()));
+            lines.push(Line::from(""));
+            for wrapped in wrap_with_prefix("", &detail.summary, content_width) {
+                lines.push(Line::from(wrapped));
+            }
+            if !detail.notes.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(localized(state, "Notes", "Notizen")));
+                for note in &detail.notes {
+                    for wrapped in wrap_with_prefix("- ", note, content_width) {
+                        lines.push(Line::from(wrapped));
+                    }
+                }
+            }
+            if !detail.targets.is_empty() {
+                let selected = detail
+                    .targets
+                    .iter()
+                    .filter(|target| state.performance_selected_target_ids.contains(&target.id))
+                    .count();
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!(
+                    "{} ({selected}/{})",
+                    localized(state, "Items", "Eintraege"),
+                    detail.targets.len()
+                )));
+                for (index, target) in detail.targets.iter().enumerate() {
+                    let marker = if index == state.performance_detail_selected_row {
+                        "▶"
+                    } else {
+                        " "
+                    };
+                    let selected = if state.performance_selected_target_ids.contains(&target.id) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    let admin = if target.requires_admin { " admin" } else { "" };
+                    let line = format!(
+                        "{marker} {selected} {} ({}, risk={}{}): {}",
+                        target.label,
+                        target.description,
+                        target.risk.label(),
+                        admin,
+                        target.path.as_deref().unwrap_or("n/a")
+                    );
+                    for wrapped in wrap_with_prefix("", &line, content_width) {
+                        lines.push(Line::from(wrapped));
+                    }
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(localized(
+                    state,
+                    "j/k move | space select item | x runs selected tasks | close: v/i/Esc",
+                    "j/k bewegen | Leertaste waehlt Eintrag | x fuehrt Aufgaben aus | schliessen: v/i/Esc",
+                )));
+            } else {
+                lines.push(Line::from(""));
+                lines.push(Line::from(localized(
+                    state,
+                    "Close: v / i / Esc | Scroll: j/k / PgUp/PgDn / mouse wheel",
+                    "Schliessen: v / i / Esc | Scroll: j/k / PgUp/PgDn / Mausrad",
+                )));
+            }
+            return lines;
+        }
+    }
 
     if matches!(state.active_view, ActiveView::Applications) {
         if state.applications_show_action_details {
@@ -627,6 +726,176 @@ fn capability_shortcut_key(capability: SmartCareCapability) -> &'static str {
     }
 }
 
+fn performance_lines(
+    state: &AppState,
+    snapshot: &DashboardSnapshot,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    let model = PerformanceViewModel::from_snapshot(snapshot);
+    let mut lines = vec![Line::from(state.tr(TextKey::Performance))];
+
+    lines.push(Line::from(format!(
+        "{}: {} | {}: {}",
+        localized(state, "System pressure", "Systemlast"),
+        model.overall_level.label(),
+        localized(state, "Bottleneck", "Engpass"),
+        model.primary_bottleneck
+    )));
+    lines.push(Line::from(format!(
+        "CPU {} | Memory {} | Disk I/O {}",
+        optional_percent(model.cpu_usage_pct),
+        optional_percent(model.memory_used_pct),
+        model
+            .disk_io_rate_mbps
+            .map(|value| format!("{value:.2} MB/s"))
+            .unwrap_or_else(|| "n/a".to_string())
+    )));
+
+    if !state.performance_has_analyze_result {
+        lines.push(Line::from(""));
+        lines.push(Line::from(localized(
+            state,
+            "[ Analyze Optimization Tasks ]",
+            "[ Optimierungsaufgaben analysieren ]",
+        )));
+        lines.push(Line::from(localized(
+            state,
+            "Press 'a' to analyze performance signals and load the action list.",
+            "Drücke 'a', um Leistungsdaten zu analysieren und die Aktionsliste zu laden.",
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(localized(
+            state,
+            "Top process pressure",
+            "Top-Prozesslast",
+        )));
+        if model.top_processes.is_empty() {
+            lines.push(Line::from("- no process sample"));
+        } else {
+            for process in model.top_processes {
+                lines.push(Line::from(format!(
+                    "- {:<18} cpu={:>5.1}% mem={:>5.1}%",
+                    truncate_with_ellipsis(&process.name, 18),
+                    process.cpu_pct,
+                    process.memory_pct
+                )));
+            }
+        }
+        if let Some(error) = &state.last_error {
+            lines.push(Line::from(""));
+            lines.push(Line::from(localized(state, "Error", "Fehler")));
+            for line in simplify_diagnostic_lines(vec![error.clone()]) {
+                for wrapped in wrap_with_prefix("- ", &line, content_width) {
+                    lines.push(Line::from(wrapped));
+                }
+            }
+        }
+        return lines;
+    }
+
+    let recommended = state
+        .performance_tasks
+        .iter()
+        .filter(|task| task.recommended)
+        .count();
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!(
+        "{} (selected={} / {} · recommended={} · scan #{})",
+        localized(state, "Optimization tasks", "Optimierungsaufgaben"),
+        state.performance_selected_count(),
+        state.performance_tasks.len(),
+        recommended,
+        state.performance_scan_revision
+    )));
+    lines.push(Line::from(localized(
+        state,
+        "j/k move | space select | v details | x optimize selected | r reanalyze",
+        "j/k bewegen | Leertaste waehlen | v Details | x optimieren | r erneut",
+    )));
+    lines.push(Line::from(""));
+
+    if state.performance_tasks.is_empty() {
+        lines.push(Line::from("- no optimization task found"));
+    } else {
+        let start = state.performance_list_offset;
+        if start > 0 {
+            lines.push(Line::from(format!("- ... {start} earlier task(s)")));
+        }
+        for (index, task) in state
+            .performance_tasks
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(PERFORMANCE_VISIBLE_ROWS)
+        {
+            let marker = if index == state.performance_selected_row {
+                "▶"
+            } else {
+                " "
+            };
+            let selected = if state.performance_selected_tasks.contains(&task.id) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let rec = if task.recommended { "rec" } else { "opt" };
+            let left = format!(
+                "  {marker} {selected} {:<3} {}",
+                rec,
+                truncate_with_ellipsis(&task.label, 44)
+            );
+            let right = format!("[{} · {}]", task.kind.label(), task.risk.label());
+            lines.push(Line::from(right_aligned_text(&left, &right, content_width)));
+            for wrapped in wrap_with_prefix(
+                "      ",
+                &truncate_with_ellipsis(&task.reason, content_width.saturating_sub(8)),
+                content_width,
+            ) {
+                lines.push(Line::from(wrapped));
+            }
+        }
+        let rendered_end = start.saturating_add(PERFORMANCE_VISIBLE_ROWS);
+        if rendered_end < state.performance_tasks.len() {
+            lines.push(Line::from(format!(
+                "- ... {} more task(s)",
+                state.performance_tasks.len().saturating_sub(rendered_end)
+            )));
+        }
+    }
+
+    if !state.performance_last_action_lines.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(localized(
+            state,
+            "Last optimization result",
+            "Letztes Optimierungsergebnis",
+        )));
+        for item in state.performance_last_action_lines.iter().take(3) {
+            for wrapped in wrap_with_prefix("- ", item, content_width) {
+                lines.push(Line::from(wrapped));
+            }
+        }
+        if state.performance_last_action_lines.len() > 3 {
+            lines.push(Line::from(localized(
+                state,
+                "- more details with i",
+                "- mehr Details mit i",
+            )));
+        }
+    }
+    if let Some(error) = &state.last_error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(localized(state, "Error", "Fehler")));
+        for line in simplify_diagnostic_lines(vec![error.clone()]) {
+            for wrapped in wrap_with_prefix("- ", &line, content_width) {
+                lines.push(Line::from(wrapped));
+            }
+        }
+    }
+
+    lines
+}
+
 fn applications_lines(
     state: &AppState,
     snapshot: &DashboardSnapshot,
@@ -767,7 +1036,19 @@ fn applications_lines(
                 state.applications_selected_count()
             ),
         }));
-        for (index, app_name) in app_items.iter().enumerate() {
+        let start = state.applications_list_offset.min(app_items.len());
+        if start > 0 {
+            lines.push(Line::from(match state.effective_language() {
+                Language::English => format!("- ... {start} earlier app(s)"),
+                Language::German => format!("- ... {start} frühere App(s)"),
+            }));
+        }
+        for (index, app_name) in app_items
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(APPLICATIONS_VISIBLE_ROWS)
+        {
             let marker = if index == state.applications_selected_row {
                 "▶"
             } else {
@@ -784,6 +1065,23 @@ fn applications_lines(
                 .map(|label| right_aligned_text(&left, &format!("[{label}]"), content_width))
                 .unwrap_or(left);
             lines.push(Line::from(line));
+        }
+        let rendered_end = start.saturating_add(APPLICATIONS_VISIBLE_ROWS);
+        if rendered_end < app_items.len() {
+            lines.push(Line::from(match state.effective_language() {
+                Language::English => {
+                    format!(
+                        "- ... {} more app(s)",
+                        app_items.len().saturating_sub(rendered_end)
+                    )
+                }
+                Language::German => {
+                    format!(
+                        "- ... {} weitere App(s)",
+                        app_items.len().saturating_sub(rendered_end)
+                    )
+                }
+            }));
         }
     }
 
