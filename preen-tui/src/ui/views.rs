@@ -196,7 +196,7 @@ pub(super) fn build_smart_care_review_popup_lines(state: &AppState) -> Vec<Line<
     smart_care_review_lines(state, &preview, snapshot)
 }
 
-pub(super) fn build_info_popup_lines(state: &AppState) -> Vec<Line<'static>> {
+pub(super) fn build_info_popup_lines(state: &AppState, content_width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     if matches!(state.active_view, ActiveView::Applications) {
@@ -214,20 +214,11 @@ pub(super) fn build_info_popup_lines(state: &AppState) -> Vec<Line<'static>> {
                 )));
             } else {
                 for item in &state.applications_last_action_lines {
-                    lines.push(Line::from(format!("- {item}")));
+                    for wrapped in wrap_with_prefix("- ", item, content_width) {
+                        lines.push(Line::from(wrapped));
+                    }
                 }
             }
-            lines.push(Line::from(""));
-            lines.push(Line::from(localized(
-                state,
-                "Supported update providers",
-                "Unterstuetzte Update-Quellen",
-            )));
-            lines.push(Line::from("- Homebrew cask"));
-            lines.push(Line::from("- Mac App Store (native helper)"));
-            lines.push(Line::from("- Sparkle (native helper)"));
-            lines.push(Line::from("- Flatpak"));
-            lines.push(Line::from("- Snap"));
             lines.push(Line::from(""));
             lines.push(Line::from(localized(
                 state,
@@ -2194,16 +2185,52 @@ pub(super) fn plugin_lines(
 fn wrap_with_prefix(prefix: &str, text: &str, width: usize) -> Vec<String> {
     let usable = width.saturating_sub(prefix.chars().count()).max(8);
     let mut out = Vec::new();
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.is_empty() {
+    if text.is_empty() {
         out.push(prefix.to_string());
         return out;
     }
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        let current_len = current.chars().count();
+        if current.is_empty() {
+            if word_len <= usable {
+                current.push_str(word);
+            } else {
+                for chunk in chunk_chars(word, usable) {
+                    out.push(format!("{prefix}{chunk}"));
+                }
+            }
+            continue;
+        }
+        if current_len + 1 + word_len <= usable {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            out.push(format!("{prefix}{current}"));
+            current.clear();
+            if word_len <= usable {
+                current.push_str(word);
+            } else {
+                for chunk in chunk_chars(word, usable) {
+                    out.push(format!("{prefix}{chunk}"));
+                }
+            }
+        }
+    }
+    if !current.is_empty() {
+        out.push(format!("{prefix}{current}"));
+    }
+    out
+}
+
+fn chunk_chars(text: &str, width: usize) -> Vec<String> {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut out = Vec::new();
     let mut index = 0usize;
     while index < chars.len() {
-        let end = (index + usable).min(chars.len());
-        let chunk = chars[index..end].iter().collect::<String>();
-        out.push(format!("{prefix}{chunk}"));
+        let end = (index + width).min(chars.len());
+        out.push(chars[index..end].iter().collect::<String>());
         index = end;
     }
     out
@@ -2396,7 +2423,7 @@ mod tests {
             ..AppState::default()
         };
 
-        let text = build_info_popup_lines(&state)
+        let text = build_info_popup_lines(&state, 96)
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -2428,13 +2455,13 @@ mod tests {
             active_view: ActiveView::Applications,
             applications_show_action_details: true,
             applications_last_action_lines: vec![
-                "Affinity: no update executor is available for this app source".to_string(),
+                "Affinity: no update executor is available for this app source and the diagnostic should wrap inside the popup instead of disappearing beyond the right edge".to_string(),
                 "Anaconda Navigator: update available".to_string(),
             ],
             ..AppState::default()
         };
 
-        let text = build_info_popup_lines(&state)
+        let text = build_info_popup_lines(&state, 80)
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -2442,10 +2469,11 @@ mod tests {
 
         assert!(text.starts_with("Application update result"));
         assert!(text.contains("Anaconda Navigator: update available"));
-        assert!(text.contains("Supported update providers"));
-        assert!(text.contains("Homebrew cask"));
-        assert!(text.contains("Mac App Store (native helper)"));
-        assert!(text.contains("Sparkle (native helper)"));
+        assert!(!text.contains("Supported update providers"));
+        assert!(text.contains("diagnostic should wrap"));
+        assert!(text.contains("inside the popup instead of"));
+        assert!(text.contains("disappearing beyond"));
+        assert!(text.contains("right edge"));
     }
 
     #[test]

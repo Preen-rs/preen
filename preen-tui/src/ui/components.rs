@@ -367,7 +367,8 @@ pub(super) fn render_info_popup(frame: &mut Frame<'_>, area: Rect, state: &AppSt
     });
 
     let mut viewport_height = inner.height as usize;
-    let lines = views::build_info_popup_lines(state);
+    let content_width = inner.width.saturating_sub(1).max(1) as usize;
+    let lines = views::build_info_popup_lines(state, content_width);
     let show_scrollbar = viewport_height > 0 && lines.len() > viewport_height;
     let content_area = if show_scrollbar && inner.width > 1 {
         Rect {
