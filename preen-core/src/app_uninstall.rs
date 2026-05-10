@@ -42,11 +42,39 @@ impl AppIdentity {
             if let Some(last) = bundle_identifier.rsplit('.').next() {
                 push_normalized_key(&mut keys, last);
             }
+            let parts = bundle_identifier.split('.').collect::<Vec<_>>();
+            if parts.len() >= 2 {
+                push_normalized_key(&mut keys, &parts[parts.len().saturating_sub(2)..].join("."));
+            }
         }
         if let Some(desktop_id) = &self.desktop_id {
             push_normalized_key(&mut keys, desktop_id);
+            if let Some(last) = desktop_id
+                .trim_end_matches(".desktop")
+                .rsplit(['.', '-'])
+                .next()
+            {
+                push_normalized_key(&mut keys, last);
+            }
         }
         keys
+    }
+
+    pub fn stable_id(&self, path: &str) -> String {
+        let platform = match self.platform {
+            AppPlatform::Macos => "macos",
+            AppPlatform::Linux => "linux",
+        };
+        let primary = self
+            .bundle_identifier
+            .as_deref()
+            .or(self.desktop_id.as_deref())
+            .unwrap_or(&self.display_name);
+        format!(
+            "{platform}:{}:{}",
+            normalize_app_match_key(primary),
+            normalize_app_match_key(path)
+        )
     }
 }
 
@@ -264,7 +292,11 @@ mod tests {
 
         assert_eq!(
             identity.primary_match_keys(),
-            vec!["demo".to_string(), "comexampledemo".to_string()]
+            vec![
+                "demo".to_string(),
+                "comexampledemo".to_string(),
+                "exampledemo".to_string()
+            ]
         );
     }
 

@@ -530,11 +530,7 @@ impl AppState {
     ) {
         let previous_len = self.applications_inventory.len();
         self.applications_inventory_metadata = applications;
-        self.applications_inventory = self
-            .applications_inventory_metadata
-            .iter()
-            .map(|app| app.identity.display_name.clone())
-            .collect();
+        self.applications_inventory = application_row_labels(&self.applications_inventory_metadata);
         self.applications_inventory_revision =
             self.applications_inventory_revision.saturating_add(1);
         self.applications_selected_row = 0;
@@ -616,7 +612,7 @@ impl AppState {
     pub fn applications_is_protected(&self, app_name: &str) -> bool {
         self.applications_inventory_metadata
             .iter()
-            .any(|app| app.identity.display_name == app_name && app.protected)
+            .any(|app| self.applications_app_matches_selector(app, app_name) && app.protected)
     }
 
     pub fn applications_toggle_selected(&mut self) {
@@ -656,7 +652,7 @@ impl AppState {
         let app = self
             .applications_inventory_metadata
             .iter()
-            .find(|app| app.identity.display_name == app_name)?;
+            .find(|app| self.applications_app_matches_selector(app, app_name))?;
         if app.update_availability != AppUpdateAvailability::UpdateAvailable {
             return None;
         }
@@ -735,7 +731,7 @@ impl AppState {
 
     fn applications_can_update(&self, app_name: &str) -> bool {
         self.applications_inventory_metadata.iter().any(|app| {
-            app.identity.display_name == app_name
+            self.applications_app_matches_selector(app, app_name)
                 && !app.protected
                 && app.update_availability == AppUpdateAvailability::UpdateAvailable
                 && app.package_metadata.is_some()
@@ -745,8 +741,22 @@ impl AppState {
     fn applications_metadata_for_name(&self, app_name: &str) -> Option<InstalledApplication> {
         self.applications_inventory_metadata
             .iter()
-            .find(|app| app.identity.display_name == app_name)
+            .find(|app| self.applications_app_matches_selector(app, app_name))
             .cloned()
+    }
+
+    fn applications_app_matches_selector(
+        &self,
+        app: &InstalledApplication,
+        selector: &str,
+    ) -> bool {
+        app.identity.display_name == selector
+            || application_stable_id(app) == selector
+            || app.path == selector
+            || application_row_label_for_current_inventory(
+                app,
+                &self.applications_inventory_metadata,
+            ) == selector
     }
 
     pub fn applications_open_uninstall_confirm(&mut self) -> Result<(), String> {
@@ -868,10 +878,16 @@ impl AppState {
     ) {
         let removed_apps = removed_apps.into_iter().collect::<BTreeSet<_>>();
         if !removed_apps.is_empty() {
-            self.applications_inventory
-                .retain(|item| !removed_apps.contains(item));
-            self.applications_inventory_metadata
-                .retain(|app| !removed_apps.contains(&app.identity.display_name));
+            let duplicate_names =
+                duplicate_application_names(&self.applications_inventory_metadata);
+            self.applications_inventory_metadata.retain(|app| {
+                let row_label = application_row_label(app, &duplicate_names);
+                !removed_apps.contains(&app.identity.display_name)
+                    && !removed_apps.contains(&application_stable_id(app))
+                    && !removed_apps.contains(&row_label)
+            });
+            self.applications_inventory =
+                application_row_labels(&self.applications_inventory_metadata);
             self.applications_selected_items
                 .retain(|item| !removed_apps.contains(item));
             self.applications_sync_selection();
@@ -909,8 +925,13 @@ impl AppState {
         updated_apps: Vec<String>,
     ) {
         let updated_apps = updated_apps.into_iter().collect::<BTreeSet<_>>();
+        let duplicate_names = duplicate_application_names(&self.applications_inventory_metadata);
         for app in &mut self.applications_inventory_metadata {
-            if updated_apps.contains(&app.identity.display_name) {
+            let row_label = application_row_label(app, &duplicate_names);
+            if updated_apps.contains(&app.identity.display_name)
+                || updated_apps.contains(&application_stable_id(app))
+                || updated_apps.contains(&row_label)
+            {
                 app.update_availability = AppUpdateAvailability::UpToDate;
                 if let Some(package) = &mut app.package_metadata
                     && let Some(latest_version) = package.latest_version.clone()
@@ -1417,6 +1438,50 @@ fn compact_update_version(version: &str) -> String {
         .to_string()
 }
 
+fn application_stable_id(app: &InstalledApplication) -> String {
+    app.identity.stable_id(&app.path)
+}
+
+fn application_row_labels(applications: &[InstalledApplication]) -> Vec<String> {
+    let duplicate_names = duplicate_application_names(applications);
+    applications
+        .iter()
+        .map(|app| application_row_label(app, &duplicate_names))
+        .collect()
+}
+
+fn application_row_label_for_current_inventory(
+    app: &InstalledApplication,
+    applications: &[InstalledApplication],
+) -> String {
+    application_row_label(app, &duplicate_application_names(applications))
+}
+
+fn application_row_label(app: &InstalledApplication, duplicate_names: &BTreeSet<String>) -> String {
+    let name = app.identity.display_name.clone();
+    if !duplicate_names.contains(&name) {
+        return name;
+    }
+    let path = app.path.trim();
+    if path.is_empty() {
+        format!("{name} ({})", application_stable_id(app))
+    } else {
+        format!("{name} ({path})")
+    }
+}
+
+fn duplicate_application_names(applications: &[InstalledApplication]) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut duplicates = BTreeSet::new();
+    for app in applications {
+        let name = app.identity.display_name.clone();
+        if !seen.insert(name.clone()) {
+            duplicates.insert(name);
+        }
+    }
+    duplicates
+}
+
 fn application_update_status_line(app: &InstalledApplication) -> String {
     let name = &app.identity.display_name;
     if app.protected {
@@ -1725,6 +1790,57 @@ mod tests {
             state.applications_pending_uninstall_targets(),
             &["User App".to_string()]
         );
+    }
+
+    #[test]
+    fn duplicate_application_names_are_targeted_by_unique_row_label() {
+        let mut first = AppIdentity::macos("Demo");
+        first.bundle_identifier = Some("com.example.one".to_string());
+        let mut second = AppIdentity::macos("Demo");
+        second.bundle_identifier = Some("com.example.two".to_string());
+        let mut state = AppState::default();
+        state.apply_applications_inventory_analyze_result(vec![
+            InstalledApplication {
+                identity: first,
+                path: "/Applications/Demo.app".to_string(),
+                version: None,
+                inventory_metadata: None,
+                source: AppSource::Local,
+                estimated_size: 0,
+                last_used_at: None,
+                management_source: AppManagementSource::Manual,
+                update_availability: AppUpdateAvailability::Unsupported,
+                package_metadata: None,
+                protected: false,
+            },
+            InstalledApplication {
+                identity: second,
+                path: "/Users/me/Applications/Demo.app".to_string(),
+                version: None,
+                inventory_metadata: None,
+                source: AppSource::User,
+                estimated_size: 0,
+                last_used_at: None,
+                management_source: AppManagementSource::Manual,
+                update_availability: AppUpdateAvailability::Unsupported,
+                package_metadata: None,
+                protected: false,
+            },
+        ]);
+
+        assert_eq!(
+            state.applications_items(),
+            vec![
+                "Demo (/Applications/Demo.app)".to_string(),
+                "Demo (/Users/me/Applications/Demo.app)".to_string()
+            ]
+        );
+        state.applications_selected_row = 1;
+        state.applications_toggle_selected();
+
+        let selected = state.applications_confirm_uninstall_selected().unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, "/Users/me/Applications/Demo.app");
     }
 
     #[test]

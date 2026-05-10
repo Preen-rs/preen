@@ -62,7 +62,7 @@ pub fn execute_application_updates(
                     }
                 }
                 if update.confirms_update_on_success {
-                    updated_apps.push(update.app_name.clone());
+                    updated_apps.push(update.app_stable_id.clone());
                     lines.push(format!(
                         "updated: {} via {}",
                         update.app_name,
@@ -188,7 +188,7 @@ fn execute_native_helper_update(plan: &AppUpdatePlan) -> Result<Output, String> 
 
 fn native_helper_executable() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("PREEN_MACOS_UPDATE_HELPER").map(PathBuf::from)
-        && is_executable_file(&path)
+        && is_trusted_helper_candidate(&path, true)
     {
         return Ok(path);
     }
@@ -198,18 +198,26 @@ fn native_helper_executable() -> Result<PathBuf, String> {
             .join(".build")
             .join("debug")
             .join("preen-macos-helper");
-        if is_executable_file(&dev_helper) {
+        if is_trusted_helper_candidate(&dev_helper, true) {
             return Ok(dev_helper);
         }
     }
-    find_executable_in_common_paths(
+    let helper = find_executable_in_common_paths(
         "preen-macos-helper",
         &[
             "/usr/local/bin/preen-macos-helper",
             "/opt/homebrew/bin/preen-macos-helper",
         ],
     )
-    .ok_or_else(|| "preen macOS update helper executable not found".to_string())
+    .ok_or_else(|| "preen macOS update helper executable not found".to_string())?;
+    if is_trusted_helper_candidate(&helper, false) {
+        Ok(helper)
+    } else {
+        Err(format!(
+            "preen macOS update helper is not trusted: {}",
+            helper.display()
+        ))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,7 +318,47 @@ fn find_executable_in_common_paths(name: &str, absolute_paths: &[&str]) -> Optio
 }
 
 fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn is_trusted_helper_candidate(path: &Path, allow_dev_path: bool) -> bool {
+    if !is_executable_file(path) {
+        return false;
+    }
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !canonical.is_absolute() {
+        return false;
+    }
+    if !allow_dev_path
+        && !canonical.starts_with("/usr/local/bin")
+        && !canonical.starts_with("/opt/homebrew/bin")
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(metadata) = std::fs::metadata(&canonical) else {
+            return false;
+        };
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return false;
+        }
+    }
+    true
 }
 
 fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
@@ -445,7 +493,10 @@ printf '%s\n' '{"event":"completed","app":"Demo","message":"Updated Demo"}'
 
         let output = execute_application_updates(vec![app]).unwrap();
 
-        assert_eq!(output.updated_apps, vec!["Demo".to_string()]);
+        assert_eq!(
+            output.updated_apps,
+            vec!["macos:demo:applicationsdemo".to_string()]
+        );
         assert!(
             output
                 .lines

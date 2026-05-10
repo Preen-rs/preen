@@ -33,6 +33,7 @@ pub struct AppNativeUpdateRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppUpdatePlan {
     pub app_name: String,
+    pub app_stable_id: String,
     pub app_path: String,
     pub package_id: String,
     pub manager: AppPackageManager,
@@ -70,9 +71,11 @@ pub struct AppUpdateBatchResult {
 
 pub fn build_update_plan_for_app(app: &InstalledApplication) -> AppUpdatePlan {
     let app_name = app.identity.display_name.clone();
+    let app_stable_id = app.identity.stable_id(&app.path);
     let Some(package) = &app.package_metadata else {
         return AppUpdatePlan {
             app_name,
+            app_stable_id,
             app_path: app.path.clone(),
             package_id: String::new(),
             manager: AppPackageManager::Unknown,
@@ -116,6 +119,7 @@ pub fn build_update_plan_for_app(app: &InstalledApplication) -> AppUpdatePlan {
 
     AppUpdatePlan {
         app_name,
+        app_stable_id,
         app_path: app.path.clone(),
         package_id: package.package_id.clone(),
         manager: package.manager.clone(),

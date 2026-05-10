@@ -1,18 +1,19 @@
 use crate::{app_inventory, trash_ops};
 use preen_core::app_uninstall::{
-    AppIdentity, AppPlatform, InstalledApplication, RelatedPath, RelatedPathConfidence,
-    RelatedPathKind, UninstallPlan, path_name_match_confidence,
+    AppIdentity, AppPackageManager, AppPlatform, InstalledApplication, RelatedPath,
+    RelatedPathConfidence, RelatedPathKind, UninstallPlan, path_name_match_confidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const APP_UNINSTALL_JOURNAL_SCHEMA_VERSION: u32 = 1;
 const APP_UNINSTALL_JOURNAL_FILE: &str = "app-uninstall-last.toml";
+const APP_UNINSTALL_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppUninstallJournal {
@@ -190,6 +191,31 @@ pub fn execute_app_uninstall_with_options(
             ));
             continue;
         }
+        if let Some(package) = application.package_metadata.as_ref()
+            && package.manager == AppPackageManager::HomebrewCask
+            && !package.package_id.trim().is_empty()
+        {
+            match execute_homebrew_cask_uninstall(&package.package_id) {
+                Ok(output) if output.status.success() => {
+                    lines.push(format!(
+                        "{app_name}: uninstalled via Homebrew cask --zap ({})",
+                        package.package_id
+                    ));
+                    append_command_output(&mut lines, &output);
+                    removed_apps.push(application.identity.stable_id(&application.path));
+                    continue;
+                }
+                Ok(output) => {
+                    lines.push(format!(
+                        "{app_name}: Homebrew cask uninstall failed; falling back to trash"
+                    ));
+                    append_command_output(&mut lines, &output);
+                }
+                Err(error) => lines.push(format!(
+                    "{app_name}: Homebrew cask uninstall unavailable ({error}); falling back to trash"
+                )),
+            }
+        }
         let plan = build_uninstall_plan_for_application_with_options(application, options);
         if plan.protected {
             lines.push(format!("{app_name}: protected system application skipped"));
@@ -200,6 +226,7 @@ pub fn execute_app_uninstall_with_options(
             continue;
         }
 
+        let mut moved_any = false;
         let mut moves = Vec::new();
         for related_path in &plan.paths {
             if matches!(related_path.confidence, RelatedPathConfidence::Fuzzy) {
@@ -210,25 +237,45 @@ pub fn execute_app_uninstall_with_options(
             if !path.exists() {
                 continue;
             }
-            match trash_ops::move_path_to_home_trash(&path) {
+            match trash_ops::move_path_to_trash(&path) {
                 Ok(moved) => {
-                    lines.push(format!(
-                        "moved: {} -> {}",
-                        path.display(),
-                        moved.trashed_path.display()
-                    ));
-                    moves.push(AppUninstallJournalMove {
-                        original_path: moved.original_path,
-                        trashed_path: moved.trashed_path,
-                    });
+                    moved_any = true;
+                    if moved.trashed_path.as_os_str().is_empty() {
+                        lines.push(format!("moved: {} -> system trash", path.display()));
+                    } else {
+                        lines.push(format!(
+                            "moved: {} -> {}",
+                            path.display(),
+                            moved.trashed_path.display()
+                        ));
+                        moves.push(AppUninstallJournalMove {
+                            original_path: moved.original_path,
+                            trashed_path: moved.trashed_path,
+                        });
+                    }
                 }
                 Err(error) => lines.push(format!("failed: {} ({error})", path.display())),
             }
         }
 
-        if !moves.is_empty() {
-            removed_apps.push(app_name);
-            records.push(AppUninstallJournalRecord { plan, moves });
+        if moved_any {
+            removed_apps.push(
+                plan.identity.stable_id(
+                    plan.paths
+                        .iter()
+                        .find(|path| {
+                            matches!(
+                                path.kind,
+                                RelatedPathKind::ApplicationBundle | RelatedPathKind::DesktopEntry
+                            )
+                        })
+                        .map(|path| path.path.as_str())
+                        .unwrap_or_default(),
+                ),
+            );
+            if !moves.is_empty() {
+                records.push(AppUninstallJournalRecord { plan, moves });
+            }
         }
     }
 
@@ -251,6 +298,61 @@ pub fn execute_app_uninstall_with_options(
         removed_apps,
         records,
     })
+}
+
+fn execute_homebrew_cask_uninstall(token: &str) -> Result<Output, String> {
+    let brew = std::env::var_os("PREEN_HOMEBREW")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            find_executable_in_common_paths(
+                "brew",
+                &["/opt/homebrew/bin/brew", "/usr/local/bin/brew"],
+            )
+        })
+        .ok_or_else(|| "brew executable not found".to_string())?;
+    let mut command = Command::new(brew);
+    command.args(["uninstall", "--cask", "--zap", token]);
+    command.env("HOMEBREW_NO_AUTO_UPDATE", "1");
+    command.env("NONINTERACTIVE", "1");
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    run_command_with_timeout(command, APP_UNINSTALL_COMMAND_TIMEOUT)
+        .ok_or_else(|| "brew uninstall timed out".to_string())
+}
+
+fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
+    let mut child = command.spawn().ok()?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn append_command_output(lines: &mut Vec<String>, output: &Output) {
+    for raw in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .chain(String::from_utf8_lossy(&output.stderr).lines())
+    {
+        let line = raw.trim();
+        if !line.is_empty() {
+            lines.push(format!("  {line}"));
+        }
+    }
 }
 
 fn is_application_running(application: &InstalledApplication) -> bool {
@@ -448,6 +550,9 @@ fn discover_related_path_items(
     for (root, kind) in application_related_roots(identity.platform.clone(), home) {
         collect_matching_paths_under(&root, &match_keys, excluded_paths, 2, kind, &mut paths);
     }
+    if matches!(identity.platform, AppPlatform::Macos) {
+        collect_macos_container_metadata_matches(home, &match_keys, excluded_paths, &mut paths);
+    }
 
     paths
         .into_iter()
@@ -476,12 +581,26 @@ fn application_related_roots(
                 home.join("Library/Application Support"),
                 RelatedPathKind::Support,
             ),
+            (
+                PathBuf::from("/Library/Application Support"),
+                RelatedPathKind::Support,
+            ),
             (home.join("Library/Caches"), RelatedPathKind::Cache),
+            (PathBuf::from("/Library/Caches"), RelatedPathKind::Cache),
             (home.join("Library/Logs"), RelatedPathKind::Log),
+            (PathBuf::from("/Library/Logs"), RelatedPathKind::Log),
             (home.join("Library/HTTPStorages"), RelatedPathKind::Cache),
             (home.join("Library/WebKit"), RelatedPathKind::Cache),
             (
                 home.join("Library/Preferences"),
+                RelatedPathKind::Preference,
+            ),
+            (
+                home.join("Library/Preferences/ByHost"),
+                RelatedPathKind::Preference,
+            ),
+            (
+                PathBuf::from("/Library/Preferences"),
                 RelatedPathKind::Preference,
             ),
             (home.join("Library/Containers"), RelatedPathKind::Container),
@@ -490,11 +609,117 @@ fn application_related_roots(
                 RelatedPathKind::Container,
             ),
             (
+                home.join("Library/Application Scripts"),
+                RelatedPathKind::Support,
+            ),
+            (
                 home.join("Library/Saved Application State"),
                 RelatedPathKind::Support,
             ),
+            (home.join("Library/Cookies"), RelatedPathKind::Cache),
+            (home.join("Library/DiagnosticReports"), RelatedPathKind::Log),
+            (home.join("Library/LaunchAgents"), RelatedPathKind::Support),
+            (
+                PathBuf::from("/Library/LaunchAgents"),
+                RelatedPathKind::Support,
+            ),
+            (
+                PathBuf::from("/Library/LaunchDaemons"),
+                RelatedPathKind::Support,
+            ),
+            (
+                PathBuf::from("/Library/PrivilegedHelperTools"),
+                RelatedPathKind::Support,
+            ),
+            (PathBuf::from("/Library/Receipts"), RelatedPathKind::Other),
+            (PathBuf::from("/private/tmp"), RelatedPathKind::Cache),
+            (PathBuf::from("/Users/Shared"), RelatedPathKind::Support),
+            (PathBuf::from("/usr/local"), RelatedPathKind::Support),
         ],
     }
+}
+
+fn collect_macos_container_metadata_matches(
+    home: &Path,
+    match_keys: &[String],
+    excluded_paths: &[PathBuf],
+    out: &mut BTreeSet<(String, RelatedPathKind, u64, RelatedPathConfidence)>,
+) {
+    for root in [
+        home.join("Library/Containers"),
+        home.join("Library/Group Containers"),
+    ] {
+        collect_macos_container_metadata_matches_under(&root, match_keys, excluded_paths, 0, out);
+    }
+}
+
+fn collect_macos_container_metadata_matches_under(
+    root: &Path,
+    match_keys: &[String],
+    excluded_paths: &[PathBuf],
+    depth: usize,
+    out: &mut BTreeSet<(String, RelatedPathKind, u64, RelatedPathConfidence)>,
+) {
+    if depth > 2 || !root.exists() || is_path_excluded(root, excluded_paths) {
+        return;
+    }
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if is_path_excluded(&path, excluded_paths) {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == ".com.apple.containermanagerd.metadata.plist")
+            && let Some(identifier) = read_macos_container_identifier(&path)
+            && path_name_match_confidence(&identifier, match_keys).is_some()
+            && let Some(container) = path.parent()
+        {
+            out.insert((
+                container.display().to_string(),
+                RelatedPathKind::Container,
+                calculate_path_size(container),
+                RelatedPathConfidence::Exact,
+            ));
+        }
+        let is_real_dir = fs::symlink_metadata(&path)
+            .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_real_dir {
+            collect_macos_container_metadata_matches_under(
+                &path,
+                match_keys,
+                excluded_paths,
+                depth + 1,
+                out,
+            );
+        }
+    }
+}
+
+fn read_macos_container_identifier(metadata_plist: &Path) -> Option<String> {
+    let output = Command::new("/usr/bin/plutil")
+        .args([
+            "-extract",
+            "MCMMetadataIdentifier",
+            "raw",
+            "-o",
+            "-",
+            metadata_plist.to_str()?,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 fn collect_matching_paths_under(
@@ -616,7 +841,10 @@ fn home_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use preen_core::app_uninstall::{AppManagementSource, AppSource, AppUpdateAvailability};
+    use preen_core::app_uninstall::{
+        AppManagementSource, AppPackageDetectionConfidence, AppPackageManager, AppPackageMetadata,
+        AppSource, AppUpdateAvailability,
+    };
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -797,13 +1025,81 @@ mod tests {
         .unwrap();
 
         assert!(!app_path.exists());
-        assert_eq!(output.removed_apps, vec!["Demo".to_string()]);
+        assert_eq!(
+            output.removed_apps,
+            vec![AppIdentity::macos("Demo").stable_id(&app_path.to_string_lossy())]
+        );
         assert_eq!(output.records.len(), 1);
         assert!(output.lines.iter().any(|line| line.starts_with("journal:")));
         assert!(
             read_last_app_uninstall_journal(&state_dir)
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn execute_app_uninstall_uses_homebrew_cask_zap_when_available() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let brew = bin.join("brew");
+        let args_file = dir.path().join("brew-args.txt");
+        fs::write(
+            &brew,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'zap ok\\n'\n",
+                args_file.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&brew).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&brew, permissions).unwrap();
+        }
+        let _brew = EnvVarGuard::set("PREEN_HOMEBREW", brew.to_string_lossy().as_ref());
+
+        let app_path = dir.path().join("Brew Demo.app");
+        fs::create_dir_all(&app_path).unwrap();
+        let output = execute_app_uninstall(
+            vec![InstalledApplication {
+                identity: AppIdentity::macos("Brew Demo"),
+                path: app_path.to_string_lossy().to_string(),
+                version: None,
+                inventory_metadata: None,
+                source: AppSource::Local,
+                estimated_size: 0,
+                last_used_at: None,
+                management_source: AppManagementSource::PackageManager,
+                update_availability: AppUpdateAvailability::Unsupported,
+                package_metadata: Some(AppPackageMetadata {
+                    manager: AppPackageManager::HomebrewCask,
+                    package_id: "brew-demo".to_string(),
+                    installed_version: None,
+                    latest_version: None,
+                    update_command: None,
+                    detection_confidence: AppPackageDetectionConfidence::Exact,
+                }),
+                protected: false,
+            }],
+            None,
+        )
+        .unwrap();
+
+        assert!(output.records.is_empty());
+        assert_eq!(
+            fs::read_to_string(args_file).unwrap(),
+            "uninstall\n--cask\n--zap\nbrew-demo\n"
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.contains("uninstalled via Homebrew cask --zap"))
         );
     }
 

@@ -88,6 +88,7 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
                 .filter(|value| !value.trim().is_empty())
                 .cloned()
                 .unwrap_or_else(|| fallback_name.to_string());
+            let protected = protected || is_macos_critical_application(&display_name, &path);
             let mut identity = AppIdentity::macos(display_name);
             identity.bundle_identifier = plist.get("CFBundleIdentifier").cloned();
 
@@ -170,6 +171,53 @@ fn collect_macos_applications(include_sizes: bool) -> Vec<InstalledApplication> 
         });
     }
     apps
+}
+
+fn is_macos_critical_application(display_name: &str, path: &Path) -> bool {
+    if path.starts_with("/System/Applications") {
+        return true;
+    }
+    matches!(
+        display_name,
+        "App Store"
+            | "Automator"
+            | "Books"
+            | "Calculator"
+            | "Calendar"
+            | "Clock"
+            | "Contacts"
+            | "Dictionary"
+            | "FaceTime"
+            | "FindMy"
+            | "Font Book"
+            | "Freeform"
+            | "Home"
+            | "Image Capture"
+            | "Launchpad"
+            | "Mail"
+            | "Maps"
+            | "Messages"
+            | "Mission Control"
+            | "Music"
+            | "News"
+            | "Notes"
+            | "Photo Booth"
+            | "Photos"
+            | "Preview"
+            | "QuickTime Player"
+            | "Reminders"
+            | "Safari"
+            | "Shortcuts"
+            | "Siri"
+            | "Stickies"
+            | "Stocks"
+            | "System Settings"
+            | "TV"
+            | "TextEdit"
+            | "Time Machine"
+            | "Voice Memos"
+            | "Weather"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -883,10 +931,23 @@ impl SparkleUpdateSnapshot {
     }
 
     fn app_update_availability(&self, path: &Path) -> AppUpdateAvailability {
-        if !self.apps_by_path.contains_key(&path_key(path)) {
+        let Some(metadata) = self.apps_by_path.get(&path_key(path)) else {
             return AppUpdateAvailability::Unsupported;
+        };
+        match (
+            metadata.installed_version.as_deref(),
+            metadata.latest_version.as_deref(),
+        ) {
+            (Some(installed), Some(latest))
+                if !installed.trim().is_empty()
+                    && !latest.trim().is_empty()
+                    && installed.trim() != latest.trim() =>
+            {
+                AppUpdateAvailability::UpdateAvailable
+            }
+            (Some(_), Some(_)) => AppUpdateAvailability::UpToDate,
+            _ => AppUpdateAvailability::NotChecked,
         }
-        AppUpdateAvailability::NotChecked
     }
 
     fn package_metadata(
@@ -2027,7 +2088,7 @@ raycast
     }
 
     #[test]
-    fn sparkle_snapshot_does_not_mark_xml_parser_versions_as_update_available() {
+    fn sparkle_snapshot_marks_different_versions_as_update_available() {
         let dir = tempfile::tempdir().unwrap();
         let app_bundle = dir.path().join("Sparkle Demo.app");
         fs::create_dir_all(&app_bundle).unwrap();
@@ -2044,9 +2105,9 @@ raycast
 
         assert_eq!(
             snapshot.app_update_availability(&app_bundle),
-            AppUpdateAvailability::NotChecked
+            AppUpdateAvailability::UpdateAvailable
         );
-        assert!(!snapshot.app_has_update(&app_bundle));
+        assert!(snapshot.app_has_update(&app_bundle));
         let package = snapshot.package_metadata(&app_bundle, Some("1.0")).unwrap();
         assert_eq!(package.manager, AppPackageManager::Sparkle);
         assert_eq!(package.latest_version.as_deref(), Some("2.0"));
