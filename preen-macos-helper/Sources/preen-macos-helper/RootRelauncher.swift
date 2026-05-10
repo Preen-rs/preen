@@ -16,30 +16,51 @@ struct RootRelauncher {
         FileManager.default.createFile(atPath: eventURL.path, contents: nil)
         defer { try? FileManager.default.removeItem(at: eventURL) }
 
-        let environment = [
-            "SUDO_UID=\(getuid())",
-            "SUDO_GID=\(getgid())",
-            "HOME=\(shellQuote(NSHomeDirectory()))",
-            "USER=\(shellQuote(NSUserName()))",
-            "LOGNAME=\(shellQuote(NSUserName()))",
-        ].joined(separator: " ")
-        let command = "/usr/bin/env \(environment) \(shellQuote(executable)) update-app-root \(shellQuote(payload)) \(shellQuote(eventURL.path))"
+        let askpassURL = try createAskpassScript()
+        defer { try? FileManager.default.removeItem(at: askpassURL) }
+
         try await runProcessAndForwardEvents(
-            "/usr/bin/osascript",
+            "/usr/bin/sudo",
             arguments: [
-                "-e", "on run argv",
-                "-e", "do shell script (item 1 of argv) with administrator privileges",
-                "-e", "end run",
-                command,
+                "-A",
+                executable,
+                "update-app-root",
+                payload,
+                eventURL.path,
             ],
-            eventURL: eventURL
+            eventURL: eventURL,
+            environment: [
+                "SUDO_ASKPASS": askpassURL.path,
+                "SUDO_PROMPT": "Preen needs administrator approval to update \(request.appName)",
+            ]
         )
     }
 
-    private func runProcessAndForwardEvents(_ executable: String, arguments: [String], eventURL: URL) async throws {
+    private func createAskpassScript() throws -> URL {
+        let askpassURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preen-askpass-\(UUID().uuidString).sh")
+        let script = """
+        #!/bin/sh
+        /usr/bin/osascript -e 'on run argv' -e 'display dialog (item 1 of argv) default answer "" with hidden answer buttons {"OK", "Cancel"} default button "OK" cancel button "Cancel"' -e 'text returned of result' -e 'end run' "$1"
+        """
+        try script.write(to: askpassURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: askpassURL.path
+        )
+        return askpassURL
+    }
+
+    private func runProcessAndForwardEvents(
+        _ executable: String,
+        arguments: [String],
+        eventURL: URL,
+        environment: [String: String]
+    ) async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
@@ -67,7 +88,8 @@ struct RootRelauncher {
         let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         guard process.terminationStatus == 0 else {
-            throw HelperError.unavailable("administrator approval failed: \(stderr.isEmpty ? stdout : stderr)")
+            let output = [stderr, stdout].filter { !$0.isEmpty }.joined(separator: "\n")
+            throw HelperError.unavailable("Mac App Store update helper failed: \(output)")
         }
         writer.writeRaw(stdout)
     }
@@ -85,7 +107,4 @@ struct RootRelauncher {
         return true
     }
 
-    private func shellQuote(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
-    }
 }
