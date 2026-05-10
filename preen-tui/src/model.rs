@@ -172,7 +172,7 @@ pub enum BusyViewKind {
 impl BusyViewKind {
     pub const fn is_visible_for_view(self, view: ActiveView) -> bool {
         match self {
-            Self::Dashboard => true,
+            Self::Dashboard => matches!(view, ActiveView::Dashboard),
             Self::Applications | Self::ApplicationsPaths => {
                 matches!(view, ActiveView::Applications)
             }
@@ -1633,6 +1633,27 @@ mod tests {
         assert_eq!(
             state.background_busy_summary().as_deref(),
             Some("Analyzing applications")
+        );
+    }
+
+    #[test]
+    fn dashboard_busy_overlay_is_hidden_on_other_views() {
+        let mut state = AppState::default();
+        state.begin_busy_view(
+            BusyViewKind::Dashboard,
+            "Loading dashboard",
+            "Collecting metrics",
+            "Dashboard",
+        );
+
+        assert!(state.should_render_busy_overlay());
+
+        state.set_active_view(ActiveView::Cleanup);
+
+        assert!(!state.should_render_busy_overlay());
+        assert_eq!(
+            state.background_busy_summary().as_deref(),
+            Some("Loading dashboard")
         );
     }
 
