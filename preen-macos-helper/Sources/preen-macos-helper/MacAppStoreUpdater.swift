@@ -74,6 +74,7 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
     private var lastEventKey: String?
     private var pkgHardLinkURL: URL?
     private var receiptHardLinkURL: URL?
+    private var fallbackStarted = false
 
     init(request: UpdateRequest, adamId: UInt64, writer: EventWriter) {
         self.request = request
@@ -104,8 +105,10 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
         if status.isFailed {
             let error = status.error
             if isInstallerStartFailure(error) {
-                Task {
-                    await installDownloadedPackageAfterStoreAgentFailure(originalError: error)
+                if beginInstallerFallback() {
+                    Task {
+                        await installDownloadedPackageAfterStoreAgentFailure(originalError: error)
+                    }
                 }
             } else {
                 finish(throwing: error ?? HelperError.unavailable("App Store download failed"))
@@ -122,8 +125,10 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
         if download.status?.isFailed == true {
             let error = download.status?.error
             if isInstallerStartFailure(error) {
-                Task {
-                    await installDownloadedPackageAfterStoreAgentFailure(originalError: error)
+                if beginInstallerFallback() {
+                    Task {
+                        await installDownloadedPackageAfterStoreAgentFailure(originalError: error)
+                    }
                 }
             } else {
                 finish(throwing: error ?? HelperError.unavailable("App Store download failed"))
@@ -208,6 +213,14 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
         return error.domain == "PKInstallErrorDomain" && error.code == 201
     }
 
+    private func beginInstallerFallback() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished, !fallbackStarted else { return false }
+        fallbackStarted = true
+        return true
+    }
+
     private func installDownloadedPackageAfterStoreAgentFailure(originalError: Error?) async {
         do {
             let appURL = try await installDownloadedPackage()
@@ -228,11 +241,11 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
         }
 
         writeProgressEvent("installing", progress: 0.92, message: "Installing downloaded App Store package")
-        let (_, stderr) = try await runProcess(
-            "/usr/sbin/installer",
-            arguments: ["-dumplog", "-pkg", pkgHardLinkURL.path, "-target", "/"]
+        let installerOutput = try await runPrivilegedShellScript(
+            "/usr/sbin/installer -dumplog -pkg \(shellQuote(pkgHardLinkURL.path)) -target / 2>&1",
+            message: "administrator approval is required to install the downloaded App Store package"
         )
-        guard let appURL = appFolderURL(fromInstallerOutput: stderr) else {
+        guard let appURL = appFolderURL(fromInstallerOutput: installerOutput) else {
             throw HelperError.unavailable("installer finished but app bundle path was not reported")
         }
 
@@ -240,17 +253,16 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("_MASReceipt", isDirectory: true)
             .appendingPathComponent("receipt")
-        let receiptDir = receiptURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(
-            at: receiptDir,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o755]
+        let receiptDir = receiptURL.deletingLastPathComponent().path
+        _ = try await runPrivilegedShellScript(
+            [
+                "/bin/mkdir -p \(shellQuote(receiptDir))",
+                "/bin/rm -f \(shellQuote(receiptURL.path))",
+                "/bin/cp \(shellQuote(receiptHardLinkURL.path)) \(shellQuote(receiptURL.path))",
+                "/bin/chmod 755 \(shellQuote(receiptURL.path))",
+            ].joined(separator: " && "),
+            message: "administrator approval is required to install the App Store receipt"
         )
-        if FileManager.default.fileExists(atPath: receiptURL.path) {
-            try FileManager.default.removeItem(at: receiptURL)
-        }
-        try FileManager.default.copyItem(at: receiptHardLinkURL, to: receiptURL)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: receiptURL.path)
 
         _ = try? await runProcess("/usr/bin/mdimport", arguments: [appURL.path])
         LSRegisterURL(appURL as CFURL, true)
@@ -286,6 +298,27 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
             throw HelperError.unavailable("\(executable) exited with \(process.terminationStatus): \(stderr)")
         }
         return (stdout, stderr)
+    }
+
+    private func runPrivilegedShellScript(_ script: String, message: String) async throws -> String {
+        do {
+            let (stdout, stderr) = try await runProcess(
+                "/usr/bin/osascript",
+                arguments: [
+                    "-e", "on run argv",
+                    "-e", "do shell script (item 1 of argv) with administrator privileges",
+                    "-e", "end run",
+                    script,
+                ]
+            )
+            return stdout.isEmpty ? stderr : stdout + "\n" + stderr
+        } catch {
+            throw HelperError.unavailable("\(message): \(error.localizedDescription)")
+        }
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func phaseName(_ phaseType: Int64?) -> (event: String, message: String) {

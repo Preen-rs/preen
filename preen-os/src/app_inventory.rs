@@ -883,19 +883,10 @@ impl SparkleUpdateSnapshot {
     }
 
     fn app_update_availability(&self, path: &Path) -> AppUpdateAvailability {
-        let Some(metadata) = self.apps_by_path.get(&path_key(path)) else {
+        if !self.apps_by_path.contains_key(&path_key(path)) {
             return AppUpdateAvailability::Unsupported;
-        };
-        match (
-            metadata.installed_version.as_deref(),
-            metadata.latest_version.as_deref(),
-        ) {
-            (Some(installed), Some(latest)) if app_store_version_is_newer(installed, latest) => {
-                AppUpdateAvailability::UpdateAvailable
-            }
-            (Some(_), Some(_)) => AppUpdateAvailability::UpToDate,
-            _ => AppUpdateAvailability::NotChecked,
         }
+        AppUpdateAvailability::NotChecked
     }
 
     fn package_metadata(
@@ -2033,6 +2024,32 @@ raycast
         assert_eq!(package.manager, AppPackageManager::MacAppStore);
         assert_eq!(package.package_id, "123456789");
         assert_eq!(package.latest_version.as_deref(), Some("1.1"));
+    }
+
+    #[test]
+    fn sparkle_snapshot_does_not_mark_xml_parser_versions_as_update_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_bundle = dir.path().join("Sparkle Demo.app");
+        fs::create_dir_all(&app_bundle).unwrap();
+        let snapshot = SparkleUpdateSnapshot {
+            apps_by_path: BTreeMap::from([(
+                app_bundle.to_string_lossy().to_string(),
+                SparkleUpdateMetadata {
+                    feed_url: "https://example.test/appcast.xml".to_string(),
+                    installed_version: Some("1.0".to_string()),
+                    latest_version: Some("2.0".to_string()),
+                },
+            )]),
+        };
+
+        assert_eq!(
+            snapshot.app_update_availability(&app_bundle),
+            AppUpdateAvailability::NotChecked
+        );
+        assert!(!snapshot.app_has_update(&app_bundle));
+        let package = snapshot.package_metadata(&app_bundle, Some("1.0")).unwrap();
+        assert_eq!(package.manager, AppPackageManager::Sparkle);
+        assert_eq!(package.latest_version.as_deref(), Some("2.0"));
     }
 
     #[test]
