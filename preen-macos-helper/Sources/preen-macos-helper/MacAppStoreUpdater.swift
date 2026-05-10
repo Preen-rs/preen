@@ -240,15 +240,13 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
         guard let receiptHardLinkURL else {
             throw HelperError.unavailable("downloaded App Store receipt was not found")
         }
-        guard geteuid() == 0 else {
-            throw HelperError.unavailable("administrator approval is required to install the downloaded App Store package")
-        }
-
         writeProgressEvent("installing", progress: 0.92, message: "Installing downloaded App Store package")
-        let installerResult = try await runProcess(
-            "/usr/sbin/installer",
-            arguments: ["-dumplog", "-pkg", pkgHardLinkURL.path, "-target", "/"]
-        )
+        let installerResult = try await runAsRoot {
+            try await runProcess(
+                "/usr/sbin/installer",
+                arguments: ["-dumplog", "-pkg", pkgHardLinkURL.path, "-target", "/"]
+            )
+        }
         let installerOutput = [installerResult.0, installerResult.1]
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
@@ -260,7 +258,9 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("_MASReceipt", isDirectory: true)
             .appendingPathComponent("receipt")
-        try copyReceipt(from: receiptHardLinkURL, to: receiptURL)
+        try await runAsRoot {
+            try copyReceipt(from: receiptHardLinkURL, to: receiptURL)
+        }
 
         _ = try? await runProcess("/usr/bin/mdimport", arguments: [appURL.path])
         LSRegisterURL(appURL as CFURL, true)

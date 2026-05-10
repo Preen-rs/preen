@@ -48,7 +48,9 @@ private func runUpdate(_ request: UpdateRequest, writer: EventWriter, elevateMac
     }
 
     do {
-        try await runProviderUpdate(request, writer: writer)
+        try await runAsSudoUserIfNeeded {
+            try await runProviderUpdate(request, writer: writer)
+        }
         return 0
     } catch {
         writer.write(UpdateEvent("failed", app: request.appName, message: error.localizedDescription))
