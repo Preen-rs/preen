@@ -95,10 +95,6 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
 
     func downloadQueue(_ queue: CKDownloadQueue, statusChangedFor download: SSDownload) {
         guard matches(download), let status = download.status else { return }
-        if status.isCancelled {
-            finish(throwing: HelperError.unavailable("App Store download was cancelled"))
-            return
-        }
         refreshDownloadArtifacts()
 
         let phase = phaseName(status.activePhase?.phaseType)
@@ -114,6 +110,10 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
             } else {
                 finish(throwing: error ?? HelperError.unavailable("App Store download failed"))
             }
+            return
+        }
+        if status.isCancelled {
+            finish(throwing: HelperError.unavailable("App Store download was cancelled"))
         }
     }
 
@@ -154,6 +154,9 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
 
     private func refreshDownloadArtifacts() {
         do {
+            guard FileManager.default.fileExists(atPath: downloadFolderURL.path) else {
+                return
+            }
             let urls = try FileManager.default.contentsOfDirectory(
                 at: downloadFolderURL,
                 includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]
@@ -174,7 +177,8 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
                 receiptHardLinkURL = try hardLinkURL(to: receiptURL, existing: receiptHardLinkURL)
             }
         } catch {
-            writer.write(UpdateEvent("warning", app: request.appName, message: "Could not inspect App Store download artifacts: \(error.localizedDescription)"))
+            // Keep artifact probing quiet during normal progress callbacks. If fallback needs
+            // these files and they are missing, installDownloadedPackage() reports that clearly.
         }
     }
 

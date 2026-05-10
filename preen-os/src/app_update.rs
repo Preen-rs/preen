@@ -38,6 +38,29 @@ pub fn execute_application_updates(
 
         match execute_update_plan(&update) {
             Ok(output) if output.status.success() => {
+                if matches!(update.execution_mode, AppUpdateExecutionMode::NativeHelper) {
+                    match classify_native_helper_output(&output) {
+                        NativeHelperOutcome::Skipped => {
+                            lines.push(format!(
+                                "skipped: {} via {}",
+                                update.app_name,
+                                update_manager_label(&update.manager)
+                            ));
+                            append_command_output(&mut lines, &output);
+                            continue;
+                        }
+                        NativeHelperOutcome::Failed => {
+                            lines.push(format!(
+                                "failed: {} via {}",
+                                update.app_name,
+                                update_manager_label(&update.manager)
+                            ));
+                            append_command_output(&mut lines, &output);
+                            continue;
+                        }
+                        NativeHelperOutcome::Completed | NativeHelperOutcome::Unknown => {}
+                    }
+                }
                 if update.confirms_update_on_success {
                     updated_apps.push(update.app_name.clone());
                     lines.push(format!(
@@ -194,6 +217,35 @@ struct NativeHelperEvent {
     event: String,
     message: Option<String>,
     app: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeHelperOutcome {
+    Completed,
+    Skipped,
+    Failed,
+    Unknown,
+}
+
+fn classify_native_helper_output(output: &Output) -> NativeHelperOutcome {
+    let mut saw_skipped = false;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("completed:") {
+            return NativeHelperOutcome::Completed;
+        }
+        if trimmed.starts_with("failed:") {
+            return NativeHelperOutcome::Failed;
+        }
+        if trimmed.starts_with("skipped:") {
+            saw_skipped = true;
+        }
+    }
+    if saw_skipped {
+        NativeHelperOutcome::Skipped
+    } else {
+        NativeHelperOutcome::Unknown
+    }
 }
 
 fn parse_native_helper_events(output: &Output) -> Vec<NativeHelperEvent> {
@@ -405,6 +457,48 @@ printf '%s\n' '{"event":"completed","app":"Demo","message":"Updated Demo"}'
                 .lines
                 .iter()
                 .any(|line| line.contains("checking: Checking Demo"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_helper_skipped_event_does_not_mark_app_updated() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("preen-macos-helper");
+        fs::write(
+            &helper,
+            r#"#!/bin/sh
+cat >/tmp/preen-native-helper-request.json
+printf '%s\n' '{"event":"checking","message":"Checking Demo"}'
+printf '%s\n' '{"event":"skipped","app":"Demo","message":"No update available"}'
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&helper).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&helper, permissions).unwrap();
+        let _helper_env = EnvVarGuard::set("PREEN_MACOS_UPDATE_HELPER", &helper);
+
+        let mut app = updateable_app("Demo");
+        app.package_metadata.as_mut().unwrap().manager = AppPackageManager::Sparkle;
+        app.package_metadata.as_mut().unwrap().package_id = "demo".to_string();
+
+        let output = execute_application_updates(vec![app]).unwrap();
+
+        assert!(output.updated_apps.is_empty());
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.contains("skipped: Demo via Sparkle"))
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.contains("skipped: No update available"))
         );
     }
 }
