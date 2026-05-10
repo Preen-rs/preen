@@ -1,4 +1,5 @@
 import CoreServices
+import Darwin
 import Foundation
 
 #if canImport(CommerceKit) && canImport(StoreFoundation)
@@ -239,34 +240,51 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
         guard let receiptHardLinkURL else {
             throw HelperError.unavailable("downloaded App Store receipt was not found")
         }
+        guard geteuid() == 0 else {
+            throw HelperError.unavailable("administrator approval is required to install the downloaded App Store package")
+        }
 
         writeProgressEvent("installing", progress: 0.92, message: "Installing downloaded App Store package")
-        let installerOutput = try await runPrivilegedShellScript(
-            "/usr/sbin/installer -dumplog -pkg \(shellQuote(pkgHardLinkURL.path)) -target / 2>&1",
-            message: "administrator approval is required to install the downloaded App Store package"
+        let installerResult = try await runProcess(
+            "/usr/sbin/installer",
+            arguments: ["-dumplog", "-pkg", pkgHardLinkURL.path, "-target", "/"]
         )
+        let installerOutput = [installerResult.0, installerResult.1]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
         guard let appURL = appFolderURL(fromInstallerOutput: installerOutput) else {
-            throw HelperError.unavailable("installer finished but app bundle path was not reported")
+            throw HelperError.unavailable("installer finished but app bundle path was not reported: \(installerOutput)")
         }
 
         let receiptURL = appURL
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("_MASReceipt", isDirectory: true)
             .appendingPathComponent("receipt")
-        let receiptDir = receiptURL.deletingLastPathComponent().path
-        _ = try await runPrivilegedShellScript(
-            [
-                "/bin/mkdir -p \(shellQuote(receiptDir))",
-                "/bin/rm -f \(shellQuote(receiptURL.path))",
-                "/bin/cp \(shellQuote(receiptHardLinkURL.path)) \(shellQuote(receiptURL.path))",
-                "/bin/chmod 755 \(shellQuote(receiptURL.path))",
-            ].joined(separator: " && "),
-            message: "administrator approval is required to install the App Store receipt"
-        )
+        try copyReceipt(from: receiptHardLinkURL, to: receiptURL)
 
         _ = try? await runProcess("/usr/bin/mdimport", arguments: [appURL.path])
         LSRegisterURL(appURL as CFURL, true)
         return appURL
+    }
+
+    private func copyReceipt(from sourceURL: URL, to receiptURL: URL) throws {
+        let fileManager = FileManager.default
+        let receiptDirectoryURL = receiptURL.deletingLastPathComponent()
+        if !fileManager.fileExists(atPath: receiptDirectoryURL.path) {
+            try fileManager.createDirectory(
+                at: receiptDirectoryURL,
+                withIntermediateDirectories: true,
+                attributes: [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755]
+            )
+        }
+        if fileManager.fileExists(atPath: receiptURL.path) {
+            try fileManager.removeItem(at: receiptURL)
+        }
+        try fileManager.copyItem(at: sourceURL, to: receiptURL)
+        try fileManager.setAttributes(
+            [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755],
+            ofItemAtPath: receiptURL.path
+        )
     }
 
     private func appFolderURL(fromInstallerOutput output: String) -> URL? {
@@ -295,30 +313,10 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
         let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         guard process.terminationStatus == 0 else {
-            throw HelperError.unavailable("\(executable) exited with \(process.terminationStatus): \(stderr)")
+            let output = [stderr, stdout].filter { !$0.isEmpty }.joined(separator: "\n")
+            throw HelperError.unavailable("\(executable) exited with \(process.terminationStatus): \(output)")
         }
         return (stdout, stderr)
-    }
-
-    private func runPrivilegedShellScript(_ script: String, message: String) async throws -> String {
-        do {
-            let (stdout, stderr) = try await runProcess(
-                "/usr/bin/osascript",
-                arguments: [
-                    "-e", "on run argv",
-                    "-e", "do shell script (item 1 of argv) with administrator privileges",
-                    "-e", "end run",
-                    script,
-                ]
-            )
-            return stdout.isEmpty ? stderr : stdout + "\n" + stderr
-        } catch {
-            throw HelperError.unavailable("\(message): \(error.localizedDescription)")
-        }
-    }
-
-    private func shellQuote(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func phaseName(_ phaseType: Int64?) -> (event: String, message: String) {

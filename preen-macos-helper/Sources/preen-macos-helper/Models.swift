@@ -68,4 +68,10 @@ struct EventWriter {
         print(line)
         fflush(stdout)
     }
+
+    func writeRaw(_ text: String) {
+        guard !text.isEmpty else { return }
+        print(text, terminator: text.hasSuffix("\n") ? "" : "\n")
+        fflush(stdout)
+    }
 }

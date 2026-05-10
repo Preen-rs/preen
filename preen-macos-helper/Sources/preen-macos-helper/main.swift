@@ -1,30 +1,66 @@
 import Foundation
+import Darwin
 
 let writer = EventWriter()
 
 do {
-    guard CommandLine.arguments.dropFirst().first == "update-app" else {
+    guard let command = CommandLine.arguments.dropFirst().first else {
         writer.write(UpdateEvent("failed", message: "unsupported command"))
         exit(64)
     }
 
-    let input = FileHandle.standardInput.readDataToEndOfFile()
-    let request = try JSONDecoder().decode(UpdateRequest.self, from: input)
+    switch command {
+    case "update-app":
+        let input = FileHandle.standardInput.readDataToEndOfFile()
+        let request = try JSONDecoder().decode(UpdateRequest.self, from: input)
+        let status = try await runUpdate(request, elevateMacAppStore: true, exitOnFailure: true)
+        exit(status)
+    case "update-app-root":
+        guard let payload = CommandLine.arguments.dropFirst(2).first,
+              let input = Data(base64Encoded: payload)
+        else {
+            writer.write(UpdateEvent("failed", message: "missing elevated update payload"))
+            exit(65)
+        }
+        let request = try JSONDecoder().decode(UpdateRequest.self, from: input)
+        _ = try await runUpdate(request, elevateMacAppStore: false, exitOnFailure: false)
+        exit(0)
+    default:
+        writer.write(UpdateEvent("failed", message: "unsupported command"))
+        exit(64)
+    }
+} catch {
+    writer.write(UpdateEvent("failed", message: error.localizedDescription))
+    exit(1)
+}
+
+private func runUpdate(_ request: UpdateRequest, elevateMacAppStore: Bool, exitOnFailure: Bool) async throws -> Int32 {
     guard request.schemaVersion == 1 else {
         writer.write(UpdateEvent("failed", app: request.appName, message: "unsupported schema version"))
-        exit(65)
+        return exitOnFailure ? 65 : 0
     }
 
+    if elevateMacAppStore, request.provider == .macAppStore, getuid() != 0 {
+        try await RootRelauncher(writer: writer).runMacAppStoreUpdate(request)
+        return 0
+    }
+
+    do {
+        try await runProviderUpdate(request)
+        return 0
+    } catch {
+        writer.write(UpdateEvent("failed", app: request.appName, message: error.localizedDescription))
+        return exitOnFailure ? 1 : 0
+    }
+}
+
+private func runProviderUpdate(_ request: UpdateRequest) async throws {
     switch request.provider {
     case .macAppStore:
         try await MacAppStoreUpdater(writer: writer).update(request)
     case .sparkle:
         try await SparkleUpdater(writer: writer).update(request)
     default:
-        writer.write(UpdateEvent("failed", app: request.appName, message: "provider is not handled by macOS helper"))
-        exit(66)
+        throw HelperError.unavailable("provider is not handled by macOS helper")
     }
-} catch {
-    writer.write(UpdateEvent("failed", message: error.localizedDescription))
-    exit(1)
 }
