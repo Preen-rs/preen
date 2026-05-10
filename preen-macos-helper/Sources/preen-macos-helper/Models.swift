@@ -34,6 +34,20 @@ struct UpdateRequest: Codable {
     }
 }
 
+struct AppStoreInstallRequest: Codable {
+    let schemaVersion: UInt
+    let appName: String
+    let packagePath: String
+    let receiptPath: String
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case appName = "app_name"
+        case packagePath = "package_path"
+        case receiptPath = "receipt_path"
+    }
+}
+
 struct UpdateEvent: Codable {
     let event: String
     let app: String?

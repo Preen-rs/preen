@@ -27,6 +27,20 @@ do {
             .map { EventWriter(fileURL: URL(fileURLWithPath: $0)) } ?? writer
         _ = try await runUpdate(request, writer: eventWriter, exitOnFailure: false)
         exit(0)
+    case "install-app-store-package":
+        guard let payload = CommandLine.arguments.dropFirst(2).first,
+              let input = Data(base64Encoded: payload)
+        else {
+            writer.write(UpdateEvent("failed", message: "missing elevated install payload"))
+            exit(65)
+        }
+        let request = try JSONDecoder().decode(AppStoreInstallRequest.self, from: input)
+        let eventWriter = CommandLine.arguments.dropFirst(3).first
+            .map { EventWriter(fileURL: URL(fileURLWithPath: $0)) } ?? writer
+        let appURL = try await MacAppStoreInstaller(writer: eventWriter).install(request)
+        print(appURL.path)
+        fflush(stdout)
+        exit(0)
     default:
         writer.write(UpdateEvent("failed", message: "unsupported command"))
         exit(64)

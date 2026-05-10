@@ -63,6 +63,91 @@ struct MacAppStoreUpdater {
     #endif
 }
 
+struct MacAppStoreInstaller {
+    let writer: EventWriter
+
+    func install(_ request: AppStoreInstallRequest) async throws -> URL {
+        guard request.schemaVersion == 1 else {
+            throw HelperError.invalidRequest("unsupported App Store install schema version")
+        }
+        let pkgURL = URL(fileURLWithPath: request.packagePath)
+        let receiptSourceURL = URL(fileURLWithPath: request.receiptPath)
+        writer.write(UpdateEvent("installing", app: request.appName, progress: 0.92, message: "Installing downloaded App Store package"))
+        let installerResult = try await runProcess(
+            "/usr/sbin/installer",
+            arguments: ["-dumplog", "-pkg", pkgURL.path, "-target", "/"]
+        )
+        let installerOutput = [installerResult.0, installerResult.1]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        guard let appURL = appFolderURL(fromInstallerOutput: installerOutput) else {
+            throw HelperError.unavailable("installer finished but app bundle path was not reported: \(installerOutput)")
+        }
+
+        let receiptURL = appURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("_MASReceipt", isDirectory: true)
+            .appendingPathComponent("receipt")
+        try copyReceipt(from: receiptSourceURL, to: receiptURL)
+
+        _ = try? await runProcess("/usr/bin/mdimport", arguments: [appURL.path])
+        LSRegisterURL(appURL as CFURL, true)
+        return appURL
+    }
+
+    private func copyReceipt(from sourceURL: URL, to receiptURL: URL) throws {
+        let fileManager = FileManager.default
+        let receiptDirectoryURL = receiptURL.deletingLastPathComponent()
+        if !fileManager.fileExists(atPath: receiptDirectoryURL.path) {
+            try fileManager.createDirectory(
+                at: receiptDirectoryURL,
+                withIntermediateDirectories: true,
+                attributes: [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755]
+            )
+        }
+        if fileManager.fileExists(atPath: receiptURL.path) {
+            try fileManager.removeItem(at: receiptURL)
+        }
+        try fileManager.copyItem(at: sourceURL, to: receiptURL)
+        try fileManager.setAttributes(
+            [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755],
+            ofItemAtPath: receiptURL.path
+        )
+    }
+
+    private func appFolderURL(fromInstallerOutput output: String) -> URL? {
+        let pattern = #"PackageKit: Registered bundle (\S+) for uid 0"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(output.startIndex..<output.endIndex, in: output)
+        let matches = regex.matches(in: output, range: range)
+        return matches
+            .compactMap { match -> URL? in
+                guard let capture = Range(match.range(at: 1), in: output) else { return nil }
+                return URL(string: String(output[capture]))
+            }
+            .min(by: { $0.path.count < $1.path.count })
+    }
+
+    private func runProcess(_ executable: String, arguments: [String]) async throws -> (String, String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        try process.run()
+        process.waitUntilExit()
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            let output = [stderr, stdout].filter { !$0.isEmpty }.joined(separator: "\n")
+            throw HelperError.unavailable("\(executable) exited with \(process.terminationStatus): \(output)")
+        }
+        return (stdout, stderr)
+    }
+}
+
 #if canImport(CommerceKit) && canImport(StoreFoundation)
 private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserver, @unchecked Sendable {
     private let request: UpdateRequest
@@ -240,83 +325,18 @@ private final class MacAppStoreDownloadObserver: NSObject, CKDownloadQueueObserv
         guard let receiptHardLinkURL else {
             throw HelperError.unavailable("downloaded App Store receipt was not found")
         }
-        writeProgressEvent("installing", progress: 0.92, message: "Installing downloaded App Store package")
-        let installerResult = try await runAsRoot {
-            try await runProcess(
-                "/usr/sbin/installer",
-                arguments: ["-dumplog", "-pkg", pkgHardLinkURL.path, "-target", "/"]
-            )
-        }
-        let installerOutput = [installerResult.0, installerResult.1]
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
-        guard let appURL = appFolderURL(fromInstallerOutput: installerOutput) else {
-            throw HelperError.unavailable("installer finished but app bundle path was not reported: \(installerOutput)")
-        }
-
-        let receiptURL = appURL
-            .appendingPathComponent("Contents", isDirectory: true)
-            .appendingPathComponent("_MASReceipt", isDirectory: true)
-            .appendingPathComponent("receipt")
-        try await runAsRoot {
-            try copyReceipt(from: receiptHardLinkURL, to: receiptURL)
-        }
-
-        _ = try? await runProcess("/usr/bin/mdimport", arguments: [appURL.path])
-        LSRegisterURL(appURL as CFURL, true)
-        return appURL
-    }
-
-    private func copyReceipt(from sourceURL: URL, to receiptURL: URL) throws {
-        let fileManager = FileManager.default
-        let receiptDirectoryURL = receiptURL.deletingLastPathComponent()
-        if !fileManager.fileExists(atPath: receiptDirectoryURL.path) {
-            try fileManager.createDirectory(
-                at: receiptDirectoryURL,
-                withIntermediateDirectories: true,
-                attributes: [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755]
-            )
-        }
-        if fileManager.fileExists(atPath: receiptURL.path) {
-            try fileManager.removeItem(at: receiptURL)
-        }
-        try fileManager.copyItem(at: sourceURL, to: receiptURL)
-        try fileManager.setAttributes(
-            [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755],
-            ofItemAtPath: receiptURL.path
+        let installRequest = AppStoreInstallRequest(
+            schemaVersion: 1,
+            appName: request.appName,
+            packagePath: pkgHardLinkURL.path,
+            receiptPath: receiptHardLinkURL.path
         )
-    }
-
-    private func appFolderURL(fromInstallerOutput output: String) -> URL? {
-        let pattern = #"PackageKit: Registered bundle (\S+) for uid 0"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let range = NSRange(output.startIndex..<output.endIndex, in: output)
-        let matches = regex.matches(in: output, range: range)
-        return matches
-            .compactMap { match -> URL? in
-                guard let capture = Range(match.range(at: 1), in: output) else { return nil }
-                return URL(string: String(output[capture]))
+        if getuid() == 0 || geteuid() == 0 {
+            return try await runAsRoot {
+                try await MacAppStoreInstaller(writer: writer).install(installRequest)
             }
-            .min(by: { $0.path.count < $1.path.count })
-    }
-
-    private func runProcess(_ executable: String, arguments: [String]) async throws -> (String, String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-        try process.run()
-        process.waitUntilExit()
-        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        guard process.terminationStatus == 0 else {
-            let output = [stderr, stdout].filter { !$0.isEmpty }.joined(separator: "\n")
-            throw HelperError.unavailable("\(executable) exited with \(process.terminationStatus): \(output)")
         }
-        return (stdout, stderr)
+        return try await RootRelauncher(writer: writer).runAppStorePackageInstall(installRequest)
     }
 
     private func phaseName(_ phaseType: Int64?) -> (event: String, message: String) {

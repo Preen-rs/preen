@@ -19,7 +19,7 @@ struct RootRelauncher {
         let askpassURL = try createAskpassScript()
         defer { try? FileManager.default.removeItem(at: askpassURL) }
 
-        try await runProcessAndForwardEvents(
+        _ = try await runProcessAndForwardEvents(
             "/usr/bin/sudo",
             arguments: [
                 "-A",
@@ -34,6 +34,42 @@ struct RootRelauncher {
                 "SUDO_PROMPT": "Preen needs administrator approval to update \(request.appName)",
             ]
         )
+    }
+
+    func runAppStorePackageInstall(_ request: AppStoreInstallRequest) async throws -> URL {
+        let payload = try JSONEncoder().encode(request).base64EncodedString()
+        guard let executable = Bundle.main.executableURL?.path else {
+            throw HelperError.unavailable("failed to locate macOS update helper executable")
+        }
+        let eventURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preen-app-store-install-\(UUID().uuidString).jsonl")
+        FileManager.default.createFile(atPath: eventURL.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: eventURL) }
+
+        let askpassURL = try createAskpassScript()
+        defer { try? FileManager.default.removeItem(at: askpassURL) }
+
+        let stdout = try await runProcessAndForwardEvents(
+            "/usr/bin/sudo",
+            arguments: [
+                "-A",
+                executable,
+                "install-app-store-package",
+                payload,
+                eventURL.path,
+            ],
+            eventURL: eventURL,
+            environment: [
+                "SUDO_ASKPASS": askpassURL.path,
+                "SUDO_PROMPT": "Preen needs administrator approval to install \(request.appName)",
+            ]
+        )
+        guard let path = stdout.split(whereSeparator: \.isNewline).last.map(String.init),
+              !path.isEmpty
+        else {
+            throw HelperError.unavailable("Mac App Store install helper did not report installed app path")
+        }
+        return URL(fileURLWithPath: path)
     }
 
     private func createAskpassScript() throws -> URL {
@@ -56,7 +92,7 @@ struct RootRelauncher {
         arguments: [String],
         eventURL: URL,
         environment: [String: String]
-    ) async throws {
+    ) async throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -91,7 +127,7 @@ struct RootRelauncher {
             let output = [stderr, stdout].filter { !$0.isEmpty }.joined(separator: "\n")
             throw HelperError.unavailable("Mac App Store update helper failed: \(output)")
         }
-        writer.writeRaw(stdout)
+        return stdout
     }
 
     private func forwardNewEvents(from eventURL: URL, offset: inout Int) -> Bool {
