@@ -267,17 +267,33 @@ pub(super) fn build_info_popup_lines(state: &AppState, content_width: usize) -> 
                     } else {
                         "[ ]"
                     };
-                    let admin = if target.requires_admin { " admin" } else { "" };
-                    let line = format!(
-                        "{marker} {selected} {} ({}, risk={}{}): {}",
+                    let admin = if target.requires_admin {
+                        " | admin"
+                    } else {
+                        ""
+                    };
+                    let title = format!(
+                        "{marker} {selected} {}  [{}{}]",
                         target.label,
-                        target.description,
                         target.risk.label(),
-                        admin,
-                        target.path.as_deref().unwrap_or("n/a")
+                        admin
                     );
-                    for wrapped in wrap_with_prefix("", &line, content_width) {
+                    for wrapped in wrap_with_prefix("", &title, content_width) {
                         lines.push(Line::from(wrapped));
+                    }
+                    for wrapped in wrap_with_prefix("    ", &target.description, content_width) {
+                        lines.push(Line::from(Span::styled(
+                            wrapped,
+                            Style::default().fg(PALETTE_LINE),
+                        )));
+                    }
+                    if let Some(path) = target.path.as_deref() {
+                        for wrapped in wrap_with_prefix("    ", path, content_width) {
+                            lines.push(Line::from(Span::styled(
+                                wrapped,
+                                Style::default().fg(PALETTE_LINE),
+                            )));
+                        }
                     }
                 }
                 lines.push(Line::from(""));

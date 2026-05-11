@@ -268,12 +268,16 @@ fn login_item_targets() -> Vec<PerformanceTaskTarget> {
             if path.extension().and_then(|value| value.to_str()) != Some("plist") {
                 continue;
             }
-            let label = path
+            let fallback_label = path
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .unwrap_or("login item")
                 .to_string();
-            let description = format!("{} startup agent", root.label);
+            let info = read_launch_plist_info(&path);
+            let launch_label = info.label.as_deref().unwrap_or(&fallback_label);
+            let label = human_launch_label(launch_label, info.executable.as_deref());
+            let description =
+                launch_item_description(&root, launch_label, info.executable.as_deref());
             targets.push(PerformanceTaskTarget {
                 id: stable_target_id(&path),
                 label,
@@ -297,6 +301,224 @@ fn login_item_targets() -> Vec<PerformanceTaskTarget> {
     targets
 }
 
+#[derive(Debug, Default)]
+struct LaunchPlistInfo {
+    label: Option<String>,
+    executable: Option<String>,
+}
+
+fn read_launch_plist_info(path: &Path) -> LaunchPlistInfo {
+    let text = fs::read_to_string(path).ok();
+    let label = text
+        .as_deref()
+        .and_then(|content| plist_string_value(content, "Label"))
+        .or_else(|| plutil_extract(path, "Label"));
+    let executable = text
+        .as_deref()
+        .and_then(|content| {
+            plist_array_first_string(content, "ProgramArguments")
+                .or_else(|| plist_string_value(content, "Program"))
+        })
+        .or_else(|| plutil_extract(path, "ProgramArguments.0"))
+        .or_else(|| plutil_extract(path, "Program"));
+
+    LaunchPlistInfo { label, executable }
+}
+
+fn plist_string_value(content: &str, key: &str) -> Option<String> {
+    let key_marker = format!("<key>{key}</key>");
+    let after_key = content.split(&key_marker).nth(1)?;
+    let start = after_key.find("<string>")? + "<string>".len();
+    let end = after_key[start..].find("</string>")? + start;
+    Some(unescape_plist_string(&after_key[start..end])).filter(|value| !value.trim().is_empty())
+}
+
+fn plist_array_first_string(content: &str, key: &str) -> Option<String> {
+    let key_marker = format!("<key>{key}</key>");
+    let after_key = content.split(&key_marker).nth(1)?;
+    let array_start = after_key.find("<array>")? + "<array>".len();
+    let array_end = after_key[array_start..].find("</array>")? + array_start;
+    let array_content = &after_key[array_start..array_end];
+    let start = array_content.find("<string>")? + "<string>".len();
+    let end = array_content[start..].find("</string>")? + start;
+    Some(unescape_plist_string(&array_content[start..end])).filter(|value| !value.trim().is_empty())
+}
+
+fn unescape_plist_string(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .trim()
+        .to_string()
+}
+
+fn plutil_extract(path: &Path, key_path: &str) -> Option<String> {
+    if std::env::consts::OS != "macos" {
+        return None;
+    }
+    let output = ProcessCommand::new("plutil")
+        .args(["-extract", key_path, "raw", "-o", "-"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn launch_item_description(
+    root: &LoginItemRoot,
+    launch_label: &str,
+    executable: Option<&str>,
+) -> String {
+    let mut parts = vec![root.label.to_string(), format!("id: {launch_label}")];
+    if let Some(executable) = executable
+        .map(clean_launch_executable)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("target: {executable}"));
+    }
+    parts.join(" | ")
+}
+
+fn clean_launch_executable(value: &str) -> String {
+    value
+        .strip_prefix("file://")
+        .unwrap_or(value)
+        .trim_matches('"')
+        .to_string()
+}
+
+fn human_launch_label(launch_label: &str, executable: Option<&str>) -> String {
+    let normalized = launch_label.to_ascii_lowercase();
+    for (prefix, label) in known_launch_labels() {
+        if normalized == *prefix || normalized.starts_with(prefix) {
+            return label.to_string();
+        }
+    }
+
+    let from_label = humanize_identifier(launch_label);
+    if !from_label.eq_ignore_ascii_case("Helper")
+        && !from_label.eq_ignore_ascii_case("Agent")
+        && !from_label.eq_ignore_ascii_case("Service")
+    {
+        return from_label;
+    }
+
+    executable
+        .and_then(|value| Path::new(value).file_stem())
+        .and_then(|value| value.to_str())
+        .map(humanize_identifier)
+        .unwrap_or_else(|| "Login Item".to_string())
+}
+
+fn known_launch_labels() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("com.apple", "Apple"),
+        ("com.google.googleupdater", "Google Updater"),
+        ("com.google.keystone", "Google Keystone"),
+        ("com.jetbrains.toolbox", "JetBrains Toolbox"),
+        ("com.macpaw.cleanmymac", "CleanMyMac"),
+        ("com.openai.atlas", "OpenAI Atlas"),
+        ("org.mozilla.firefox", "Firefox"),
+        ("com.microsoft", "Microsoft"),
+        ("com.docker", "Docker"),
+        ("com.spotify", "Spotify"),
+        ("com.tinyspeck.slackmacgap", "Slack"),
+        ("us.zoom", "Zoom"),
+    ]
+}
+
+fn humanize_identifier(value: &str) -> String {
+    let mut pieces = value
+        .trim_end_matches(".plist")
+        .split(|ch: char| ch == '.' || ch == '_' || ch == '-' || ch == ' ')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    let junk_prefixes = ["com", "org", "net", "io", "dev", "app", "homebrew", "mxcl"];
+    while pieces
+        .first()
+        .map(|part| junk_prefixes.contains(&part.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+    {
+        pieces.remove(0);
+    }
+
+    let junk_suffixes = [
+        "agent",
+        "daemon",
+        "helper",
+        "helpers",
+        "service",
+        "xpc",
+        "xpcservice",
+        "updater",
+        "update",
+        "wake",
+        "launcher",
+        "login",
+        "loginitem",
+        "installer",
+        "uninstaller",
+        "background",
+    ];
+    while pieces
+        .last()
+        .map(|part| junk_suffixes.contains(&part.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+    {
+        pieces.pop();
+    }
+
+    if pieces.is_empty() {
+        return "Login Item".to_string();
+    }
+
+    pieces
+        .into_iter()
+        .map(|piece| titleize_identifier_piece(&piece))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn titleize_identifier_piece(piece: &str) -> String {
+    if piece
+        .chars()
+        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        && piece.len() > 1
+    {
+        return piece.to_string();
+    }
+    let mut out = String::new();
+    let mut previous_lower = false;
+    for ch in piece.chars() {
+        if ch.is_ascii_uppercase() && previous_lower {
+            out.push(' ');
+        }
+        out.push(ch);
+        previous_lower = ch.is_ascii_lowercase();
+    }
+    out.split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 struct LoginItemRoot {
     label: &'static str,
     path: PathBuf,
@@ -307,19 +529,19 @@ fn login_item_roots() -> Vec<LoginItemRoot> {
     let mut roots = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
         roots.push(LoginItemRoot {
-            label: "User",
+            label: "User LaunchAgent",
             path: PathBuf::from(home).join("Library").join("LaunchAgents"),
             requires_admin: false,
         });
     }
     if std::env::consts::OS == "macos" {
         roots.push(LoginItemRoot {
-            label: "System",
+            label: "Global LaunchAgent",
             path: PathBuf::from("/Library/LaunchAgents"),
             requires_admin: true,
         });
         roots.push(LoginItemRoot {
-            label: "System",
+            label: "System LaunchDaemon",
             path: PathBuf::from("/Library/LaunchDaemons"),
             requires_admin: true,
         });
@@ -388,5 +610,61 @@ fn run_command(command: &str, args: &[&str]) -> Vec<String> {
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(error) => return vec![format!("failed: {command} ({error})")],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_launch_label_prefers_known_app_names() {
+        assert_eq!(
+            human_launch_label("com.google.keystone.agent", None),
+            "Google Keystone"
+        );
+        assert_eq!(
+            human_launch_label("com.macpaw.CleanMyMac5.Updater", None),
+            "CleanMyMac"
+        );
+        assert_eq!(
+            human_launch_label("com.openai.atlas.update-helper", None),
+            "OpenAI Atlas"
+        );
+    }
+
+    #[test]
+    fn human_launch_label_falls_back_to_meaningful_bundle_segment() {
+        assert_eq!(human_launch_label("homebrew.mxcl.mailpit", None), "Mailpit");
+        assert_eq!(
+            human_launch_label("com.example.cool-app.helper", None),
+            "Example Cool App"
+        );
+    }
+
+    #[test]
+    fn launch_plist_xml_parser_reads_label_and_program_arguments() {
+        let content = r#"
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>com.example.cool-app.helper</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>/Applications/Cool App.app/Contents/MacOS/Cool App</string>
+                <string>--background</string>
+            </array>
+        </dict>
+        </plist>
+        "#;
+
+        assert_eq!(
+            plist_string_value(content, "Label").as_deref(),
+            Some("com.example.cool-app.helper")
+        );
+        assert_eq!(
+            plist_array_first_string(content, "ProgramArguments").as_deref(),
+            Some("/Applications/Cool App.app/Contents/MacOS/Cool App")
+        );
     }
 }
