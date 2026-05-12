@@ -629,13 +629,6 @@ fn render_performance_detail_popup(frame: &mut Frame<'_>, area: Rect, state: &Ap
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    let vertical = Layout::vertical([
-        Constraint::Length(6),
-        Constraint::Min(5),
-        Constraint::Length(1),
-    ])
-    .split(inner);
-
     let mut summary_lines = vec![
         Line::from(detail.summary.clone()),
         Line::from(""),
@@ -656,6 +649,19 @@ fn render_performance_detail_popup(frame: &mut Frame<'_>, area: Rect, state: &Ap
                 .map(|note| Line::from(format!("- {note}"))),
         );
     }
+
+    if detail.targets.is_empty() {
+        frame.render_widget(
+            Paragraph::new(summary_lines)
+                .style(Style::default().fg(PALETTE_TEXT))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    let vertical = Layout::vertical([Constraint::Length(6), Constraint::Min(5)]).split(inner);
+
     frame.render_widget(
         Paragraph::new(summary_lines)
             .style(Style::default().fg(PALETTE_TEXT))
@@ -748,16 +754,6 @@ fn render_performance_detail_popup(frame: &mut Frame<'_>, area: Rect, state: &Ap
         viewport_height,
         content_length,
         list_scroll_offset,
-    );
-
-    let footer = localized(
-        state,
-        "j/k move | space select item | x runs selected tasks | close: v/i/Esc",
-        "j/k bewegen | Leertaste wählen | x führt Auswahl aus | schließen: v/i/Esc",
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(footer)).style(Style::default().fg(PALETTE_TEXT)),
-        vertical[2],
     );
 }
 
