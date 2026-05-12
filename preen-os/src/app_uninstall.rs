@@ -759,7 +759,7 @@ fn collect_matching_paths_recursive(
             continue;
         }
         if let Some(name) = name
-            && let Some(confidence) = path_name_match_confidence(&name, match_keys)
+            && let Some(confidence) = related_path_match_confidence(&name, match_keys, &kind)
         {
             out.insert((
                 path.display().to_string(),
@@ -783,6 +783,28 @@ fn collect_matching_paths_recursive(
             );
         }
     }
+}
+
+fn related_path_match_confidence(
+    path_name: &str,
+    match_keys: &[String],
+    kind: &RelatedPathKind,
+) -> Option<RelatedPathConfidence> {
+    let confidence = path_name_match_confidence(path_name, match_keys)?;
+    if matches!(confidence, RelatedPathConfidence::Fuzzy)
+        && matches!(kind, RelatedPathKind::Support)
+        && is_app_service_path_name(path_name, match_keys)
+    {
+        return Some(RelatedPathConfidence::Strong);
+    }
+    Some(confidence)
+}
+
+fn is_app_service_path_name(path_name: &str, match_keys: &[String]) -> bool {
+    let normalized = preen_core::app_uninstall::normalize_app_match_key(path_name);
+    match_keys
+        .iter()
+        .any(|key| key.len() >= 8 && normalized.contains(key))
 }
 
 fn is_path_excluded(path: &Path, excluded_paths: &[PathBuf]) -> bool {
@@ -976,6 +998,27 @@ mod tests {
                 .iter()
                 .any(|path| path.path == fuzzy.display().to_string()
                     && path.confidence == RelatedPathConfidence::Fuzzy)
+        );
+    }
+
+    #[test]
+    fn related_path_discovery_promotes_app_specific_login_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch_agents = dir.path().join("Library").join("LaunchAgents");
+        let agent = launch_agents.join("com.macpaw.CleanMyMac5.Updater.plist");
+        fs::create_dir_all(&launch_agents).unwrap();
+        fs::write(&agent, "agent").unwrap();
+
+        let mut identity = AppIdentity::macos("CleanMyMac");
+        identity.bundle_identifier = Some("com.macpaw.CleanMyMac5".to_string());
+        let paths = discover_related_path_items(&identity, dir.path(), &[]);
+
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.path == agent.display().to_string()
+                    && path.kind == RelatedPathKind::Support
+                    && path.confidence == RelatedPathConfidence::Strong)
         );
     }
 
