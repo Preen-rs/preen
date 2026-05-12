@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 const APP_UNINSTALL_JOURNAL_SCHEMA_VERSION: u32 = 1;
 const APP_UNINSTALL_JOURNAL_FILE: &str = "app-uninstall-last.toml";
 const APP_UNINSTALL_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const APP_TERMINATE_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppUninstallJournal {
@@ -186,10 +187,13 @@ pub fn execute_app_uninstall_with_options(
     for application in applications {
         let app_name = application.identity.display_name.clone();
         if is_application_running(&application) {
-            lines.push(format!(
-                "{app_name}: running application skipped; quit it before uninstall"
-            ));
-            continue;
+            lines.extend(terminate_application_processes(&application));
+            if is_application_running(&application) {
+                lines.push(format!(
+                    "{app_name}: running application could not be stopped"
+                ));
+                continue;
+            }
         }
         if let Some(package) = application.package_metadata.as_ref()
             && package.manager == AppPackageManager::HomebrewCask
@@ -356,8 +360,7 @@ fn append_command_output(lines: &mut Vec<String>, output: &Output) {
 }
 
 fn is_application_running(application: &InstalledApplication) -> bool {
-    let Some(pgrep) = find_executable_in_common_paths("pgrep", &["/usr/bin/pgrep", "/bin/pgrep"])
-    else {
+    let Some(pgrep) = find_tool("PREEN_PGREP", "pgrep", &["/usr/bin/pgrep", "/bin/pgrep"]) else {
         return false;
     };
     let display_name = application.identity.display_name.trim();
@@ -381,6 +384,120 @@ fn is_application_running(application: &InstalledApplication) -> bool {
         return path_status.unwrap_or(false);
     }
     false
+}
+
+fn terminate_application_processes(application: &InstalledApplication) -> Vec<String> {
+    let app_name = application.identity.display_name.trim();
+    let mut lines = Vec::new();
+    if app_name.is_empty() {
+        return lines;
+    }
+
+    if request_application_quit(application) {
+        lines.push(format!("{app_name}: requested app quit"));
+        if wait_until_not_running(application, APP_TERMINATE_GRACE_PERIOD) {
+            return lines;
+        }
+    }
+
+    if signal_application_processes(application, "TERM") {
+        lines.push(format!("{app_name}: terminated running processes"));
+        if wait_until_not_running(application, APP_TERMINATE_GRACE_PERIOD) {
+            return lines;
+        }
+    }
+
+    if signal_application_processes(application, "KILL") {
+        lines.push(format!("{app_name}: force killed running processes"));
+        let _ = wait_until_not_running(application, APP_TERMINATE_GRACE_PERIOD);
+    }
+
+    lines
+}
+
+fn request_application_quit(application: &InstalledApplication) -> bool {
+    if !matches!(application.identity.platform, AppPlatform::Macos) {
+        return false;
+    }
+    let Some(os_script) = find_tool(
+        "PREEN_OSASCRIPT",
+        "osascript",
+        &["/usr/bin/osascript", "/bin/osascript"],
+    ) else {
+        return false;
+    };
+
+    let script = application
+        .identity
+        .bundle_identifier
+        .as_deref()
+        .filter(|bundle_id| !bundle_id.trim().is_empty())
+        .map(|bundle_id| {
+            format!(
+                "tell application id \"{}\" to quit",
+                escape_apple_script(bundle_id)
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "tell application \"{}\" to quit",
+                escape_apple_script(&application.identity.display_name)
+            )
+        });
+
+    run_probe_command_with_timeout(
+        command_with_args(&os_script, &["-e", script.as_str()]),
+        Duration::from_secs(2),
+    )
+    .is_some_and(|status| status)
+}
+
+fn signal_application_processes(application: &InstalledApplication, signal: &str) -> bool {
+    let Some(pkill) = find_tool("PREEN_PKILL", "pkill", &["/usr/bin/pkill", "/bin/pkill"]) else {
+        return false;
+    };
+    let display_name = application.identity.display_name.trim();
+    let signal_arg = format!("-{signal}");
+    let mut signaled = false;
+    if !display_name.is_empty()
+        && run_probe_command_with_timeout(
+            command_with_args(&pkill, &[signal_arg.as_str(), "-x", display_name]),
+            Duration::from_secs(2),
+        )
+        .is_some_and(|status| status)
+    {
+        signaled = true;
+    }
+    if !application.path.trim().is_empty()
+        && run_probe_command_with_timeout(
+            command_with_args(
+                &pkill,
+                &[signal_arg.as_str(), "-f", application.path.as_str()],
+            ),
+            Duration::from_secs(2),
+        )
+        .is_some_and(|status| status)
+    {
+        signaled = true;
+    }
+    signaled
+}
+
+fn wait_until_not_running(application: &InstalledApplication, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if !is_application_running(application) {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn escape_apple_script(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn command_with_args(program: &Path, args: &[&str]) -> Command {
@@ -427,6 +544,13 @@ fn find_executable_in_common_paths(name: &str, absolute_paths: &[&str]) -> Optio
             .map(|dir| dir.join(name))
             .find(|candidate| candidate.is_file())
     })
+}
+
+fn find_tool(env_key: &str, name: &str, absolute_paths: &[&str]) -> Option<PathBuf> {
+    std::env::var_os(env_key)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| find_executable_in_common_paths(name, absolute_paths))
 }
 
 pub fn undo_last_app_uninstall(state_dir: &Path) -> Result<AppUninstallUndoOutput, String> {
@@ -1082,6 +1206,73 @@ mod tests {
     }
 
     #[test]
+    fn execute_app_uninstall_stops_running_app_before_trashing() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", dir.path().to_string_lossy().as_ref());
+        let state_dir = dir.path().join("state");
+        let app_path = dir.path().join("CleanMyMac_5.app");
+        fs::create_dir_all(&app_path).unwrap();
+        fs::write(app_path.join("Info.plist"), "demo").unwrap();
+
+        let running_marker = dir.path().join("running");
+        fs::write(&running_marker, "1").unwrap();
+        let pgrep = write_test_executable(
+            dir.path(),
+            "pgrep",
+            &format!(
+                "#!/bin/sh\nif [ -f '{}' ]; then exit 0; fi\nexit 1\n",
+                running_marker.display()
+            ),
+        );
+        let pkill_log = dir.path().join("pkill.log");
+        let pkill = write_test_executable(
+            dir.path(),
+            "pkill",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nrm -f '{}'\nexit 0\n",
+                pkill_log.display(),
+                running_marker.display()
+            ),
+        );
+        let osascript = write_test_executable(dir.path(), "osascript", "#!/bin/sh\nexit 1\n");
+        let _pgrep = EnvVarGuard::set("PREEN_PGREP", pgrep.to_string_lossy().as_ref());
+        let _pkill = EnvVarGuard::set("PREEN_PKILL", pkill.to_string_lossy().as_ref());
+        let _osascript = EnvVarGuard::set("PREEN_OSASCRIPT", osascript.to_string_lossy().as_ref());
+
+        let output = execute_app_uninstall(
+            vec![InstalledApplication {
+                identity: AppIdentity::macos("CleanMyMac_5"),
+                path: app_path.to_string_lossy().to_string(),
+                version: None,
+                inventory_metadata: None,
+                source: AppSource::User,
+                estimated_size: 0,
+                last_used_at: None,
+                management_source: AppManagementSource::Manual,
+                update_availability: AppUpdateAvailability::Unsupported,
+                package_metadata: None,
+                protected: false,
+            }],
+            Some(&state_dir),
+        )
+        .unwrap();
+
+        assert!(!app_path.exists());
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "CleanMyMac_5: terminated running processes")
+        );
+        assert!(
+            fs::read_to_string(pkill_log)
+                .unwrap()
+                .contains("-TERM\n-x\nCleanMyMac_5")
+        );
+    }
+
+    #[test]
     fn execute_app_uninstall_uses_homebrew_cask_zap_when_available() {
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
@@ -1323,5 +1514,18 @@ mod tests {
         clear_last_app_uninstall_journal(dir.path()).unwrap();
 
         assert_eq!(read_last_app_uninstall_journal(dir.path()).unwrap(), None);
+    }
+
+    fn write_test_executable(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).unwrap();
+        }
+        path
     }
 }
