@@ -1792,23 +1792,31 @@ fn performance_task_selected_by_default(
     task: &PerformanceOptimizationTask,
     detail: Option<&PerformanceTaskDetail>,
 ) -> bool {
-    if !(task.recommended
-        && task.risk == PerformanceTaskRisk::Low
-        && matches!(
-            task.kind,
-            PerformanceTaskKind::Inspect | PerformanceTaskKind::SafeMaintenance
-        ))
-    {
+    if task.risk != PerformanceTaskRisk::Low {
         return false;
     }
-    let Some(detail) = detail else {
-        return true;
-    };
-    detail.targets.is_empty()
-        || detail
-            .targets
-            .iter()
-            .any(performance_target_selected_by_default)
+    match task.kind {
+        PerformanceTaskKind::AdminMaintenance => false,
+        PerformanceTaskKind::Inspect => {
+            task.recommended
+                && detail.map_or(true, |detail| {
+                    detail.targets.is_empty()
+                        || detail
+                            .targets
+                            .iter()
+                            .any(performance_target_selected_by_default)
+                })
+        }
+        PerformanceTaskKind::SafeMaintenance => {
+            let has_default_target = detail.is_some_and(|detail| {
+                detail
+                    .targets
+                    .iter()
+                    .any(performance_target_selected_by_default)
+            });
+            task.recommended || has_default_target
+        }
+    }
 }
 
 fn performance_target_selected_by_default(target: &PerformanceTaskTarget) -> bool {
@@ -2542,6 +2550,12 @@ mod tests {
                         PerformanceTaskRisk::Low,
                         false,
                     ),
+                    task(
+                        "optional_targets",
+                        PerformanceTaskKind::SafeMaintenance,
+                        PerformanceTaskRisk::Low,
+                        false,
+                    ),
                 ],
                 recommendations: Vec::new(),
             },
@@ -2587,6 +2601,21 @@ mod tests {
                         risk: PerformanceTaskRisk::Low,
                     }],
                 },
+                PerformanceTaskDetail {
+                    task_id: "optional_targets".to_string(),
+                    title: "Optional targets".to_string(),
+                    summary: String::new(),
+                    notes: Vec::new(),
+                    targets: vec![PerformanceTaskTarget {
+                        id: "optional_safe_target".to_string(),
+                        label: "optional safe target".to_string(),
+                        description: String::new(),
+                        path: None,
+                        selected_by_default: true,
+                        requires_admin: false,
+                        risk: PerformanceTaskRisk::Low,
+                    }],
+                },
             ],
         });
 
@@ -2598,8 +2627,18 @@ mod tests {
         assert!(!state.performance_selected_tasks.contains("optional"));
         assert!(
             state
+                .performance_selected_tasks
+                .contains("optional_targets")
+        );
+        assert!(
+            state
                 .performance_selected_target_ids
                 .contains("safe_target")
+        );
+        assert!(
+            state
+                .performance_selected_target_ids
+                .contains("optional_safe_target")
         );
         assert!(
             !state
