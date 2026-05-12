@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 const TUI_CONFIG_FILE: &str = "tui.conf";
 pub const APPLICATIONS_VISIBLE_ROWS: usize = 36;
 pub const PERFORMANCE_VISIBLE_ROWS: usize = 28;
+pub const PERFORMANCE_DETAIL_VISIBLE_TARGETS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveView {
@@ -279,6 +280,7 @@ pub struct AppState {
     pub performance_selected_target_ids: BTreeSet<String>,
     pub performance_detail_task_id: Option<String>,
     pub performance_detail_selected_row: usize,
+    pub performance_detail_target_offset: usize,
     pub performance_last_action_lines: Vec<String>,
     pub performance_show_action_details: bool,
     pub performance_scan_revision: u64,
@@ -350,6 +352,7 @@ impl Default for AppState {
             performance_selected_target_ids: BTreeSet::new(),
             performance_detail_task_id: None,
             performance_detail_selected_row: 0,
+            performance_detail_target_offset: 0,
             performance_last_action_lines: Vec::new(),
             performance_show_action_details: false,
             performance_scan_revision: 0,
@@ -538,6 +541,8 @@ impl AppState {
         self.applications_show_paths_in_info = false;
         self.performance_show_action_details = false;
         self.performance_detail_task_id = None;
+        self.performance_detail_selected_row = 0;
+        self.performance_detail_target_offset = 0;
     }
 
     pub fn applications_close_paths_popup_if_open(&mut self) -> bool {
@@ -1112,6 +1117,7 @@ impl AppState {
         self.performance_detail_task_id = Some(task.id.clone());
         self.performance_show_action_details = false;
         self.performance_detail_selected_row = 0;
+        self.performance_detail_target_offset = 0;
         self.show_info_popup = true;
         self.info_popup_scroll = 0;
         Ok(())
@@ -1139,6 +1145,7 @@ impl AppState {
         if self.performance_detail_selected_row + 1 < target_count {
             self.performance_detail_selected_row += 1;
         }
+        self.performance_sync_detail_target_selection();
     }
 
     pub fn performance_detail_select_previous_target(&mut self) {
@@ -1151,6 +1158,7 @@ impl AppState {
         }
         self.performance_detail_selected_row =
             self.performance_detail_selected_row.saturating_sub(1);
+        self.performance_sync_detail_target_selection();
     }
 
     pub fn performance_detail_toggle_target(&mut self) {
@@ -1222,6 +1230,33 @@ impl AppState {
                 .saturating_sub(PERFORMANCE_VISIBLE_ROWS);
         }
         self.main_scroll = 0;
+    }
+
+    fn performance_sync_detail_target_selection(&mut self) {
+        let target_count = self
+            .performance_detail()
+            .map_or(0, |detail| detail.targets.len());
+        if target_count == 0 {
+            self.performance_detail_selected_row = 0;
+            self.performance_detail_target_offset = 0;
+            return;
+        }
+        if self.performance_detail_selected_row >= target_count {
+            self.performance_detail_selected_row = target_count.saturating_sub(1);
+        }
+        if self.performance_detail_selected_row < self.performance_detail_target_offset {
+            self.performance_detail_target_offset = self.performance_detail_selected_row;
+        }
+        let visible_end = self
+            .performance_detail_target_offset
+            .saturating_add(PERFORMANCE_DETAIL_VISIBLE_TARGETS);
+        if self.performance_detail_selected_row >= visible_end {
+            self.performance_detail_target_offset = self
+                .performance_detail_selected_row
+                .saturating_add(1)
+                .saturating_sub(PERFORMANCE_DETAIL_VISIBLE_TARGETS);
+        }
+        self.info_popup_scroll = 0;
     }
 
     pub fn scroll_info_popup_down(&mut self, amount: u16) {

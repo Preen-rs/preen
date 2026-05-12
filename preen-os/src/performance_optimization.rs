@@ -400,7 +400,12 @@ fn human_launch_label(launch_label: &str, executable: Option<&str>) -> String {
     let normalized = launch_label.to_ascii_lowercase();
     for (prefix, label) in known_launch_labels() {
         if normalized == *prefix || normalized.starts_with(prefix) {
-            return label.to_string();
+            return match launch_role_suffix(&normalized) {
+                Some(suffix) if !label.eq_ignore_ascii_case(suffix) => {
+                    format!("{label} {suffix}")
+                }
+                _ => label.to_string(),
+            };
         }
     }
 
@@ -417,6 +422,25 @@ fn human_launch_label(launch_label: &str, executable: Option<&str>) -> String {
         .and_then(|value| value.to_str())
         .map(humanize_identifier)
         .unwrap_or_else(|| "Login Item".to_string())
+}
+
+fn launch_role_suffix(normalized_label: &str) -> Option<&'static str> {
+    let last = normalized_label
+        .split(|ch: char| ch == '.' || ch == '_' || ch == '-')
+        .filter(|part| !part.is_empty())
+        .next_back()?;
+    match last {
+        "agent" => Some("Agent"),
+        "daemon" => Some("Daemon"),
+        "helper" => Some("Helper"),
+        "service" => Some("Service"),
+        "xpc" | "xpcservice" => Some("XPC Service"),
+        "updater" | "update" => Some("Updater"),
+        "wake" => Some("Wake"),
+        "launcher" => Some("Launcher"),
+        "login" | "loginitem" => Some("Login Item"),
+        _ => None,
+    }
 }
 
 fn known_launch_labels() -> &'static [(&'static str, &'static str)] {
@@ -621,15 +645,19 @@ mod tests {
     fn human_launch_label_prefers_known_app_names() {
         assert_eq!(
             human_launch_label("com.google.keystone.agent", None),
-            "Google Keystone"
+            "Google Keystone Agent"
+        );
+        assert_eq!(
+            human_launch_label("com.google.keystone.xpcservice", None),
+            "Google Keystone XPC Service"
         );
         assert_eq!(
             human_launch_label("com.macpaw.CleanMyMac5.Updater", None),
-            "CleanMyMac"
+            "CleanMyMac Updater"
         );
         assert_eq!(
             human_launch_label("com.openai.atlas.update-helper", None),
-            "OpenAI Atlas"
+            "OpenAI Atlas Helper"
         );
     }
 

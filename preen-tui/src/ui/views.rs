@@ -1,7 +1,7 @@
 use crate::i18n::{Language, TextKey};
 use crate::model::{
-    APPLICATIONS_VISIBLE_ROWS, ActiveView, AppState, DashboardSnapshot, PERFORMANCE_VISIBLE_ROWS,
-    PluginActionKind,
+    APPLICATIONS_VISIBLE_ROWS, ActiveView, AppState, DashboardSnapshot,
+    PERFORMANCE_DETAIL_VISIBLE_TARGETS, PERFORMANCE_VISIBLE_ROWS, PluginActionKind,
 };
 use preen_core::app_uninstall::{
     AppManagementSource, AppPackageDetectionConfidence, AppPackageManager, AppSource,
@@ -256,7 +256,22 @@ pub(super) fn build_info_popup_lines(state: &AppState, content_width: usize) -> 
                     localized(state, "Items", "Eintraege"),
                     detail.targets.len()
                 )));
-                for (index, target) in detail.targets.iter().enumerate() {
+                let start = state.performance_detail_target_offset;
+                let rendered_end =
+                    (start + PERFORMANCE_DETAIL_VISIBLE_TARGETS).min(detail.targets.len());
+                if start > 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!("... {start} earlier item(s)"),
+                        Style::default().fg(PALETTE_LINE),
+                    )));
+                }
+                for (index, target) in detail
+                    .targets
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(PERFORMANCE_DETAIL_VISIBLE_TARGETS)
+                {
                     let marker = if index == state.performance_detail_selected_row {
                         "▶"
                     } else {
@@ -295,6 +310,15 @@ pub(super) fn build_info_popup_lines(state: &AppState, content_width: usize) -> 
                             )));
                         }
                     }
+                }
+                if rendered_end < detail.targets.len() {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "... {} more item(s)",
+                            detail.targets.len().saturating_sub(rendered_end)
+                        ),
+                        Style::default().fg(PALETTE_LINE),
+                    )));
                 }
                 lines.push(Line::from(""));
                 lines.push(Line::from(localized(
