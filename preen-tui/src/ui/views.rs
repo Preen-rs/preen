@@ -862,11 +862,15 @@ fn performance_lines(
             } else {
                 "[ ]"
             };
-            let rec = if task.recommended { "rec" } else { "opt" };
+            let recommendation = if task.recommended {
+                localized(state, "recommended", "empfohlen")
+            } else {
+                localized(state, "optional", "optional")
+            };
             let left = format!(
-                "  {marker} {selected} {:<3} {}",
-                rec,
-                truncate_with_ellipsis(&task.label, 44)
+                "  {marker} {selected} {:<11} {}",
+                recommendation,
+                truncate_with_ellipsis(&task.label, 36)
             );
             let right = format!("[{} · {}]", task.kind.label(), task.risk.label());
             lines.push(Line::from(right_aligned_text(&left, &right, content_width)));
@@ -875,7 +879,10 @@ fn performance_lines(
                 &truncate_with_ellipsis(&task.reason, content_width.saturating_sub(8)),
                 content_width,
             ) {
-                lines.push(Line::from(wrapped));
+                lines.push(Line::from(Span::styled(
+                    wrapped,
+                    Style::default().fg(PALETTE_LINE),
+                )));
             }
         }
         let rendered_end = start.saturating_add(PERFORMANCE_VISIBLE_ROWS);
