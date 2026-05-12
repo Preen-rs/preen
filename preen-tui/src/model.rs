@@ -285,6 +285,7 @@ pub struct AppState {
     pub performance_last_action_lines: Vec<String>,
     pub performance_show_action_details: bool,
     pub performance_scan_revision: u64,
+    pub performance_optimize_armed: bool,
 }
 
 impl Default for AppState {
@@ -357,6 +358,7 @@ impl Default for AppState {
             performance_last_action_lines: Vec::new(),
             performance_show_action_details: false,
             performance_scan_revision: 0,
+            performance_optimize_armed: false,
         }
     }
 }
@@ -1014,6 +1016,7 @@ impl AppState {
     }
 
     pub fn begin_performance_analyze(&mut self) {
+        self.performance_optimize_armed = false;
         self.begin_busy_view(
             BusyViewKind::Performance,
             self.tr(TextKey::AnalyzingPerformanceTitle),
@@ -1024,6 +1027,7 @@ impl AppState {
     }
 
     pub fn begin_performance_optimize(&mut self) {
+        self.performance_optimize_armed = false;
         self.begin_busy_view(
             BusyViewKind::Performance,
             self.tr(TextKey::OptimizingPerformanceTitle),
@@ -1063,6 +1067,7 @@ impl AppState {
         self.performance_show_action_details = false;
         self.performance_detail_task_id = None;
         self.performance_scan_revision = self.performance_scan_revision.saturating_add(1);
+        self.performance_optimize_armed = false;
         self.close_info_popup();
         self.performance_sync_selection();
         self.clear_busy_view_kind(BusyViewKind::Performance);
@@ -1078,6 +1083,7 @@ impl AppState {
         self.info_popup_scroll = 0;
         self.clear_busy_view_kind(BusyViewKind::Performance);
         self.last_error = None;
+        self.performance_optimize_armed = false;
     }
 
     pub fn performance_select_next(&mut self) {
@@ -1110,6 +1116,7 @@ impl AppState {
         if !self.performance_selected_tasks.insert(task.id.clone()) {
             self.performance_selected_tasks.remove(&task.id);
         }
+        self.performance_optimize_armed = false;
     }
 
     pub fn performance_open_selected_detail(&mut self) -> Result<(), String> {
@@ -1177,10 +1184,46 @@ impl AppState {
         {
             self.performance_selected_target_ids.remove(&target_id);
         }
+        self.performance_optimize_armed = false;
     }
 
     pub fn performance_selected_count(&self) -> usize {
         self.performance_selected_tasks.len()
+    }
+
+    pub fn performance_arm_optimize(&mut self) {
+        self.performance_optimize_armed = true;
+        self.last_error = Some(
+            "admin or medium-risk optimization armed; press x to run selected tasks".to_string(),
+        );
+    }
+
+    pub fn performance_selected_needs_confirmation(&self) -> bool {
+        self.performance_selected_tasks.iter().any(|task_id| {
+            self.performance_tasks
+                .iter()
+                .find(|task| &task.id == task_id)
+                .is_some_and(|task| {
+                    matches!(task.kind, PerformanceTaskKind::AdminMaintenance)
+                        || matches!(
+                            task.risk,
+                            PerformanceTaskRisk::Medium | PerformanceTaskRisk::High
+                        )
+                })
+                || self
+                    .performance_task_details
+                    .get(task_id)
+                    .is_some_and(|detail| {
+                        detail.targets.iter().any(|target| {
+                            self.performance_selected_target_ids.contains(&target.id)
+                                && (target.requires_admin
+                                    || matches!(
+                                        target.risk,
+                                        PerformanceTaskRisk::Medium | PerformanceTaskRisk::High
+                                    ))
+                        })
+                    })
+        })
     }
 
     pub fn performance_build_optimize_selections(&self) -> Vec<PerformanceOptimizeSelection> {

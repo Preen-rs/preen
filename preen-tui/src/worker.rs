@@ -100,6 +100,10 @@ pub enum WorkerCommand {
         details: Vec<PerformanceTaskDetail>,
         selections: Vec<PerformanceOptimizeSelection>,
     },
+    PerformanceOptimizePreview {
+        details: Vec<PerformanceTaskDetail>,
+        selections: Vec<PerformanceOptimizeSelection>,
+    },
     SmartCareAnalyze {
         profile: SmartCareProfile,
         descriptors: Vec<SmartCarePluginDescriptor>,
@@ -220,6 +224,19 @@ impl StatusWorker {
             details,
             selections,
         });
+    }
+
+    pub fn run_performance_optimize_preview(
+        &self,
+        details: Vec<PerformanceTaskDetail>,
+        selections: Vec<PerformanceOptimizeSelection>,
+    ) {
+        let _ = self
+            .command_tx
+            .send(WorkerCommand::PerformanceOptimizePreview {
+                details,
+                selections,
+            });
     }
 
     pub fn run_smart_care_analyze(
@@ -560,6 +577,19 @@ fn run_worker_loop(
                     background_action_running.store(false, Ordering::SeqCst);
                     let _ = event_tx_for_action.send(event);
                 });
+                continue;
+            }
+            Ok(WorkerCommand::PerformanceOptimizePreview {
+                details,
+                selections,
+            }) => {
+                let result = preen_os::performance_optimization::preview(&details, selections);
+                if event_tx
+                    .send(WorkerEvent::PerformanceOptimizeResult { result })
+                    .is_err()
+                {
+                    break;
+                }
                 continue;
             }
             Ok(WorkerCommand::SmartCareAnalyze {

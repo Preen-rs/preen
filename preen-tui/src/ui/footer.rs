@@ -294,8 +294,8 @@ fn footer_context_text(state: &AppState) -> String {
         .to_string(),
         ActiveView::Performance => l(
             language,
-            "Optimization: a analyze | r reanalyze | j/k move | space select | v details | x optimize | i result | ?: keys",
-            "Optimierung: a analysieren | r erneut | j/k bewegen | Leertaste wählen | v Details | x optimieren | i Ergebnis | ?: Tasten",
+            "Optimization: a analyze | r reanalyze | j/k move | space select | v details | d dry-run | Shift+X arm | x optimize | i result | ?: keys",
+            "Optimierung: a analysieren | r erneut | j/k bewegen | Leertaste wählen | v Details | d Testlauf | Shift+X scharf | x optimieren | i Ergebnis | ?: Tasten",
         )
         .to_string(),
         ActiveView::Cleanup | ActiveView::Protection => format!(

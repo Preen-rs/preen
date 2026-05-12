@@ -167,6 +167,7 @@ impl PerformanceViewModel {
             disk_io_rate_mbps,
             top_processes: top_processes(&metrics.top_processes),
             optimization_tasks: optimization_tasks(
+                snapshot.os.as_str(),
                 cpu_level,
                 memory_level,
                 load_level,
@@ -237,6 +238,7 @@ fn top_processes(processes: &[ProcessMetric]) -> Vec<PerformanceTopProcess> {
 }
 
 fn optimization_tasks(
+    os: &str,
     cpu: PerformanceLevel,
     memory: PerformanceLevel,
     load: PerformanceLevel,
@@ -390,6 +392,16 @@ fn optimization_tasks(
             reason: "uses tmutil only for selected local snapshots".to_string(),
         },
         PerformanceOptimizationTask {
+            id: "purge_apfs_space".to_string(),
+            label: "Purge APFS space".to_string(),
+            description: "Ask APFS to reclaim purgeable local space after review".to_string(),
+            kind: PerformanceTaskKind::AdminMaintenance,
+            risk: PerformanceTaskRisk::Medium,
+            recommended: false,
+            reason: "uses diskutil purgePurgeable and may require administrator approval"
+                .to_string(),
+        },
+        PerformanceOptimizationTask {
             id: "run_periodic_maintenance".to_string(),
             label: "Run periodic maintenance".to_string(),
             description: "Run macOS daily, weekly, and monthly maintenance scripts".to_string(),
@@ -461,8 +473,37 @@ fn optimization_tasks(
                 || disk >= PerformanceLevel::High,
             reason: defer_reason(cpu, temperature, disk),
         },
+        PerformanceOptimizationTask {
+            id: "refresh_fontconfig_cache".to_string(),
+            label: "Refresh fontconfig cache".to_string(),
+            description: "Rebuild Linux fontconfig caches when font discovery looks stale"
+                .to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: false,
+            reason: "Linux font cache refresh; does not change user documents".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "refresh_user_systemd".to_string(),
+            label: "Refresh user services".to_string(),
+            description: "Reload the user systemd daemon after startup item changes".to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: false,
+            reason: "Linux user service metadata reload".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "vacuum_user_journal".to_string(),
+            label: "Vacuum user journal".to_string(),
+            description: "Trim old user journal entries without touching system logs".to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: false,
+            reason: "Linux user journal maintenance with a time-based retention window".to_string(),
+        },
     ];
 
+    tasks.retain(|task| os_supports_task(os, &task.id));
     tasks.sort_by(|left, right| {
         right
             .recommended
@@ -489,14 +530,33 @@ fn task_priority(id: &str) -> u8 {
         "inspect_login_items" => 10,
         "sync_filesystem_buffers" => 11,
         "thin_local_snapshots" => 12,
-        "run_periodic_maintenance" => 13,
-        "reset_app_store_cache" => 14,
-        "refresh_network_stack" => 15,
-        "repair_user_permissions" => 16,
-        "refresh_bluetooth" => 17,
-        "optimize_spotlight_index" => 18,
-        "defer_heavy_maintenance" => 19,
+        "purge_apfs_space" => 13,
+        "run_periodic_maintenance" => 14,
+        "reset_app_store_cache" => 15,
+        "refresh_network_stack" => 16,
+        "repair_user_permissions" => 17,
+        "refresh_bluetooth" => 18,
+        "optimize_spotlight_index" => 19,
+        "refresh_fontconfig_cache" => 20,
+        "refresh_user_systemd" => 21,
+        "vacuum_user_journal" => 22,
+        "defer_heavy_maintenance" => 23,
         _ => 99,
+    }
+}
+
+fn os_supports_task(os: &str, id: &str) -> bool {
+    let normalized = os.to_ascii_lowercase();
+    let is_linux = normalized.contains("linux");
+    let is_macos = normalized.contains("macos") || normalized.contains("darwin");
+    match id {
+        "inspect_top_processes"
+        | "flush_dns_cache"
+        | "inspect_login_items"
+        | "sync_filesystem_buffers"
+        | "defer_heavy_maintenance" => true,
+        "refresh_fontconfig_cache" | "refresh_user_systemd" | "vacuum_user_journal" => is_linux,
+        _ => is_macos,
     }
 }
 
@@ -693,6 +753,7 @@ mod tests {
             "sync_filesystem_buffers",
             "memory_pressure_relief",
             "thin_local_snapshots",
+            "purge_apfs_space",
             "run_periodic_maintenance",
             "reset_app_store_cache",
             "refresh_network_stack",
@@ -703,6 +764,24 @@ mod tests {
         ] {
             assert!(task_ids.contains(&expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn performance_view_model_filters_linux_tasks() {
+        let mut snapshot = snapshot(DashboardMetrics::default());
+        snapshot.os = "linux".to_string();
+        let model = PerformanceViewModel::from_snapshot(&snapshot);
+        let task_ids = model
+            .optimization_tasks
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(task_ids.contains(&"refresh_fontconfig_cache"));
+        assert!(task_ids.contains(&"refresh_user_systemd"));
+        assert!(task_ids.contains(&"vacuum_user_journal"));
+        assert!(!task_ids.contains(&"repair_launch_services"));
+        assert!(!task_ids.contains(&"purge_apfs_space"));
     }
 
     #[test]

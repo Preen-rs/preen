@@ -416,6 +416,18 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Str
                             {
                                 dispatch_performance_optimize(&mut state, &worker);
                             }
+                            KeyCode::Char('X')
+                                if key.modifiers == KeyModifiers::SHIFT
+                                    && matches!(state.active_view, ActiveView::Performance) =>
+                            {
+                                state.performance_arm_optimize();
+                            }
+                            KeyCode::Char('d')
+                                if key.modifiers == KeyModifiers::NONE
+                                    && matches!(state.active_view, ActiveView::Performance) =>
+                            {
+                                dispatch_performance_optimize_preview(&mut state, &worker);
+                            }
                             KeyCode::Char('p')
                                 if key.modifiers == KeyModifiers::NONE
                                     && matches!(state.active_view, ActiveView::Applications) =>
@@ -996,6 +1008,13 @@ fn dispatch_performance_optimize(state: &mut AppState, worker: &StatusWorker) {
         state.last_error = Some("select one or more optimization tasks with space".to_string());
         return;
     }
+    if state.performance_selected_needs_confirmation() && !state.performance_optimize_armed {
+        state.last_error = Some(
+            "selected optimization includes admin or medium-risk work; press Shift+X, then x"
+                .to_string(),
+        );
+        return;
+    }
     let details = state
         .performance_task_details
         .values()
@@ -1003,6 +1022,29 @@ fn dispatch_performance_optimize(state: &mut AppState, worker: &StatusWorker) {
         .collect::<Vec<_>>();
     state.begin_performance_optimize();
     worker.run_performance_optimize(details, selections);
+}
+
+fn dispatch_performance_optimize_preview(state: &mut AppState, worker: &StatusWorker) {
+    if state.is_busy() || state.smart_care_action_running || state.plugin_action_running {
+        state.last_error = Some("background action already running".to_string());
+        return;
+    }
+    if !state.performance_has_analyze_result {
+        state.last_error =
+            Some("run analyze with 'a' first, then choose optimization tasks".to_string());
+        return;
+    }
+    let selections = state.performance_build_optimize_selections();
+    if selections.is_empty() {
+        state.last_error = Some("select one or more optimization tasks with space".to_string());
+        return;
+    }
+    let details = state
+        .performance_task_details
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    worker.run_performance_optimize_preview(details, selections);
 }
 
 fn default_state_dir() -> Option<PathBuf> {

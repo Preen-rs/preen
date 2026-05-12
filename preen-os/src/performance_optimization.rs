@@ -1,8 +1,16 @@
+use preen_core::action_runtime::{
+    ActionExecutionError, DefaultSafetyPolicy, ExecutionMode, RuntimeExecutionError,
+    execute_action_with_audit,
+};
 use preen_core::dashboard::DashboardSnapshot;
 use preen_core::performance_view::{
     PerformanceAnalyzeOutput, PerformanceOptimizationTask, PerformanceOptimizeResult,
     PerformanceOptimizeSelection, PerformanceTaskDetail, PerformanceTaskRisk,
     PerformanceTaskTarget, PerformanceViewModel,
+};
+use preen_core::plugin::{
+    ActionMode, ActionSpec, ActionType, Manifest, MatchMode, MatchSpec, OsTarget, RiskLevel,
+    RuleFile, RuleRef,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -59,6 +67,7 @@ pub fn execute(
                 let detail = detail_by_id.get(selection.task_id.as_str()).copied();
                 thin_local_snapshots(detail, &target_ids)
             }
+            "purge_apfs_space" => purge_apfs_space(),
             "run_periodic_maintenance" => run_periodic_maintenance(),
             "reset_app_store_cache" => {
                 let detail = detail_by_id.get(selection.task_id.as_str()).copied();
@@ -91,6 +100,9 @@ pub fn execute(
             "repair_user_permissions" => repair_user_permissions(),
             "refresh_bluetooth" => refresh_bluetooth(),
             "optimize_spotlight_index" => optimize_spotlight_index(),
+            "refresh_fontconfig_cache" => refresh_fontconfig_cache(),
+            "refresh_user_systemd" => refresh_user_systemd(),
+            "vacuum_user_journal" => vacuum_user_journal(),
             "defer_heavy_maintenance" => vec![
                 "skipped: heavy maintenance should run later when system pressure is lower"
                     .to_string(),
@@ -112,6 +124,54 @@ pub fn execute(
     PerformanceOptimizeResult {
         lines,
         completed_task_ids,
+    }
+}
+
+pub fn preview(
+    details: &[PerformanceTaskDetail],
+    selections: Vec<PerformanceOptimizeSelection>,
+) -> PerformanceOptimizeResult {
+    let detail_by_id = details
+        .iter()
+        .map(|detail| (detail.task_id.as_str(), detail))
+        .collect::<BTreeMap<_, _>>();
+    if selections.is_empty() {
+        return PerformanceOptimizeResult {
+            lines: vec!["dry-run: no optimization task selected".to_string()],
+            completed_task_ids: Vec::new(),
+        };
+    }
+
+    let mut lines = vec![format!(
+        "dry-run: {} optimization task(s) selected",
+        selections.len()
+    )];
+    for selection in selections {
+        let Some(detail) = detail_by_id.get(selection.task_id.as_str()).copied() else {
+            lines.push(format!("would skip unknown task: {}", selection.task_id));
+            continue;
+        };
+        lines.push(format!("would run: {}", detail.title));
+        if detail.targets.is_empty() {
+            lines.push("  target whitelist: whole task".to_string());
+            continue;
+        }
+        if selection.target_ids.is_empty() {
+            lines.push("  target whitelist: none selected; task would skip".to_string());
+            continue;
+        }
+        for target in detail
+            .targets
+            .iter()
+            .filter(|target| selection.target_ids.contains(&target.id))
+        {
+            lines.push(format!("  target: {}", target.label));
+        }
+    }
+
+    PerformanceOptimizeResult {
+        lines,
+        completed_task_ids: Vec::new(),
     }
 }
 
@@ -248,6 +308,16 @@ fn detail_for_task(
             ],
             targets: local_snapshot_targets(),
         },
+        "purge_apfs_space" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Requests APFS purgeable-space reclamation through diskutil.".to_string(),
+                "This can take time and may require administrator approval.".to_string(),
+            ],
+            targets: Vec::new(),
+        },
         "run_periodic_maintenance" => PerformanceTaskDetail {
             task_id: task.id.clone(),
             title: task.label.clone(),
@@ -317,6 +387,36 @@ fn detail_for_task(
                 "Checks Spotlight status and search latency first.".to_string(),
                 "Rebuilds the index only when search looks slow and AC power is available."
                     .to_string(),
+            ],
+            targets: Vec::new(),
+        },
+        "refresh_fontconfig_cache" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Runs fontconfig cache refresh on Linux.".to_string(),
+                "No user documents are deleted.".to_string(),
+            ],
+            targets: Vec::new(),
+        },
+        "refresh_user_systemd" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Reloads the user systemd manager after startup item changes.".to_string(),
+                "Does not disable or remove services by itself.".to_string(),
+            ],
+            targets: Vec::new(),
+        },
+        "vacuum_user_journal" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Keeps recent user journal entries and trims older user logs.".to_string(),
+                "System logs are not touched.".to_string(),
             ],
             targets: Vec::new(),
         },
@@ -447,6 +547,18 @@ fn run_periodic_maintenance() -> Vec<String> {
     lines.extend(run_command(periodic, &["daily", "weekly", "monthly"]));
     if lines.iter().any(|line| line.starts_with("done:")) {
         lines.push("done: periodic maintenance completed".to_string());
+    }
+    lines
+}
+
+fn purge_apfs_space() -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: APFS purgeable-space reclaim is macOS-only".to_string()];
+    }
+    let mut lines = vec!["checking: purging APFS reclaimable space".to_string()];
+    lines.extend(run_command("diskutil", &["apfs", "purgePurgeable", "/"]));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: APFS purgeable-space reclaim requested".to_string());
     }
     lines
 }
@@ -741,6 +853,42 @@ fn optimize_spotlight_index() -> Vec<String> {
     lines.extend(run_command("mdutil", &["-E", "/"]));
     if lines.iter().any(|line| line.starts_with("done:")) {
         lines.push("done: Spotlight rebuild requested".to_string());
+    }
+    lines
+}
+
+fn refresh_fontconfig_cache() -> Vec<String> {
+    if std::env::consts::OS != "linux" {
+        return vec!["skipped: fontconfig refresh is Linux-only".to_string()];
+    }
+    let mut lines = vec!["checking: refreshing fontconfig cache".to_string()];
+    lines.extend(run_command("fc-cache", &["-r"]));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: fontconfig cache refreshed".to_string());
+    }
+    lines
+}
+
+fn refresh_user_systemd() -> Vec<String> {
+    if std::env::consts::OS != "linux" {
+        return vec!["skipped: user service refresh is Linux-only".to_string()];
+    }
+    let mut lines = vec!["checking: reloading user service manager".to_string()];
+    lines.extend(run_command("systemctl", &["--user", "daemon-reload"]));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: user service manager reloaded".to_string());
+    }
+    lines
+}
+
+fn vacuum_user_journal() -> Vec<String> {
+    if std::env::consts::OS != "linux" {
+        return vec!["skipped: user journal vacuum is Linux-only".to_string()];
+    }
+    let mut lines = vec!["checking: vacuuming user journal".to_string()];
+    lines.extend(run_command("journalctl", &["--user", "--vacuum-time=7d"]));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: user journal vacuumed".to_string());
     }
     lines
 }
@@ -1710,30 +1858,118 @@ fn run_command_capture(command: &str, args: &[&str]) -> Result<String, String> {
 }
 
 fn run_command(command: &str, args: &[&str]) -> Vec<String> {
-    let mut process = ProcessCommand::new(command);
-    process.args(args);
-    let start = Instant::now();
-    let mut child = match process.spawn() {
-        Ok(child) => child,
-        Err(error) => return vec![format!("failed: {command} ({error})")],
-    };
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
-                    return vec![format!("done: {command}")];
-                }
-                return vec![format!("failed: {command} exited with {status}")];
-            }
-            Ok(None) if start.elapsed() >= COMMAND_TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return vec![format!("failed: {command} timed out")];
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(error) => return vec![format!("failed: {command} ({error})")],
-        }
+    match run_command_via_action_runtime(command, args, ExecutionMode::Apply) {
+        Ok(lines) => lines,
+        Err(error) => vec![format!("failed: {command} ({error})")],
     }
+}
+
+fn run_command_via_action_runtime(
+    command: &str,
+    args: &[&str],
+    mode: ExecutionMode,
+) -> Result<Vec<String>, RuntimeExecutionError> {
+    let (manifest, rule) = optimize_command_rule(command, args);
+    let executor = crate::action_executor::OsActionExecutor;
+    let policy = DefaultSafetyPolicy::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .map_err(|error| {
+            RuntimeExecutionError::Execute(ActionExecutionError::Failed {
+                message: format!("runtime init failed: {error}"),
+            })
+        })?;
+    let result = runtime.block_on(execute_action_with_audit(
+        &manifest,
+        &rule,
+        mode,
+        Some("performance-confirmed"),
+        &policy,
+        &executor,
+        None,
+    ))?;
+    let mut lines = result
+        .warnings
+        .into_iter()
+        .map(|warning| format!("warning: {warning}"))
+        .collect::<Vec<_>>();
+    if mode == ExecutionMode::DryRun {
+        lines.push(format!("dry-run: {}", format_command(command, args)));
+    } else {
+        lines.push(format!("done: {command}"));
+    }
+    Ok(lines)
+}
+
+fn optimize_command_rule(command: &str, args: &[&str]) -> (Manifest, RuleFile) {
+    let rule_id = format!(
+        "performance-{}",
+        stable_target_text(&format_command(command, args))
+    );
+    let mut params = std::collections::HashMap::new();
+    params.insert("command_allowlist".to_string(), command.to_string());
+    let action = ActionSpec {
+        action_type: ActionType::RunCommand,
+        paths: Vec::new(),
+        command: std::iter::once(command.to_string())
+            .chain(args.iter().map(|arg| (*arg).to_string()))
+            .collect(),
+        mode: Some(ActionMode::Confirm),
+        timeout_sec: Some(COMMAND_TIMEOUT.as_secs()),
+        allow_globs: false,
+        max_items: Some(1),
+        package_manager: None,
+        project_types: Vec::new(),
+        params,
+    };
+    let manifest = Manifest {
+        schema_version: preen_core::plugin::MANIFEST_SCHEMA_V1,
+        pack_id: "preen.performance".to_string(),
+        name: "Preen Performance".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        description: "Built-in performance optimization actions".to_string(),
+        author: "Preen".to_string(),
+        license: "Proprietary".to_string(),
+        homepage: None,
+        core_compat: preen_core::plugin::RUNTIME_CORE_VERSION.to_string(),
+        action_api: preen_core::plugin::SUPPORTED_ACTION_API,
+        os_targets: vec![OsTarget::Macos, OsTarget::Linux],
+        capabilities: vec![
+            preen_core::plugin::Capability::SystemOptimize,
+            preen_core::plugin::Capability::RunCommand,
+        ],
+        signing: None,
+        rules: vec![RuleRef {
+            id: rule_id.clone(),
+            name: "Performance command".to_string(),
+            rule_file: "builtin".to_string(),
+        }],
+    };
+    let rule = RuleFile {
+        schema_version: preen_core::plugin::RULE_SCHEMA_V1,
+        id: rule_id,
+        name: format!("Run {}", format_command(command, args)),
+        category: preen_core::ItemCategory::Other("System optimization".to_string()),
+        risk: RiskLevel::Medium,
+        enabled: true,
+        matcher: MatchSpec {
+            mode: MatchMode::Command,
+            paths: Vec::new(),
+            strategy: None,
+            command: Vec::new(),
+            parser: None,
+        },
+        action,
+    };
+    (manifest, rule)
+}
+
+fn format_command(command: &str, args: &[&str]) -> String {
+    std::iter::once(command)
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
