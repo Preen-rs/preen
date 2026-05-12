@@ -1046,7 +1046,8 @@ impl AppState {
         self.performance_selected_tasks.clear();
         self.performance_selected_target_ids.clear();
         for task in &self.performance_tasks {
-            if performance_task_selected_by_default(task) {
+            let detail = self.performance_task_details.get(&task.id);
+            if performance_task_selected_by_default(task, detail) {
                 self.performance_selected_tasks.insert(task.id.clone());
             }
         }
@@ -1787,13 +1788,27 @@ fn duplicate_application_names(applications: &[InstalledApplication]) -> BTreeSe
     duplicates
 }
 
-fn performance_task_selected_by_default(task: &PerformanceOptimizationTask) -> bool {
-    task.recommended
+fn performance_task_selected_by_default(
+    task: &PerformanceOptimizationTask,
+    detail: Option<&PerformanceTaskDetail>,
+) -> bool {
+    if !(task.recommended
         && task.risk == PerformanceTaskRisk::Low
         && matches!(
             task.kind,
             PerformanceTaskKind::Inspect | PerformanceTaskKind::SafeMaintenance
-        )
+        ))
+    {
+        return false;
+    }
+    let Some(detail) = detail else {
+        return true;
+    };
+    detail.targets.is_empty()
+        || detail
+            .targets
+            .iter()
+            .any(performance_target_selected_by_default)
 }
 
 fn performance_target_selected_by_default(target: &PerformanceTaskTarget) -> bool {
@@ -2504,6 +2519,12 @@ mod tests {
                         true,
                     ),
                     task(
+                        "inspect_targets",
+                        PerformanceTaskKind::Inspect,
+                        PerformanceTaskRisk::Low,
+                        true,
+                    ),
+                    task(
                         "admin",
                         PerformanceTaskKind::AdminMaintenance,
                         PerformanceTaskRisk::Medium,
@@ -2524,36 +2545,54 @@ mod tests {
                 ],
                 recommendations: Vec::new(),
             },
-            details: vec![PerformanceTaskDetail {
-                task_id: "safe".to_string(),
-                title: "Safe".to_string(),
-                summary: String::new(),
-                notes: Vec::new(),
-                targets: vec![
-                    PerformanceTaskTarget {
-                        id: "safe_target".to_string(),
-                        label: "safe target".to_string(),
+            details: vec![
+                PerformanceTaskDetail {
+                    task_id: "safe".to_string(),
+                    title: "Safe".to_string(),
+                    summary: String::new(),
+                    notes: Vec::new(),
+                    targets: vec![
+                        PerformanceTaskTarget {
+                            id: "safe_target".to_string(),
+                            label: "safe target".to_string(),
+                            description: String::new(),
+                            path: None,
+                            selected_by_default: true,
+                            requires_admin: false,
+                            risk: PerformanceTaskRisk::Low,
+                        },
+                        PerformanceTaskTarget {
+                            id: "admin_target".to_string(),
+                            label: "admin target".to_string(),
+                            description: String::new(),
+                            path: None,
+                            selected_by_default: true,
+                            requires_admin: true,
+                            risk: PerformanceTaskRisk::Medium,
+                        },
+                    ],
+                },
+                PerformanceTaskDetail {
+                    task_id: "inspect_targets".to_string(),
+                    title: "Inspect targets".to_string(),
+                    summary: String::new(),
+                    notes: Vec::new(),
+                    targets: vec![PerformanceTaskTarget {
+                        id: "manual_target".to_string(),
+                        label: "manual target".to_string(),
                         description: String::new(),
                         path: None,
-                        selected_by_default: true,
+                        selected_by_default: false,
                         requires_admin: false,
                         risk: PerformanceTaskRisk::Low,
-                    },
-                    PerformanceTaskTarget {
-                        id: "admin_target".to_string(),
-                        label: "admin target".to_string(),
-                        description: String::new(),
-                        path: None,
-                        selected_by_default: true,
-                        requires_admin: true,
-                        risk: PerformanceTaskRisk::Medium,
-                    },
-                ],
-            }],
+                    }],
+                },
+            ],
         });
 
         assert!(state.performance_selected_tasks.contains("inspect"));
         assert!(state.performance_selected_tasks.contains("safe"));
+        assert!(!state.performance_selected_tasks.contains("inspect_targets"));
         assert!(!state.performance_selected_tasks.contains("admin"));
         assert!(!state.performance_selected_tasks.contains("medium_safe"));
         assert!(!state.performance_selected_tasks.contains("optional"));
