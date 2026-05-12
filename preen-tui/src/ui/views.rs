@@ -14,7 +14,7 @@ use preen_core::smart_care::{
     SmartCareCapability, SmartCareCapabilityStatus, SmartCarePreview,
     classify_capability_descriptor_source, classify_descriptor_pack_source,
 };
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -272,11 +272,8 @@ pub(super) fn build_info_popup_lines(state: &AppState, content_width: usize) -> 
                     .skip(start)
                     .take(PERFORMANCE_DETAIL_VISIBLE_TARGETS)
                 {
-                    let marker = if index == state.performance_detail_selected_row {
-                        "▶"
-                    } else {
-                        " "
-                    };
+                    let is_current = index == state.performance_detail_selected_row;
+                    let marker = if is_current { "▶" } else { " " };
                     let selected = if state.performance_selected_target_ids.contains(&target.id) {
                         "[x]"
                     } else {
@@ -289,8 +286,13 @@ pub(super) fn build_info_popup_lines(state: &AppState, content_width: usize) -> 
                         target.risk.label(),
                         admin
                     );
+                    let style = if is_current {
+                        Style::default().fg(Color::Black).bg(PALETTE_ACCENT)
+                    } else {
+                        Style::default()
+                    };
                     for wrapped in wrap_with_prefix("", &title, content_width) {
-                        lines.push(Line::from(wrapped));
+                        lines.push(Line::from(Span::styled(wrapped, style)));
                     }
                 }
                 if rendered_end < detail.targets.len() {

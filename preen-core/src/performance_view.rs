@@ -273,6 +273,72 @@ fn optimization_tasks(
             reason: "network maintenance only; does not change user data".to_string(),
         },
         PerformanceOptimizationTask {
+            id: "refresh_finder_caches".to_string(),
+            label: "Refresh Finder caches".to_string(),
+            description: "Refresh QuickLook thumbnails and icon services caches".to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: false,
+            reason: "useful when previews or icons look stale".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "cleanup_saved_states".to_string(),
+            label: "Clean saved app states".to_string(),
+            description: "Remove old saved application state folders after review".to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: false,
+            reason: "resets stale window/session state for selected apps".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "repair_broken_preferences".to_string(),
+            label: "Repair broken preferences".to_string(),
+            description: "Detect corrupted plist preferences and move broken files to Trash"
+                .to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: false,
+            reason: "only targets invalid preference files after plist validation".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "optimize_app_databases".to_string(),
+            label: "Optimize app databases".to_string(),
+            description: "Compact selected Mail, Safari, and Messages SQLite databases safely"
+                .to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: false,
+            reason: "skips busy apps, large databases, and failed integrity checks".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "repair_launch_services".to_string(),
+            label: "Repair LaunchServices".to_string(),
+            description: "Rebuild app association metadata used by Open With and Finder"
+                .to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: false,
+            reason: "fixes stale app associations and duplicate Open With entries".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "rebuild_font_cache".to_string(),
+            label: "Rebuild font cache".to_string(),
+            description: "Clear font databases after browser safety checks".to_string(),
+            kind: PerformanceTaskKind::AdminMaintenance,
+            risk: PerformanceTaskRisk::Medium,
+            recommended: false,
+            reason: "skips when browsers are running to avoid cache conflicts".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "refresh_dock".to_string(),
+            label: "Refresh Dock".to_string(),
+            description: "Refresh Dock cache and restart Dock to fix stale icons".to_string(),
+            kind: PerformanceTaskKind::SafeMaintenance,
+            risk: PerformanceTaskRisk::Low,
+            recommended: false,
+            reason: "Dock restarts automatically and rebuilds its visual cache".to_string(),
+        },
+        PerformanceOptimizationTask {
             id: "inspect_login_items".to_string(),
             label: "Inspect login items".to_string(),
             description:
@@ -314,6 +380,47 @@ fn optimization_tasks(
             reason: memory_pressure_reason(memory, metrics.memory_pressure.as_deref()),
         },
         PerformanceOptimizationTask {
+            id: "refresh_network_stack".to_string(),
+            label: "Refresh network stack".to_string(),
+            description: "Flush routing and ARP caches when network checks look stale".to_string(),
+            kind: PerformanceTaskKind::AdminMaintenance,
+            risk: PerformanceTaskRisk::Medium,
+            recommended: false,
+            reason: "only useful when DNS/default route checks fail".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "repair_user_permissions".to_string(),
+            label: "Repair user permissions".to_string(),
+            description:
+                "Reset user directory permissions when ownership or write access is broken"
+                    .to_string(),
+            kind: PerformanceTaskKind::AdminMaintenance,
+            risk: PerformanceTaskRisk::Medium,
+            recommended: false,
+            reason: "runs only when common user folders look mis-owned or unwritable".to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "refresh_bluetooth".to_string(),
+            label: "Refresh Bluetooth".to_string(),
+            description: "Restart bluetoothd only when no active HID/audio dependency is detected"
+                .to_string(),
+            kind: PerformanceTaskKind::AdminMaintenance,
+            risk: PerformanceTaskRisk::Medium,
+            recommended: false,
+            reason: "skips when Bluetooth keyboard, mouse, trackpad, or audio is active"
+                .to_string(),
+        },
+        PerformanceOptimizationTask {
+            id: "optimize_spotlight_index".to_string(),
+            label: "Optimize Spotlight index".to_string(),
+            description: "Verify Spotlight and rebuild the index only when search is slow"
+                .to_string(),
+            kind: PerformanceTaskKind::AdminMaintenance,
+            risk: PerformanceTaskRisk::Medium,
+            recommended: false,
+            reason: "rebuild is gated by slow-search checks and AC power".to_string(),
+        },
+        PerformanceOptimizationTask {
             id: "defer_heavy_maintenance".to_string(),
             label: "Defer heavy maintenance".to_string(),
             description:
@@ -344,10 +451,21 @@ fn task_priority(id: &str) -> u8 {
         "inspect_top_processes" => 0,
         "memory_pressure_relief" => 1,
         "flush_dns_cache" => 2,
-        "inspect_login_items" => 3,
-        "sync_filesystem_buffers" => 4,
-        "defer_heavy_maintenance" => 5,
-        _ => 9,
+        "refresh_finder_caches" => 3,
+        "cleanup_saved_states" => 4,
+        "repair_broken_preferences" => 5,
+        "optimize_app_databases" => 6,
+        "repair_launch_services" => 7,
+        "rebuild_font_cache" => 8,
+        "refresh_dock" => 9,
+        "inspect_login_items" => 10,
+        "sync_filesystem_buffers" => 11,
+        "refresh_network_stack" => 12,
+        "repair_user_permissions" => 13,
+        "refresh_bluetooth" => 14,
+        "optimize_spotlight_index" => 15,
+        "defer_heavy_maintenance" => 16,
+        _ => 99,
     }
 }
 
@@ -519,6 +637,38 @@ mod tests {
                 .iter()
                 .any(|task| task.id == "flush_dns_cache" && !task.recommended)
         );
+    }
+
+    #[test]
+    fn performance_view_model_reports_reference_optimization_tasks() {
+        let model = PerformanceViewModel::from_snapshot(&snapshot(DashboardMetrics::default()));
+        let task_ids = model
+            .optimization_tasks
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "inspect_top_processes",
+            "flush_dns_cache",
+            "refresh_finder_caches",
+            "cleanup_saved_states",
+            "repair_broken_preferences",
+            "optimize_app_databases",
+            "repair_launch_services",
+            "rebuild_font_cache",
+            "refresh_dock",
+            "inspect_login_items",
+            "sync_filesystem_buffers",
+            "memory_pressure_relief",
+            "refresh_network_stack",
+            "repair_user_permissions",
+            "refresh_bluetooth",
+            "optimize_spotlight_index",
+            "defer_heavy_maintenance",
+        ] {
+            assert!(task_ids.contains(&expected), "missing {expected}");
+        }
     }
 
     #[test]

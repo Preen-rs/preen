@@ -6,11 +6,14 @@ use preen_core::performance_view::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
-use std::time::{Duration, Instant};
+use std::process::{Command as ProcessCommand, Stdio};
+use std::time::{Duration, Instant, SystemTime};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+const SAVED_STATE_MAX_AGE_DAYS: u64 = 30;
+const SQLITE_MAX_VACUUM_BYTES: u64 = 100 * 1024 * 1024;
 
 pub fn analyze(snapshot: &DashboardSnapshot) -> PerformanceAnalyzeOutput {
     let model = PerformanceViewModel::from_snapshot(snapshot);
@@ -52,10 +55,33 @@ pub fn execute(
             "flush_dns_cache" => flush_dns_cache(),
             "sync_filesystem_buffers" => sync_filesystem_buffers(),
             "memory_pressure_relief" => memory_pressure_relief(),
+            "refresh_finder_caches" => {
+                let detail = detail_by_id.get(selection.task_id.as_str()).copied();
+                refresh_finder_caches(detail, &target_ids)
+            }
+            "cleanup_saved_states" => {
+                let detail = detail_by_id.get(selection.task_id.as_str()).copied();
+                cleanup_saved_states(detail, &target_ids)
+            }
+            "repair_broken_preferences" => {
+                let detail = detail_by_id.get(selection.task_id.as_str()).copied();
+                repair_broken_preferences(detail, &target_ids)
+            }
+            "optimize_app_databases" => {
+                let detail = detail_by_id.get(selection.task_id.as_str()).copied();
+                optimize_app_databases(detail, &target_ids)
+            }
+            "repair_launch_services" => repair_launch_services(),
+            "rebuild_font_cache" => rebuild_font_cache(),
+            "refresh_dock" => refresh_dock(),
             "inspect_login_items" => {
                 let detail = detail_by_id.get(selection.task_id.as_str()).copied();
                 update_login_items(detail, &target_ids)
             }
+            "refresh_network_stack" => refresh_network_stack(),
+            "repair_user_permissions" => repair_user_permissions(),
+            "refresh_bluetooth" => refresh_bluetooth(),
+            "optimize_spotlight_index" => optimize_spotlight_index(),
             "defer_heavy_maintenance" => vec![
                 "skipped: heavy maintenance should run later when system pressure is lower"
                     .to_string(),
@@ -124,6 +150,77 @@ fn detail_for_task(
             ],
             targets: Vec::new(),
         },
+        "refresh_finder_caches" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Resets QuickLook and icon services metadata.".to_string(),
+                "Selected cache folders are rebuilt by macOS when needed.".to_string(),
+            ],
+            targets: finder_cache_targets(),
+        },
+        "cleanup_saved_states" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                format!("Only saved states older than {SAVED_STATE_MAX_AGE_DAYS} days are selected."),
+                "This resets stale app window/session restore data.".to_string(),
+            ],
+            targets: saved_state_targets(),
+        },
+        "repair_broken_preferences" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Validates user preference plists before offering any repair.".to_string(),
+                "Broken files are moved to Trash so the app can regenerate them.".to_string(),
+            ],
+            targets: broken_preference_targets(),
+        },
+        "optimize_app_databases" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Skips Mail, Safari, and Messages databases while those apps are running."
+                    .to_string(),
+                "Runs SQLite integrity checks before VACUUM.".to_string(),
+            ],
+            targets: sqlite_database_targets(),
+        },
+        "repair_launch_services" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Rebuilds macOS app registration and Open With metadata.".to_string(),
+                "No user files are deleted.".to_string(),
+            ],
+            targets: Vec::new(),
+        },
+        "rebuild_font_cache" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Skips when common browsers are running.".to_string(),
+                "Font databases are rebuilt automatically by macOS.".to_string(),
+            ],
+            targets: Vec::new(),
+        },
+        "refresh_dock" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Clears Dock icon cache database files.".to_string(),
+                "Dock restarts automatically after the refresh.".to_string(),
+            ],
+            targets: dock_cache_targets(),
+        },
         "sync_filesystem_buffers" => PerformanceTaskDetail {
             task_id: task.id.clone(),
             title: task.label.clone(),
@@ -138,6 +235,47 @@ fn detail_for_task(
             notes: vec![
                 "Runs the OS-native memory relief command when available.".to_string(),
                 "Best used after closing unnecessary applications.".to_string(),
+            ],
+            targets: Vec::new(),
+        },
+        "refresh_network_stack" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Checks default route and DNS before changing network caches.".to_string(),
+                "Flushes route and ARP caches only when checks indicate stale state.".to_string(),
+            ],
+            targets: Vec::new(),
+        },
+        "repair_user_permissions" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Checks home ownership and write access first.".to_string(),
+                "Uses the OS user-permission repair path only when needed.".to_string(),
+            ],
+            targets: Vec::new(),
+        },
+        "refresh_bluetooth" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Skips when Bluetooth HID or audio devices appear active.".to_string(),
+                "Restarts bluetoothd so macOS can recreate the service.".to_string(),
+            ],
+            targets: Vec::new(),
+        },
+        "optimize_spotlight_index" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Checks Spotlight status and search latency first.".to_string(),
+                "Rebuilds the index only when search looks slow and AC power is available."
+                    .to_string(),
             ],
             targets: Vec::new(),
         },
@@ -208,6 +346,267 @@ fn memory_pressure_relief() -> Vec<String> {
         }
     }
     lines.push("skipped: purge command is not available".to_string());
+    lines
+}
+
+fn refresh_finder_caches(
+    detail: Option<&PerformanceTaskDetail>,
+    selected_target_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: Finder cache refresh is macOS-only".to_string()];
+    }
+    let mut lines = vec!["checking: refreshing Finder caches".to_string()];
+    lines.extend(run_command("qlmanage", &["-r", "cache"]));
+    lines.extend(run_command("qlmanage", &["-r"]));
+    lines.extend(remove_selected_targets(
+        detail,
+        selected_target_ids,
+        "Finder cache",
+    ));
+    lines.push("done: Finder caches refreshed".to_string());
+    lines
+}
+
+fn cleanup_saved_states(
+    detail: Option<&PerformanceTaskDetail>,
+    selected_target_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    let lines = remove_selected_targets(detail, selected_target_ids, "saved state");
+    if lines.is_empty() {
+        return vec!["skipped: no old saved state selected".to_string()];
+    }
+    lines
+}
+
+fn repair_broken_preferences(
+    detail: Option<&PerformanceTaskDetail>,
+    selected_target_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    let lines = remove_selected_targets(detail, selected_target_ids, "broken preference");
+    if lines.is_empty() {
+        return vec!["skipped: no broken preference selected".to_string()];
+    }
+    lines
+}
+
+fn optimize_app_databases(
+    detail: Option<&PerformanceTaskDetail>,
+    selected_target_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    let Some(detail) = detail else {
+        return vec!["failed: database detail is unavailable".to_string()];
+    };
+    if selected_target_ids.is_empty() {
+        return vec!["skipped: no database selected".to_string()];
+    }
+    if running_any(&["Mail", "Safari", "Messages"]) {
+        return vec![
+            "skipped: close Mail, Safari, and Messages before optimizing app databases".to_string(),
+        ];
+    }
+
+    let mut lines = Vec::new();
+    for target in &detail.targets {
+        if !selected_target_ids.contains(&target.id) {
+            continue;
+        }
+        let Some(path) = target.path.as_deref().map(Path::new) else {
+            lines.push(format!("skipped: {} has no path", target.label));
+            continue;
+        };
+        if !path.exists() {
+            lines.push(format!("skipped: {} no longer exists", target.label));
+            continue;
+        }
+        if fs::metadata(path)
+            .map(|metadata| metadata.len() > SQLITE_MAX_VACUUM_BYTES)
+            .unwrap_or(true)
+        {
+            lines.push(format!(
+                "skipped: {} is too large for interactive vacuum",
+                target.label
+            ));
+            continue;
+        }
+        let integrity = run_command_capture(
+            "sqlite3",
+            &[path.to_string_lossy().as_ref(), "PRAGMA integrity_check;"],
+        );
+        match integrity {
+            Ok(output) if output.trim() == "ok" => {
+                match run_command_capture("sqlite3", &[path.to_string_lossy().as_ref(), "VACUUM;"])
+                {
+                    Ok(_) => lines.push(format!("done: optimized {}", target.label)),
+                    Err(error) => lines.push(format!("failed: {} ({error})", target.label)),
+                }
+            }
+            Ok(output) => lines.push(format!(
+                "skipped: {} integrity check returned {}",
+                target.label,
+                output.trim()
+            )),
+            Err(error) => lines.push(format!(
+                "failed: {} integrity check ({error})",
+                target.label
+            )),
+        }
+    }
+    if lines.is_empty() {
+        lines.push("skipped: selected databases were not found".to_string());
+    }
+    lines
+}
+
+fn repair_launch_services() -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: LaunchServices repair is macOS-only".to_string()];
+    }
+    let Some(lsregister) = launch_services_register_path() else {
+        return vec!["skipped: lsregister helper is not available".to_string()];
+    };
+    let helper = lsregister.to_string_lossy().to_string();
+    let mut lines = vec!["checking: repairing LaunchServices".to_string()];
+    lines.extend(run_command(&helper, &["-gc"]));
+    lines.extend(run_command(
+        &helper,
+        &[
+            "-r", "-f", "-domain", "local", "-domain", "user", "-domain", "system",
+        ],
+    ));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: LaunchServices metadata rebuilt".to_string());
+    }
+    lines
+}
+
+fn rebuild_font_cache() -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: font cache rebuild is macOS-only".to_string()];
+    }
+    if let Some(browser) = running_browser_name() {
+        return vec![format!(
+            "skipped: close {browser} before rebuilding font caches"
+        )];
+    }
+    let mut lines = vec!["checking: rebuilding font cache".to_string()];
+    lines.extend(run_command("atsutil", &["databases", "-remove"]));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: font cache rebuild requested".to_string());
+    }
+    lines
+}
+
+fn refresh_dock() -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: Dock refresh is macOS-only".to_string()];
+    }
+    let mut lines = vec!["checking: refreshing Dock".to_string()];
+    for target in dock_cache_targets() {
+        if let Some(path) = target.path.as_deref().map(Path::new) {
+            if path.exists() {
+                match trash::delete(path) {
+                    Ok(()) => lines.push(format!("removed: {}", target.label)),
+                    Err(error) => lines.push(format!("failed: {} ({error})", target.label)),
+                }
+            }
+        }
+    }
+    if let Some(home) = home_dir() {
+        let plist = home
+            .join("Library")
+            .join("Preferences")
+            .join("com.apple.dock.plist");
+        if plist.exists() {
+            let _ = fs::OpenOptions::new().append(true).open(plist);
+        }
+    }
+    lines.extend(run_command("killall", &["Dock"]));
+    if lines
+        .iter()
+        .any(|line| line.starts_with("done:") || line.starts_with("removed:"))
+    {
+        lines.push("done: Dock refreshed".to_string());
+    }
+    lines
+}
+
+fn refresh_network_stack() -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: network stack refresh is macOS-only".to_string()];
+    }
+    let route_ok = run_command_capture("route", &["-n", "get", "default"]).is_ok();
+    let dns_ok = run_command_capture("scutil", &["--dns"])
+        .map(|output| output.contains("nameserver"))
+        .unwrap_or(false);
+    if route_ok && dns_ok {
+        return vec!["done: network route and DNS checks already look healthy".to_string()];
+    }
+    let mut lines = vec!["checking: refreshing network stack".to_string()];
+    lines.extend(run_command("route", &["-n", "flush"]));
+    lines.extend(run_command("arp", &["-a", "-d"]));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: network stack refresh requested".to_string());
+    }
+    lines
+}
+
+fn repair_user_permissions() -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: user permission repair is macOS-only".to_string()];
+    }
+    if !home_permissions_need_repair() {
+        return vec!["done: user folder permissions already look healthy".to_string()];
+    }
+    let uid = match run_command_capture("id", &["-u"]) {
+        Ok(value) => value.trim().to_string(),
+        Err(error) => return vec![format!("failed: could not resolve uid ({error})")],
+    };
+    let mut lines = vec!["checking: repairing user permissions".to_string()];
+    lines.extend(run_command(
+        "diskutil",
+        &["resetUserPermissions", "/", &uid],
+    ));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: user permission repair requested".to_string());
+    }
+    lines
+}
+
+fn refresh_bluetooth() -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: Bluetooth refresh is macOS-only".to_string()];
+    }
+    if bluetooth_dependency_active() {
+        return vec!["skipped: active Bluetooth input or audio dependency detected".to_string()];
+    }
+    let mut lines = vec!["checking: refreshing Bluetooth".to_string()];
+    lines.extend(run_command("pkill", &["-TERM", "bluetoothd"]));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: bluetoothd restart requested".to_string());
+    }
+    lines
+}
+
+fn optimize_spotlight_index() -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: Spotlight optimization is macOS-only".to_string()];
+    }
+    let status = run_command_capture("mdutil", &["-s", "/"]).unwrap_or_default();
+    if status.to_ascii_lowercase().contains("disabled") {
+        return vec!["skipped: Spotlight indexing is disabled".to_string()];
+    }
+    if !spotlight_search_looks_slow() {
+        return vec!["done: Spotlight search latency looks healthy".to_string()];
+    }
+    if !on_ac_power() {
+        return vec!["skipped: Spotlight rebuild waits for AC power".to_string()];
+    }
+    let mut lines = vec!["checking: rebuilding Spotlight index".to_string()];
+    lines.extend(run_command("mdutil", &["-E", "/"]));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: Spotlight rebuild requested".to_string());
+    }
     lines
 }
 
@@ -299,6 +698,225 @@ fn login_item_targets() -> Vec<PerformanceTaskTarget> {
             .then_with(|| left.label.cmp(&right.label))
     });
     targets
+}
+
+fn finder_cache_targets() -> Vec<PerformanceTaskTarget> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    [
+        (
+            "QuickLook thumbnails",
+            home.join("Library")
+                .join("Caches")
+                .join("com.apple.QuickLook.thumbnailcache"),
+        ),
+        (
+            "Icon services store",
+            home.join("Library")
+                .join("Caches")
+                .join("com.apple.iconservices.store"),
+        ),
+        (
+            "Icon services cache",
+            home.join("Library")
+                .join("Caches")
+                .join("com.apple.iconservices"),
+        ),
+    ]
+    .into_iter()
+    .map(|(label, path)| target_from_path(label, "Finder visual cache", path, false, true))
+    .collect()
+}
+
+fn saved_state_targets() -> Vec<PerformanceTaskTarget> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    let root = home.join("Library").join("Saved Application State");
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("savedState") {
+            continue;
+        }
+        if !path_is_older_than_days(&path, SAVED_STATE_MAX_AGE_DAYS) {
+            continue;
+        }
+        let label = saved_state_label(&path);
+        targets.push(target_from_path(
+            &label,
+            "Saved app window/session state",
+            path,
+            false,
+            true,
+        ));
+    }
+    targets.sort_by(|left, right| left.label.cmp(&right.label));
+    targets
+}
+
+fn broken_preference_targets() -> Vec<PerformanceTaskTarget> {
+    if std::env::consts::OS != "macos" {
+        return Vec::new();
+    }
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    let root = home.join("Library").join("Preferences");
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("plist") {
+            continue;
+        }
+        if run_command_capture("plutil", &["-lint", path.to_string_lossy().as_ref()]).is_ok() {
+            continue;
+        }
+        let label = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(humanize_identifier)
+            .unwrap_or_else(|| "Broken Preference".to_string());
+        targets.push(target_from_path(
+            &label,
+            "Invalid user preference plist",
+            path,
+            false,
+            true,
+        ));
+    }
+    targets.sort_by(|left, right| left.label.cmp(&right.label));
+    targets
+}
+
+fn sqlite_database_targets() -> Vec<PerformanceTaskTarget> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    collect_sqlite_candidates(&home.join("Library").join("Safari"), &mut candidates, 1);
+    collect_sqlite_candidates(&home.join("Library").join("Messages"), &mut candidates, 1);
+    collect_sqlite_candidates(&home.join("Library").join("Mail"), &mut candidates, 4);
+
+    let mut targets = Vec::new();
+    for path in candidates {
+        if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|name| {
+                name.ends_with("-wal") || name.ends_with("-shm") || name.ends_with("-journal")
+            })
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if fs::metadata(&path)
+            .map(|metadata| metadata.len() > SQLITE_MAX_VACUUM_BYTES)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        if !looks_like_sqlite_database(&path) {
+            continue;
+        }
+        let label = sqlite_target_label(&path);
+        targets.push(target_from_path(
+            &label,
+            "SQLite database",
+            path,
+            false,
+            false,
+        ));
+    }
+    targets.sort_by(|left, right| left.label.cmp(&right.label));
+    targets
+}
+
+fn dock_cache_targets() -> Vec<PerformanceTaskTarget> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    let app_support = home
+        .join("Library")
+        .join("Application Support")
+        .join("Dock");
+    let mut targets = Vec::new();
+    if let Ok(entries) = fs::read_dir(app_support) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("db") {
+                targets.push(target_from_path(
+                    "Dock icon cache",
+                    "Dock cache database",
+                    path,
+                    false,
+                    true,
+                ));
+            }
+        }
+    }
+    targets
+}
+
+fn target_from_path(
+    label: &str,
+    description: &str,
+    path: PathBuf,
+    requires_admin: bool,
+    selected_by_default: bool,
+) -> PerformanceTaskTarget {
+    PerformanceTaskTarget {
+        id: stable_target_id(&path),
+        label: label.to_string(),
+        description: description.to_string(),
+        path: Some(path.to_string_lossy().into_owned()),
+        selected_by_default,
+        requires_admin,
+        risk: if requires_admin {
+            PerformanceTaskRisk::Medium
+        } else {
+            PerformanceTaskRisk::Low
+        },
+    }
+}
+
+fn remove_selected_targets(
+    detail: Option<&PerformanceTaskDetail>,
+    selected_target_ids: &BTreeSet<String>,
+    item_type: &str,
+) -> Vec<String> {
+    let Some(detail) = detail else {
+        return vec![format!("failed: {item_type} detail is unavailable")];
+    };
+    if selected_target_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for target in &detail.targets {
+        if !selected_target_ids.contains(&target.id) {
+            continue;
+        }
+        let Some(path) = target.path.as_deref().map(Path::new) else {
+            lines.push(format!("skipped: {} has no path", target.label));
+            continue;
+        };
+        if !path.exists() {
+            lines.push(format!("skipped: {} no longer exists", target.label));
+            continue;
+        }
+        match trash::delete(path) {
+            Ok(()) => lines.push(format!("removed: {}", target.label)),
+            Err(error) => lines.push(format!("failed: {} ({error})", target.label)),
+        }
+    }
+    lines
 }
 
 #[derive(Debug, Default)]
@@ -608,6 +1226,202 @@ fn bootout_launch_agent(path: &Path) -> Vec<String> {
         "launchctl",
         &["bootout", &format!("gui/{uid}"), &path.to_string_lossy()],
     )
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn path_is_older_than_days(path: &Path, days: u64) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    SystemTime::now()
+        .duration_since(modified)
+        .map(|age| age >= Duration::from_secs(days * 24 * 60 * 60))
+        .unwrap_or(false)
+}
+
+fn saved_state_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| {
+            let stem = name
+                .strip_suffix(".savedState")
+                .unwrap_or(name)
+                .strip_suffix(".savedstate")
+                .unwrap_or(name);
+            humanize_identifier(stem)
+        })
+        .unwrap_or_else(|| "Saved State".to_string())
+}
+
+fn collect_sqlite_candidates(root: &Path, out: &mut Vec<PathBuf>, max_depth: usize) {
+    if max_depth == 0 || !root.exists() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_sqlite_candidates(&path, out, max_depth.saturating_sub(1));
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".db") || name.ends_with(".sqlite") || name.starts_with("Envelope Index")
+        {
+            out.push(path);
+        }
+    }
+}
+
+fn looks_like_sqlite_database(path: &Path) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0_u8; 16];
+    file.read_exact(&mut header).is_ok() && header.starts_with(b"SQLite format 3")
+}
+
+fn sqlite_target_label(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let app = if text.contains("/Library/Mail/") {
+        "Mail"
+    } else if text.contains("/Library/Messages/") {
+        "Messages"
+    } else if text.contains("/Library/Safari/") {
+        "Safari"
+    } else {
+        "App"
+    };
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("database");
+    format!("{app} {name}")
+}
+
+fn launch_services_register_path() -> Option<PathBuf> {
+    [
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+        "/System/Library/CoreServices/CoreTypes.bundle/Contents/Library/lsregister",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.exists())
+}
+
+fn running_any(names: &[&str]) -> bool {
+    names.iter().any(|name| process_is_running(name))
+}
+
+fn running_browser_name() -> Option<&'static str> {
+    [
+        "Safari",
+        "Google Chrome",
+        "Chromium",
+        "Arc",
+        "Firefox",
+        "Brave Browser",
+        "Microsoft Edge",
+    ]
+    .into_iter()
+    .find(|name| process_is_running(name))
+}
+
+fn process_is_running(name: &str) -> bool {
+    run_command_capture("pgrep", &["-x", name]).is_ok()
+        || run_command_capture("pgrep", &["-f", name]).is_ok()
+}
+
+fn home_permissions_need_repair() -> bool {
+    let Some(home) = home_dir() else {
+        return false;
+    };
+    let probe = home.join(format!(".preen-permission-probe-{}", std::process::id()));
+    if fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe)
+        .is_err()
+    {
+        return true;
+    }
+    let _ = fs::remove_file(probe);
+    let uid = run_command_capture("id", &["-u"])
+        .ok()
+        .map(|value| value.trim().to_string());
+    let owner = run_command_capture("stat", &["-f", "%u", home.to_string_lossy().as_ref()])
+        .ok()
+        .map(|value| value.trim().to_string());
+    uid.is_some() && owner.is_some() && uid != owner
+}
+
+fn bluetooth_dependency_active() -> bool {
+    let profile =
+        run_command_capture("system_profiler", &["SPBluetoothDataType"]).unwrap_or_default();
+    let lower = profile.to_ascii_lowercase();
+    lower.contains("keyboard")
+        || lower.contains("mouse")
+        || lower.contains("trackpad")
+        || lower.contains("headphones")
+        || lower.contains("airpods")
+}
+
+fn spotlight_search_looks_slow() -> bool {
+    let start = Instant::now();
+    let _ = run_command_capture("mdfind", &["kMDItemFSName == 'Applications'"]);
+    start.elapsed() > Duration::from_secs(2)
+}
+
+fn on_ac_power() -> bool {
+    run_command_capture("pmset", &["-g", "batt"])
+        .map(|output| output.to_ascii_lowercase().contains("ac power"))
+        .unwrap_or(false)
+}
+
+fn run_command_capture(command: &str, args: &[&str]) -> Result<String, String> {
+    let mut process = ProcessCommand::new(command);
+    process
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let start = Instant::now();
+    let mut child = process
+        .spawn()
+        .map_err(|error| format!("{command} ({error})"))?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|error| format!("{command} ({error})"))?;
+                if status.success() {
+                    return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+                }
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return Err(if stderr.is_empty() {
+                    format!("{command} exited with {status}")
+                } else {
+                    stderr
+                });
+            }
+            Ok(None) if start.elapsed() >= COMMAND_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{command} timed out"));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(error) => return Err(format!("{command} ({error})")),
+        }
+    }
 }
 
 fn run_command(command: &str, args: &[&str]) -> Vec<String> {
