@@ -1,5 +1,6 @@
 use crate::i18n::{Language, TextKey, tr};
-use crate::model::{APPLICATIONS_VISIBLE_ROWS, ActiveView, AppState};
+use crate::model::{APPLICATIONS_VISIBLE_ROWS, ActiveView, AppState, PERFORMANCE_VISIBLE_ROWS};
+use preen_core::performance_view::{PerformanceTaskTarget, PerformanceViewModel};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -63,6 +64,11 @@ pub(super) fn render_main_container(frame: &mut Frame<'_>, area: Rect, state: &A
     if matches!(state.active_view, ActiveView::Applications) && state.smart_care_has_analyze_result
     {
         render_applications_main_container(frame, area, state);
+        return;
+    }
+    if matches!(state.active_view, ActiveView::Performance) && state.performance_has_analyze_result
+    {
+        render_performance_main_container(frame, area, state);
         return;
     }
 
@@ -261,6 +267,194 @@ fn render_applications_main_container(frame: &mut Frame<'_>, area: Rect, state: 
     );
 }
 
+fn render_performance_main_container(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let (border_color, title_color) = theme::main_container_colors(state);
+    let title = Line::from(vec![Span::styled(
+        format!(
+            " {} ",
+            state
+                .active_view
+                .title_for_language(state.effective_language())
+        ),
+        Style::default()
+            .fg(title_color)
+            .add_modifier(Modifier::BOLD),
+    )]);
+    let container = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+    let inner = container.inner(area);
+    frame.render_widget(container, area);
+
+    let vertical = Layout::vertical([Constraint::Length(4), Constraint::Min(8)]).split(inner);
+
+    let header =
+        Paragraph::new(performance_header_lines(state)).style(Style::default().fg(PALETTE_TEXT));
+    frame.render_widget(header, vertical[0]);
+
+    let list_inner = Block::default()
+        .title("")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(PALETTE_LINE))
+        .inner(vertical[1]);
+    let row_width = list_inner.width.saturating_sub(2) as usize;
+    let viewport_height = list_inner.height as usize;
+    let content_length = state.performance_tasks.len().max(1);
+    let max_scroll = content_length.saturating_sub(viewport_height);
+    let mut list_scroll_offset = 0usize;
+    let mut relative_selection = None;
+    let visible_tasks = if state.performance_tasks.is_empty() {
+        Vec::new()
+    } else {
+        let selected = state
+            .performance_selected_row
+            .min(state.performance_tasks.len().saturating_sub(1));
+        let visible_rows = viewport_height.max(1).min(PERFORMANCE_VISIBLE_ROWS);
+        let computed_offset = selected
+            .saturating_sub(visible_rows.saturating_sub(1))
+            .min(max_scroll);
+        list_scroll_offset = computed_offset;
+        relative_selection = Some(selected.saturating_sub(computed_offset));
+        state
+            .performance_tasks
+            .iter()
+            .skip(computed_offset)
+            .take(visible_rows)
+            .collect::<Vec<_>>()
+    };
+
+    let list_items = if state.performance_tasks.is_empty() {
+        vec![ListItem::new(localized(
+            state,
+            "  no optimization task found",
+            "  keine Optimierungsaufgabe gefunden",
+        ))]
+    } else {
+        visible_tasks
+            .into_iter()
+            .map(|task| {
+                let selected = if state.performance_selected_tasks.contains(&task.id) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                };
+                let left = format!(" {selected} {}", task.label);
+                let priority = if task.recommended {
+                    localized(state, "recommended", "empfohlen")
+                } else {
+                    localized(state, "optional", "optional")
+                };
+                let right = format!(
+                    "{} · {} · {}",
+                    priority,
+                    task.kind.label(),
+                    task.risk.label()
+                );
+                ListItem::new(right_aligned_status_line(&left, &right, row_width))
+                    .style(Style::default().fg(PALETTE_TEXT))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut list_state = ListState::default();
+    if state.performance_tasks.is_empty() {
+        list_state.select(None);
+    } else {
+        list_state.select(relative_selection);
+    }
+
+    let recommended = state
+        .performance_tasks
+        .iter()
+        .filter(|task| task.recommended)
+        .count();
+    let scan_suffix = if state.performance_scan_revision > 0 {
+        format!(
+            " · {} #{}",
+            localized(state, "scan", "Scan"),
+            state.performance_scan_revision
+        )
+    } else {
+        String::new()
+    };
+    let list_widget = List::new(list_items)
+        .block(
+            Block::default()
+                .title(format!(
+                    " {} ({}/{}) · recommended {}{} ",
+                    localized(state, "Optimization tasks", "Optimierungsaufgaben"),
+                    state.performance_selected_count(),
+                    state.performance_tasks.len(),
+                    recommended,
+                    scan_suffix
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(PALETTE_LINE)),
+        )
+        .style(Style::default().fg(PALETTE_TEXT))
+        .highlight_style(Style::default().bg(PALETTE_ACCENT).fg(Color::Black))
+        .highlight_symbol("▶");
+    frame.render_stateful_widget(list_widget, vertical[1], &mut list_state);
+
+    render_vertical_scrollbar(
+        frame,
+        list_inner,
+        viewport_height,
+        content_length,
+        list_scroll_offset,
+    );
+}
+
+fn performance_header_lines(state: &AppState) -> Vec<Line<'static>> {
+    let Some(snapshot) = &state.snapshot else {
+        return vec![
+            Line::from(localized(
+                state,
+                "a analyze | r reanalyze | j/k move | space select | v details | x optimize selected",
+                "a Analyse | r erneut | j/k bewegen | Leertaste wählen | v Details | x optimieren",
+            )),
+            Line::from(""),
+            Line::from(""),
+            Line::from(""),
+        ];
+    };
+    let model = PerformanceViewModel::from_snapshot(snapshot);
+    vec![
+        Line::from(format!(
+            "{}: {} | {}: {}",
+            localized(state, "System pressure", "Systemdruck"),
+            model.overall_level.label(),
+            localized(state, "Bottleneck", "Engpass"),
+            model.primary_bottleneck
+        )),
+        Line::from(format!(
+            "CPU {} | Memory {} | Disk I/O {} MB/s",
+            percent_label(model.cpu_usage_pct),
+            percent_label(model.memory_used_pct),
+            rate_label(model.disk_io_rate_mbps)
+        )),
+        Line::from(localized(
+            state,
+            "j/k move | space select | v details | x optimize selected | r reanalyze",
+            "j/k bewegen | Leertaste wählen | v Details | x optimieren | r erneut",
+        )),
+        Line::from(""),
+    ]
+}
+
+fn percent_label(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.1}%"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn rate_label(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.2}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
 fn right_aligned_status_line(left: &str, right: &str, width: usize) -> String {
     if width == 0 {
         return left.to_string();
@@ -363,6 +557,14 @@ pub(super) fn smart_care_review_popup_area(area: Rect) -> Rect {
 }
 
 pub(super) fn render_info_popup(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    if matches!(state.active_view, ActiveView::Performance)
+        && state.performance_detail().is_some()
+        && !state.performance_show_action_details
+    {
+        render_performance_detail_popup(frame, area, state);
+        return;
+    }
+
     let popup_area = info_popup_area(area);
     frame.render_widget(Clear, popup_area);
 
@@ -411,6 +613,171 @@ pub(super) fn render_info_popup(frame: &mut Frame<'_>, area: Rect, state: &AppSt
             effective_scroll as usize,
         );
     }
+}
+
+fn render_performance_detail_popup(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(detail) = state.performance_detail() else {
+        return;
+    };
+    let popup_area = info_popup_area(area);
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(format!(" {} ", detail.title))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(PALETTE_ACCENT));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let vertical = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Min(5),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let mut summary_lines = vec![
+        Line::from(detail.summary.clone()),
+        Line::from(""),
+        Line::from(localized(state, "Notes", "Notizen")),
+    ];
+    if detail.notes.is_empty() {
+        summary_lines.push(Line::from(localized(
+            state,
+            "- No extra notes for this task.",
+            "- Keine weiteren Hinweise für diese Aufgabe.",
+        )));
+    } else {
+        summary_lines.extend(
+            detail
+                .notes
+                .iter()
+                .take(2)
+                .map(|note| Line::from(format!("- {note}"))),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(summary_lines)
+            .style(Style::default().fg(PALETTE_TEXT))
+            .wrap(Wrap { trim: false }),
+        vertical[0],
+    );
+
+    let list_area = vertical[1];
+    let list_inner = Block::default()
+        .title(format!(
+            " {} ({}/{}) ",
+            localized(state, "Items", "Einträge"),
+            detail
+                .targets
+                .iter()
+                .filter(|target| state.performance_selected_target_ids.contains(&target.id))
+                .count(),
+            detail.targets.len()
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(PALETTE_LINE))
+        .inner(list_area);
+    let row_width = list_inner.width.saturating_sub(2) as usize;
+    let viewport_height = list_inner.height as usize;
+    let content_length = detail.targets.len().max(1);
+    let max_scroll = content_length.saturating_sub(viewport_height);
+    let mut list_scroll_offset = 0usize;
+    let mut relative_selection = None;
+    let visible_targets = if detail.targets.is_empty() {
+        Vec::new()
+    } else {
+        let selected = state
+            .performance_detail_selected_row
+            .min(detail.targets.len().saturating_sub(1));
+        let visible_rows = viewport_height.max(1);
+        let computed_offset = selected
+            .saturating_sub(visible_rows.saturating_sub(1))
+            .min(max_scroll);
+        list_scroll_offset = computed_offset;
+        relative_selection = Some(selected.saturating_sub(computed_offset));
+        detail
+            .targets
+            .iter()
+            .skip(computed_offset)
+            .take(visible_rows)
+            .collect::<Vec<_>>()
+    };
+
+    let list_items = if detail.targets.is_empty() {
+        vec![ListItem::new(localized(
+            state,
+            "  no item needs review",
+            "  kein Eintrag muss geprüft werden",
+        ))]
+    } else {
+        visible_targets
+            .into_iter()
+            .map(|target| performance_detail_target_item(target, state, row_width))
+            .collect::<Vec<_>>()
+    };
+    let mut list_state = ListState::default();
+    if detail.targets.is_empty() {
+        list_state.select(None);
+    } else {
+        list_state.select(relative_selection);
+    }
+    let list = List::new(list_items)
+        .block(
+            Block::default()
+                .title(format!(
+                    " {} ({}/{}) ",
+                    localized(state, "Items", "Einträge"),
+                    detail
+                        .targets
+                        .iter()
+                        .filter(|target| state.performance_selected_target_ids.contains(&target.id))
+                        .count(),
+                    detail.targets.len()
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(PALETTE_LINE)),
+        )
+        .style(Style::default().fg(PALETTE_TEXT))
+        .highlight_style(Style::default().bg(PALETTE_ACCENT).fg(Color::Black))
+        .highlight_symbol("▶");
+    frame.render_stateful_widget(list, list_area, &mut list_state);
+    render_vertical_scrollbar(
+        frame,
+        list_inner,
+        viewport_height,
+        content_length,
+        list_scroll_offset,
+    );
+
+    let footer = localized(
+        state,
+        "j/k move | space select item | x runs selected tasks | close: v/i/Esc",
+        "j/k bewegen | Leertaste wählen | x führt Auswahl aus | schließen: v/i/Esc",
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(footer)).style(Style::default().fg(PALETTE_TEXT)),
+        vertical[2],
+    );
+}
+
+fn performance_detail_target_item(
+    target: &PerformanceTaskTarget,
+    state: &AppState,
+    row_width: usize,
+) -> ListItem<'static> {
+    let selected = if state.performance_selected_target_ids.contains(&target.id) {
+        "[x]"
+    } else {
+        "[ ]"
+    };
+    let mut status = target.risk.label().to_string();
+    if target.requires_admin {
+        status.push_str(" · admin");
+    }
+    let left = format!(" {selected} {}", target.label);
+    ListItem::new(right_aligned_status_line(&left, &status, row_width))
+        .style(Style::default().fg(PALETTE_TEXT))
 }
 
 pub(super) fn info_popup_area(area: Rect) -> Rect {
