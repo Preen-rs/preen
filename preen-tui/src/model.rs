@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 const TUI_CONFIG_FILE: &str = "tui.conf";
 pub const APPLICATIONS_VISIBLE_ROWS: usize = 36;
-pub const PERFORMANCE_VISIBLE_ROWS: usize = 12;
+pub const PERFORMANCE_VISIBLE_ROWS: usize = 20;
 pub const PERFORMANCE_DETAIL_VISIBLE_TARGETS: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2454,7 +2454,7 @@ mod tests {
     fn performance_selection_scrolls_after_visible_window() {
         let mut state = AppState {
             performance_has_analyze_result: true,
-            performance_tasks: (0..20)
+            performance_tasks: (0..30)
                 .map(|index| PerformanceOptimizationTask {
                     id: format!("task_{index}"),
                     label: format!("Task {index}"),

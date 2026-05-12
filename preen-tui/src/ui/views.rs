@@ -868,22 +868,16 @@ fn performance_lines(
                 localized(state, "optional", "optional")
             };
             let left = format!(
-                "  {marker} {selected} {:<11} {}",
-                recommendation,
-                truncate_with_ellipsis(&task.label, 36)
+                "  {marker} {selected} {}",
+                truncate_with_ellipsis(&task.label, 44)
             );
-            let right = format!("[{} · {}]", task.kind.label(), task.risk.label());
+            let right = format!(
+                "[{} · {} · {}]",
+                recommendation,
+                task.kind.label(),
+                task.risk.label()
+            );
             lines.push(Line::from(right_aligned_text(&left, &right, content_width)));
-            for wrapped in wrap_with_prefix(
-                "      ",
-                &truncate_with_ellipsis(&task.reason, content_width.saturating_sub(8)),
-                content_width,
-            ) {
-                lines.push(Line::from(Span::styled(
-                    wrapped,
-                    Style::default().fg(PALETTE_LINE),
-                )));
-            }
         }
         let rendered_end = start.saturating_add(PERFORMANCE_VISIBLE_ROWS);
         if rendered_end < state.performance_tasks.len() {
@@ -2630,7 +2624,7 @@ fn coming_soon_lines(state: &AppState) -> Vec<Line<'static>> {
 mod tests {
     use super::{
         applications_lines, build_info_popup_lines, build_smart_care_review_popup_lines,
-        capability_lines, check_lines, plugin_lines, smart_care_lines,
+        capability_lines, check_lines, performance_lines, plugin_lines, smart_care_lines,
     };
     use crate::i18n::LanguagePreference;
     use crate::model::{ActiveView, AppState, PluginActionKind};
@@ -2645,7 +2639,8 @@ mod tests {
         StatusCheck,
     };
     use preen_core::performance_view::{
-        PerformanceTaskDetail, PerformanceTaskRisk, PerformanceTaskTarget,
+        PerformanceOptimizationTask, PerformanceTaskDetail, PerformanceTaskKind,
+        PerformanceTaskRisk, PerformanceTaskTarget,
     };
     use preen_core::smart_care::{SmartCareCapability, SmartCarePluginDescriptor};
     use std::path::PathBuf;
@@ -3056,6 +3051,53 @@ mod tests {
         assert!(text.contains("Recommendations"));
         assert!(text.contains("Optimization tasks"));
         assert!(text.contains("[run] Inspect top processes"));
+    }
+
+    #[test]
+    fn performance_task_list_matches_application_row_style() {
+        let snapshot = base_snapshot();
+        let mut state = AppState {
+            active_view: ActiveView::Performance,
+            performance_has_analyze_result: true,
+            performance_tasks: vec![
+                PerformanceOptimizationTask {
+                    id: "flush_dns_cache".to_string(),
+                    label: "Flush DNS cache".to_string(),
+                    description: String::new(),
+                    kind: PerformanceTaskKind::SafeMaintenance,
+                    risk: PerformanceTaskRisk::Low,
+                    recommended: true,
+                    reason: "network maintenance only; does not change user data".to_string(),
+                },
+                PerformanceOptimizationTask {
+                    id: "refresh_dock".to_string(),
+                    label: "Refresh Dock".to_string(),
+                    description: String::new(),
+                    kind: PerformanceTaskKind::SafeMaintenance,
+                    risk: PerformanceTaskRisk::Low,
+                    recommended: false,
+                    reason: "Dock restarts automatically and rebuilds its visual cache".to_string(),
+                },
+            ],
+            performance_scan_revision: 1,
+            ..AppState::default()
+        };
+        state
+            .performance_selected_tasks
+            .insert("flush_dns_cache".to_string());
+
+        let text = performance_lines(&state, &snapshot, 120)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("▶ [x] Flush DNS cache"));
+        assert!(text.contains("[recommended · safe · low]"));
+        assert!(text.contains("  [ ] Refresh Dock"));
+        assert!(text.contains("[optional · safe · low]"));
+        assert!(!text.contains("network maintenance only"));
+        assert!(!text.contains("Dock restarts automatically"));
     }
 
     #[test]
