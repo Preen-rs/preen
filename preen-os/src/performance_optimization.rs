@@ -55,6 +55,15 @@ pub fn execute(
             "flush_dns_cache" => flush_dns_cache(),
             "sync_filesystem_buffers" => sync_filesystem_buffers(),
             "memory_pressure_relief" => memory_pressure_relief(),
+            "thin_local_snapshots" => {
+                let detail = detail_by_id.get(selection.task_id.as_str()).copied();
+                thin_local_snapshots(detail, &target_ids)
+            }
+            "run_periodic_maintenance" => run_periodic_maintenance(),
+            "reset_app_store_cache" => {
+                let detail = detail_by_id.get(selection.task_id.as_str()).copied();
+                reset_app_store_cache(detail, &target_ids)
+            }
             "refresh_finder_caches" => {
                 let detail = detail_by_id.get(selection.task_id.as_str()).copied();
                 refresh_finder_caches(detail, &target_ids)
@@ -228,6 +237,38 @@ fn detail_for_task(
             notes: vec!["Asks the OS to flush pending filesystem buffers.".to_string()],
             targets: Vec::new(),
         },
+        "thin_local_snapshots" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Lists Time Machine local snapshots reported by tmutil.".to_string(),
+                "Snapshots are not selected by default and may require administrator approval."
+                    .to_string(),
+            ],
+            targets: local_snapshot_targets(),
+        },
+        "run_periodic_maintenance" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Runs the macOS periodic daily, weekly, and monthly scripts.".to_string(),
+                "No user documents are deleted, but the task can take time.".to_string(),
+            ],
+            targets: Vec::new(),
+        },
+        "reset_app_store_cache" => PerformanceTaskDetail {
+            task_id: task.id.clone(),
+            title: task.label.clone(),
+            summary: task.description.clone(),
+            notes: vec![
+                "Quits App Store and update helper processes before clearing selected caches."
+                    .to_string(),
+                "Use after stuck or failed Mac App Store updates.".to_string(),
+            ],
+            targets: app_store_cache_targets(),
+        },
         "memory_pressure_relief" => PerformanceTaskDetail {
             task_id: task.id.clone(),
             title: task.label.clone(),
@@ -346,6 +387,100 @@ fn memory_pressure_relief() -> Vec<String> {
         }
     }
     lines.push("skipped: purge command is not available".to_string());
+    lines
+}
+
+fn thin_local_snapshots(
+    detail: Option<&PerformanceTaskDetail>,
+    selected_target_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: local snapshot thinning is macOS-only".to_string()];
+    }
+    let Some(detail) = detail else {
+        return vec!["failed: local snapshot detail is unavailable".to_string()];
+    };
+    if selected_target_ids.is_empty() {
+        return vec!["skipped: no local snapshot selected".to_string()];
+    }
+
+    let mut lines = Vec::new();
+    for target in &detail.targets {
+        if !selected_target_ids.contains(&target.id) {
+            continue;
+        }
+        let Some(snapshot_date) = target.description.strip_prefix("snapshot: ") else {
+            lines.push(format!("skipped: {} has no snapshot date", target.label));
+            continue;
+        };
+        let snapshot_date = snapshot_date
+            .strip_prefix("com.apple.TimeMachine.")
+            .unwrap_or(snapshot_date)
+            .strip_suffix(".local")
+            .unwrap_or(snapshot_date);
+        lines.push(format!("checking: thinning {}", target.label));
+        lines.extend(run_command(
+            "tmutil",
+            &["deletelocalsnapshots", snapshot_date],
+        ));
+    }
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: selected local snapshots thinned".to_string());
+    }
+    if lines.is_empty() {
+        lines.push("skipped: selected snapshots were not found".to_string());
+    }
+    lines
+}
+
+fn run_periodic_maintenance() -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: periodic maintenance is macOS-only".to_string()];
+    }
+    let Some(periodic) = ["/usr/sbin/periodic"]
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+    else {
+        return vec!["skipped: periodic helper is not available".to_string()];
+    };
+    let mut lines = vec!["checking: running periodic maintenance".to_string()];
+    lines.extend(run_command(periodic, &["daily", "weekly", "monthly"]));
+    if lines.iter().any(|line| line.starts_with("done:")) {
+        lines.push("done: periodic maintenance completed".to_string());
+    }
+    lines
+}
+
+fn reset_app_store_cache(
+    detail: Option<&PerformanceTaskDetail>,
+    selected_target_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return vec!["skipped: App Store cache reset is macOS-only".to_string()];
+    }
+    let mut lines = vec!["checking: resetting App Store update cache".to_string()];
+    let _ = run_command_capture(
+        "osascript",
+        &["-e", "tell application \"App Store\" to quit"],
+    );
+    for process in [
+        "App Store",
+        "appstoreagent",
+        "appstored",
+        "storedownloadd",
+        "storeagent",
+        "storeuid",
+        "commerce",
+    ] {
+        let _ = run_command_capture("pkill", &["-x", process]);
+    }
+    let removed = remove_selected_targets(detail, selected_target_ids, "App Store cache");
+    if removed.is_empty() {
+        lines.push("skipped: no App Store cache selected".to_string());
+    } else {
+        lines.extend(removed);
+    }
+    lines.push("done: App Store update helpers refreshed".to_string());
     lines
 }
 
@@ -626,6 +761,10 @@ fn update_login_items(
         if !selected_target_ids.contains(&target.id) {
             continue;
         }
+        if let Some(unit) = target.id.strip_prefix("systemd_user__") {
+            lines.extend(disable_user_systemd_unit(unit));
+            continue;
+        }
         let Some(path) = target.path.as_deref().map(Path::new) else {
             lines.push(format!("skipped: {} has no path", target.label));
             continue;
@@ -638,13 +777,16 @@ fn update_login_items(
             continue;
         }
         if !is_user_launch_agent(path) {
-            lines.push(format!(
-                "skipped: {} is outside user LaunchAgents",
-                target.label
-            ));
-            continue;
+            if !is_user_autostart_entry(path) {
+                lines.push(format!(
+                    "skipped: {} is outside user startup locations",
+                    target.label
+                ));
+                continue;
+            }
+        } else {
+            let _ = bootout_launch_agent(path);
         }
-        let _ = bootout_launch_agent(path);
         match trash::delete(path) {
             Ok(()) => lines.push(format!("removed: {}", target.label)),
             Err(error) => lines.push(format!("failed: {} ({error})", target.label)),
@@ -664,7 +806,8 @@ fn login_item_targets() -> Vec<PerformanceTaskTarget> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("plist") {
+            let extension = path.extension().and_then(|value| value.to_str());
+            if extension != Some("plist") && extension != Some("desktop") {
                 continue;
             }
             let fallback_label = path
@@ -674,7 +817,12 @@ fn login_item_targets() -> Vec<PerformanceTaskTarget> {
                 .to_string();
             let info = read_launch_plist_info(&path);
             let launch_label = info.label.as_deref().unwrap_or(&fallback_label);
-            let label = human_launch_label(launch_label, info.executable.as_deref());
+            let label = if extension == Some("desktop") {
+                read_desktop_entry_name(&path)
+                    .unwrap_or_else(|| humanize_identifier(&fallback_label))
+            } else {
+                human_launch_label(launch_label, info.executable.as_deref())
+            };
             let description =
                 launch_item_description(&root, launch_label, info.executable.as_deref());
             targets.push(PerformanceTaskTarget {
@@ -692,12 +840,77 @@ fn login_item_targets() -> Vec<PerformanceTaskTarget> {
             });
         }
     }
+    targets.extend(user_systemd_targets());
     targets.sort_by(|left, right| {
         left.requires_admin
             .cmp(&right.requires_admin)
             .then_with(|| left.label.cmp(&right.label))
     });
     targets
+}
+
+fn local_snapshot_targets() -> Vec<PerformanceTaskTarget> {
+    if std::env::consts::OS != "macos" {
+        return Vec::new();
+    }
+    let output = run_command_capture("tmutil", &["listlocalsnapshots", "/"]).unwrap_or_default();
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("com.apple.TimeMachine."))
+        .map(|snapshot| {
+            let date = snapshot
+                .strip_prefix("com.apple.TimeMachine.")
+                .unwrap_or(snapshot)
+                .strip_suffix(".local")
+                .unwrap_or(snapshot);
+            PerformanceTaskTarget {
+                id: format!("tm_snapshot__{}", stable_target_text(snapshot)),
+                label: format!("Time Machine {date}"),
+                description: format!("snapshot: {snapshot}"),
+                path: None,
+                selected_by_default: false,
+                requires_admin: true,
+                risk: PerformanceTaskRisk::Medium,
+            }
+        })
+        .collect()
+}
+
+fn app_store_cache_targets() -> Vec<PerformanceTaskTarget> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    [
+        (
+            "App Store cache",
+            home.join("Library")
+                .join("Caches")
+                .join("com.apple.appstore"),
+        ),
+        (
+            "App Store cache store",
+            home.join("Library")
+                .join("Caches")
+                .join("com.apple.AppStore"),
+        ),
+        (
+            "App Store daemon cache",
+            home.join("Library")
+                .join("Caches")
+                .join("com.apple.appstored"),
+        ),
+        (
+            "Store commerce cache",
+            home.join("Library")
+                .join("Caches")
+                .join("com.apple.commerce"),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, path)| path.exists())
+    .map(|(label, path)| target_from_path(label, "Mac App Store update cache", path, false, true))
+    .collect()
 }
 
 fn finder_cache_targets() -> Vec<PerformanceTaskTarget> {
@@ -943,6 +1156,16 @@ fn read_launch_plist_info(path: &Path) -> LaunchPlistInfo {
     LaunchPlistInfo { label, executable }
 }
 
+fn read_desktop_entry_name(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    content.lines().find_map(|line| {
+        line.strip_prefix("Name=")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
 fn plist_string_value(content: &str, key: &str) -> Option<String> {
     let key_marker = format!("<key>{key}</key>");
     let after_key = content.split(&key_marker).nth(1)?;
@@ -1170,11 +1393,20 @@ struct LoginItemRoot {
 fn login_item_roots() -> Vec<LoginItemRoot> {
     let mut roots = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
-        roots.push(LoginItemRoot {
-            label: "User LaunchAgent",
-            path: PathBuf::from(home).join("Library").join("LaunchAgents"),
-            requires_admin: false,
-        });
+        let home = PathBuf::from(home);
+        if std::env::consts::OS == "linux" {
+            roots.push(LoginItemRoot {
+                label: "User autostart entry",
+                path: home.join(".config").join("autostart"),
+                requires_admin: false,
+            });
+        } else {
+            roots.push(LoginItemRoot {
+                label: "User LaunchAgent",
+                path: home.join("Library").join("LaunchAgents"),
+                requires_admin: false,
+            });
+        }
     }
     if std::env::consts::OS == "macos" {
         roots.push(LoginItemRoot {
@@ -1192,7 +1424,11 @@ fn login_item_roots() -> Vec<LoginItemRoot> {
 }
 
 fn stable_target_id(path: &Path) -> String {
-    path.to_string_lossy()
+    stable_target_text(&path.to_string_lossy())
+}
+
+fn stable_target_text(value: &str) -> String {
+    value
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() {
@@ -1209,6 +1445,55 @@ fn is_user_launch_agent(path: &Path) -> bool {
         return false;
     };
     path.starts_with(home.join("Library").join("LaunchAgents"))
+}
+
+fn is_user_autostart_entry(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return false;
+    };
+    path.starts_with(home.join(".config").join("autostart"))
+        && path.extension().and_then(|value| value.to_str()) == Some("desktop")
+}
+
+fn user_systemd_targets() -> Vec<PerformanceTaskTarget> {
+    if std::env::consts::OS != "linux" {
+        return Vec::new();
+    }
+    let output = run_command_capture(
+        "systemctl",
+        &[
+            "--user",
+            "list-unit-files",
+            "--state=enabled",
+            "--no-legend",
+            "--no-pager",
+        ],
+    )
+    .unwrap_or_default();
+    output
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|unit| unit.ends_with(".service") || unit.ends_with(".timer"))
+        .map(|unit| PerformanceTaskTarget {
+            id: format!("systemd_user__{unit}"),
+            label: humanize_identifier(unit),
+            description: format!("User systemd unit | id: {unit}"),
+            path: None,
+            selected_by_default: false,
+            requires_admin: false,
+            risk: PerformanceTaskRisk::Low,
+        })
+        .collect()
+}
+
+fn disable_user_systemd_unit(unit_id: &str) -> Vec<String> {
+    let unit = unit_id;
+    let mut lines = vec![format!("checking: disabling user unit {unit}")];
+    lines.extend(run_command(
+        "systemctl",
+        &["--user", "disable", "--now", &unit],
+    ));
+    lines
 }
 
 fn bootout_launch_agent(path: &Path) -> Vec<String> {
