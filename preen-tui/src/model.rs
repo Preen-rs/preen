@@ -4,7 +4,8 @@ use preen_core::app_uninstall::{AppUpdateAvailability, InstalledApplication};
 pub use preen_core::dashboard::DashboardSnapshot;
 use preen_core::performance_view::{
     PerformanceAnalyzeOutput, PerformanceOptimizationTask, PerformanceOptimizeResult,
-    PerformanceOptimizeSelection, PerformanceTaskDetail,
+    PerformanceOptimizeSelection, PerformanceTaskDetail, PerformanceTaskKind, PerformanceTaskRisk,
+    PerformanceTaskTarget,
 };
 pub use preen_core::smart_care::{
     SmartCareCapability, SmartCarePluginDescriptor, SmartCarePreview, SmartCareProfile,
@@ -1045,13 +1046,13 @@ impl AppState {
         self.performance_selected_tasks.clear();
         self.performance_selected_target_ids.clear();
         for task in &self.performance_tasks {
-            if task.recommended {
+            if performance_task_selected_by_default(task) {
                 self.performance_selected_tasks.insert(task.id.clone());
             }
         }
         for detail in self.performance_task_details.values() {
             for target in &detail.targets {
-                if target.selected_by_default {
+                if performance_target_selected_by_default(target) {
                     self.performance_selected_target_ids
                         .insert(target.id.clone());
                 }
@@ -1786,6 +1787,19 @@ fn duplicate_application_names(applications: &[InstalledApplication]) -> BTreeSe
     duplicates
 }
 
+fn performance_task_selected_by_default(task: &PerformanceOptimizationTask) -> bool {
+    task.recommended
+        && task.risk == PerformanceTaskRisk::Low
+        && matches!(
+            task.kind,
+            PerformanceTaskKind::Inspect | PerformanceTaskKind::SafeMaintenance
+        )
+}
+
+fn performance_target_selected_by_default(target: &PerformanceTaskTarget) -> bool {
+    target.selected_by_default && !target.requires_admin && target.risk == PerformanceTaskRisk::Low
+}
+
 fn application_update_status_line(app: &InstalledApplication) -> String {
     let name = &app.identity.display_name;
     if app.protected {
@@ -2437,6 +2451,122 @@ mod tests {
 
         assert_eq!(state.performance_selected_row, PERFORMANCE_VISIBLE_ROWS);
         assert_eq!(state.performance_list_offset, 1);
+    }
+
+    #[test]
+    fn performance_analyze_auto_selects_only_low_risk_recommendations() {
+        use preen_core::performance_view::{
+            PerformanceLevel, PerformanceTaskKind, PerformanceTaskRisk, PerformanceTaskTarget,
+            PerformanceViewModel,
+        };
+
+        fn task(
+            id: &str,
+            kind: PerformanceTaskKind,
+            risk: PerformanceTaskRisk,
+            recommended: bool,
+        ) -> PerformanceOptimizationTask {
+            PerformanceOptimizationTask {
+                id: id.to_string(),
+                label: id.to_string(),
+                description: String::new(),
+                kind,
+                risk,
+                recommended,
+                reason: String::new(),
+            }
+        }
+
+        let mut state = AppState::default();
+        state.apply_performance_analyze_result(PerformanceAnalyzeOutput {
+            model: PerformanceViewModel {
+                overall_level: PerformanceLevel::Normal,
+                primary_bottleneck: "none".to_string(),
+                cpu_usage_pct: None,
+                cpu_temperature_c: None,
+                load_per_core: None,
+                memory_used_pct: None,
+                memory_pressure: None,
+                process_count: None,
+                disk_io_rate_mbps: None,
+                top_processes: Vec::new(),
+                optimization_tasks: vec![
+                    task(
+                        "inspect",
+                        PerformanceTaskKind::Inspect,
+                        PerformanceTaskRisk::Low,
+                        true,
+                    ),
+                    task(
+                        "safe",
+                        PerformanceTaskKind::SafeMaintenance,
+                        PerformanceTaskRisk::Low,
+                        true,
+                    ),
+                    task(
+                        "admin",
+                        PerformanceTaskKind::AdminMaintenance,
+                        PerformanceTaskRisk::Medium,
+                        true,
+                    ),
+                    task(
+                        "medium_safe",
+                        PerformanceTaskKind::SafeMaintenance,
+                        PerformanceTaskRisk::Medium,
+                        true,
+                    ),
+                    task(
+                        "optional",
+                        PerformanceTaskKind::SafeMaintenance,
+                        PerformanceTaskRisk::Low,
+                        false,
+                    ),
+                ],
+                recommendations: Vec::new(),
+            },
+            details: vec![PerformanceTaskDetail {
+                task_id: "safe".to_string(),
+                title: "Safe".to_string(),
+                summary: String::new(),
+                notes: Vec::new(),
+                targets: vec![
+                    PerformanceTaskTarget {
+                        id: "safe_target".to_string(),
+                        label: "safe target".to_string(),
+                        description: String::new(),
+                        path: None,
+                        selected_by_default: true,
+                        requires_admin: false,
+                        risk: PerformanceTaskRisk::Low,
+                    },
+                    PerformanceTaskTarget {
+                        id: "admin_target".to_string(),
+                        label: "admin target".to_string(),
+                        description: String::new(),
+                        path: None,
+                        selected_by_default: true,
+                        requires_admin: true,
+                        risk: PerformanceTaskRisk::Medium,
+                    },
+                ],
+            }],
+        });
+
+        assert!(state.performance_selected_tasks.contains("inspect"));
+        assert!(state.performance_selected_tasks.contains("safe"));
+        assert!(!state.performance_selected_tasks.contains("admin"));
+        assert!(!state.performance_selected_tasks.contains("medium_safe"));
+        assert!(!state.performance_selected_tasks.contains("optional"));
+        assert!(
+            state
+                .performance_selected_target_ids
+                .contains("safe_target")
+        );
+        assert!(
+            !state
+                .performance_selected_target_ids
+                .contains("admin_target")
+        );
     }
 
     #[test]
