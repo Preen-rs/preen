@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 const TUI_CONFIG_FILE: &str = "tui.conf";
 pub const APPLICATIONS_VISIBLE_ROWS: usize = 36;
 pub const PERFORMANCE_VISIBLE_ROWS: usize = 28;
-pub const PERFORMANCE_DETAIL_VISIBLE_TARGETS: usize = 5;
+pub const PERFORMANCE_DETAIL_VISIBLE_TARGETS: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveView {

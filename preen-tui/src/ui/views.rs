@@ -282,33 +282,15 @@ pub(super) fn build_info_popup_lines(state: &AppState, content_width: usize) -> 
                     } else {
                         "[ ]"
                     };
-                    let admin = if target.requires_admin {
-                        " | admin"
-                    } else {
-                        ""
-                    };
+                    let admin = if target.requires_admin { " admin" } else { "" };
                     let title = format!(
-                        "{marker} {selected} {}  [{}{}]",
+                        "{marker} {selected} {} [{}{}]",
                         target.label,
                         target.risk.label(),
                         admin
                     );
                     for wrapped in wrap_with_prefix("", &title, content_width) {
                         lines.push(Line::from(wrapped));
-                    }
-                    for wrapped in wrap_with_prefix("    ", &target.description, content_width) {
-                        lines.push(Line::from(Span::styled(
-                            wrapped,
-                            Style::default().fg(PALETTE_LINE),
-                        )));
-                    }
-                    if let Some(path) = target.path.as_deref() {
-                        for wrapped in wrap_with_prefix("    ", path, content_width) {
-                            lines.push(Line::from(Span::styled(
-                                wrapped,
-                                Style::default().fg(PALETTE_LINE),
-                            )));
-                        }
                     }
                 }
                 if rendered_end < detail.targets.len() {
@@ -2653,6 +2635,9 @@ mod tests {
         DashboardMetrics, DashboardSnapshot, PluginRow, ProcessMetric, RegistrySummary,
         StatusCheck,
     };
+    use preen_core::performance_view::{
+        PerformanceTaskDetail, PerformanceTaskRisk, PerformanceTaskTarget,
+    };
     use preen_core::smart_care::{SmartCareCapability, SmartCarePluginDescriptor};
     use std::path::PathBuf;
 
@@ -2831,6 +2816,63 @@ mod tests {
         assert!(text.contains("inside the popup instead of"));
         assert!(text.contains("disappearing beyond"));
         assert!(text.contains("right edge"));
+    }
+
+    #[test]
+    fn performance_detail_targets_show_names_without_paths() {
+        let mut state = AppState {
+            active_view: ActiveView::Performance,
+            show_info_popup: true,
+            performance_detail_task_id: Some("inspect_login_items".to_string()),
+            performance_detail_selected_row: 1,
+            ..AppState::default()
+        };
+        state.performance_task_details.insert(
+            "inspect_login_items".to_string(),
+            PerformanceTaskDetail {
+                task_id: "inspect_login_items".to_string(),
+                title: "Inspect login items".to_string(),
+                summary: "Select startup agents".to_string(),
+                notes: Vec::new(),
+                targets: vec![
+                    PerformanceTaskTarget {
+                        id: "google-agent".to_string(),
+                        label: "Google Keystone Agent".to_string(),
+                        description: "User LaunchAgent | id: com.google.keystone.agent".to_string(),
+                        path: Some(
+                            "/Users/test/Library/LaunchAgents/com.google.keystone.agent.plist"
+                                .to_string(),
+                        ),
+                        selected_by_default: false,
+                        requires_admin: false,
+                        risk: PerformanceTaskRisk::Low,
+                    },
+                    PerformanceTaskTarget {
+                        id: "jetbrains".to_string(),
+                        label: "JetBrains Toolbox".to_string(),
+                        description: "User LaunchAgent | id: com.jetbrains.toolbox".to_string(),
+                        path: Some(
+                            "/Users/test/Library/LaunchAgents/com.jetbrains.toolbox.plist"
+                                .to_string(),
+                        ),
+                        selected_by_default: false,
+                        requires_admin: false,
+                        risk: PerformanceTaskRisk::Low,
+                    },
+                ],
+            },
+        );
+
+        let text = build_info_popup_lines(&state, 80)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Google Keystone Agent [low]"));
+        assert!(text.contains("▶ [ ] JetBrains Toolbox [low]"));
+        assert!(!text.contains("/Users/test/Library/LaunchAgents"));
+        assert!(!text.contains("com.jetbrains.toolbox"));
     }
 
     #[test]
