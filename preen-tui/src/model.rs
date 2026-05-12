@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 const TUI_CONFIG_FILE: &str = "tui.conf";
 pub const APPLICATIONS_VISIBLE_ROWS: usize = 36;
-pub const PERFORMANCE_VISIBLE_ROWS: usize = 28;
+pub const PERFORMANCE_VISIBLE_ROWS: usize = 12;
 pub const PERFORMANCE_DETAIL_VISIBLE_TARGETS: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2411,6 +2411,32 @@ mod tests {
         state.close_keybindings_popup();
         assert!(!state.show_keybindings_popup);
         assert_eq!(state.keybindings_popup_scroll, 0);
+    }
+
+    #[test]
+    fn performance_selection_scrolls_after_visible_window() {
+        let mut state = AppState {
+            performance_has_analyze_result: true,
+            performance_tasks: (0..20)
+                .map(|index| PerformanceOptimizationTask {
+                    id: format!("task_{index}"),
+                    label: format!("Task {index}"),
+                    description: String::new(),
+                    kind: preen_core::performance_view::PerformanceTaskKind::Inspect,
+                    risk: preen_core::performance_view::PerformanceTaskRisk::Low,
+                    recommended: false,
+                    reason: String::new(),
+                })
+                .collect(),
+            ..AppState::default()
+        };
+
+        for _ in 0..PERFORMANCE_VISIBLE_ROWS {
+            state.performance_select_next();
+        }
+
+        assert_eq!(state.performance_selected_row, PERFORMANCE_VISIBLE_ROWS);
+        assert_eq!(state.performance_list_offset, 1);
     }
 
     #[test]

@@ -90,20 +90,20 @@ pub(super) fn render_main_container(frame: &mut Frame<'_>, area: Rect, state: &A
     let content_length = lines.len();
     let max_scroll = lines.len().saturating_sub(viewport_height) as u16;
     let effective_scroll = state.main_scroll.min(max_scroll);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+    let inner = block.inner(area);
     let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color)),
-        )
+        .block(block)
         .style(Style::default().fg(PALETTE_TEXT))
         .scroll((effective_scroll, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
     render_vertical_scrollbar(
         frame,
-        area,
+        inner,
         viewport_height,
         content_length,
         effective_scroll as usize,
